@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      # Tests create git repos and commit in them
+      - name: Configure git identity
+        run: |
+          git config --global user.name "ci"
+          git config --global user.email "ci@noreply.local"
+
+      - run: npm ci
+      - run: npm test
+      - run: npm run build
+
+      - name: Docker build
+        run: docker build -t second-brain-mcp:ci .
+
+      - name: Validate compose files
+        env:
+          HOST_UID: "1000"
+          HOST_GID: "1000"
+        run: |
+          docker compose -f docker-compose.yaml config -q
+          IMAGE_TAG=ci docker compose -f docker-compose-prod.yml config -q
