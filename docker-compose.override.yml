@@ -6,6 +6,9 @@ services:
     labels: !reset []
     volumes:
       - ../second-brain-vault-dev:/vault
-      - ./data:/data
+      - acl-data-dev:/data
     environment:
       - NODE_ENV=development
+
+volumes:
+  acl-data-dev:

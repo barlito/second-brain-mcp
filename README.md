@@ -6,7 +6,7 @@ Status: scaffolding phase. This PR sets up the Node.js/TypeScript project, Docke
 
 ## Local dev quickstart
 
-No `.env` file is needed for local dev: `docker-compose.override.yml` is auto-applied by Docker Compose and removes the Traefik/network dependency, publishing the port directly instead. (`.env.example` only documents the variables needed for the production compose file — see below.)
+No `.env` file is needed for local dev: `docker-compose.override.yml` is auto-applied by Docker Compose and removes the Traefik/network dependency, publishing the port directly instead. (`.env.example` only documents the variables needed for the production compose file — see below.) `MCP_DOMAIN`, `TRAEFIK_CERT_RESOLVER`, and `TRAEFIK_NETWORK_NAME` are required (no silent defaults) in `docker-compose.yml` for production; the `Makefile` passes harmless placeholder values for local dev only, since Compose interpolates the base file before the override discards the labels/network that would have used them.
 
 ```bash
 make up
@@ -21,4 +21,4 @@ Run `make help` to see all available commands.
 
 ## Production deployment
 
-`docker-compose.yml` is the production file (Traefik labels, external network, GitHub Actions CI/CD, etc.) and is meant to run on the VPS, not locally. That full deployment pipeline is a later phase and is not implemented yet.
+`docker-compose.yml` is the production file (Traefik labels, external network, GitHub Actions CI/CD, etc.) and is meant to run on the VPS, not locally. It stores the vault and the SQLite ACL database in named Docker volumes (`vault-data`, `acl-data`) rather than host bind-mounts, so a missing/misconfigured environment fails loudly instead of silently mounting the wrong directory. That full deployment pipeline is a later phase and is not implemented yet — in particular, the real VPS target is Docker Swarm, which will require `deploy:`-scoped labels, a pre-built registry image instead of `build:`, and the shared `traefik_traefik_proxy` overlay network (see comment in `docker-compose.yml`).

@@ -3,6 +3,20 @@ services:
   # Serveur MCP exposant la base de connaissances partagée (vault Git
   # compatible Obsidian) à Claude, via des tokens d'accès par projet
   # ────────────────────────────────────────────────────────────────
+  #
+  # NOTE (phase actuelle — scaffolding) : ce fichier reste volontairement
+  # au format "plain compose" ; seul docker-compose.override.yml est
+  # réellement exercé aujourd'hui (local dev via `make up`). Le vrai
+  # déploiement sur le VPS se fait via Docker Swarm (`docker stack
+  # deploy`), ce qui nécessitera, dans une phase de déploiement ultérieure :
+  #   - des labels Traefik sous `deploy: labels:` (et non au niveau racine
+  #     du service comme ci-dessous) ;
+  #   - une image pré-construite et poussée sur un registry, car `build:`
+  #     n'est pas supporté par Swarm ;
+  #   - le réseau overlay partagé `traefik_traefik_proxy` au lieu du
+  #     réseau `traefik` externe déclaré ci-dessous.
+  # Ce n'est pas fait maintenant — c'est explicitement hors scope de cette PR.
+  # ──────────────────────────────────────────────────────────────
   second-brain-mcp:
     build: .
     container_name: second-brain-mcp
@@ -12,19 +26,23 @@ services:
       - VAULT_PATH=/vault
       - DB_PATH=/data/acl.db
     volumes:
-      - ${VAULT_HOST_PATH:-.}:/vault
-      - ./data:/data
+      - vault-data:/vault
+      - acl-data:/data
     networks:
       - traefik
     labels:
       - "traefik.enable=true"
-      - "traefik.http.routers.second-brain-mcp.rule=Host(`${MCP_DOMAIN:-localhost}`)"
+      - "traefik.http.routers.second-brain-mcp.rule=Host(`${MCP_DOMAIN:?MCP_DOMAIN must be set}`)"
       - "traefik.http.routers.second-brain-mcp.entrypoints=websecure"
-      - "traefik.http.routers.second-brain-mcp.tls.certresolver=${TRAEFIK_CERT_RESOLVER:-letsencrypt}"
+      - "traefik.http.routers.second-brain-mcp.tls.certresolver=${TRAEFIK_CERT_RESOLVER:?TRAEFIK_CERT_RESOLVER must be set}"
       - "traefik.http.services.second-brain-mcp.loadbalancer.server.port=3000"
     restart: unless-stopped
 
 networks:
   traefik:
     external: true
-    name: ${TRAEFIK_NETWORK_NAME:-traefik}
+    name: ${TRAEFIK_NETWORK_NAME:?TRAEFIK_NETWORK_NAME must be set}
+
+volumes:
+  vault-data:
+  acl-data:
