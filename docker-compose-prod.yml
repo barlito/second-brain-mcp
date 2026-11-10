@@ -1,0 +1,54 @@
+# ────────────────────────────────────────────────────────────────
+# Serveur MCP exposant la base de connaissances partagée (vault Git
+# compatible Obsidian) à Claude, via des tokens d'accès par projet
+# ────────────────────────────────────────────────────────────────
+#
+# Variante PRODUCTION. Déployée (en théorie) de la même façon que le
+# local, via `docker stack deploy`, mais :
+#   - image publiée sur un registry (ghcr.io) au lieu d'un `build:`
+#     local — Swarm ne sait pas construire d'image au déploiement ;
+#   - domaine et TLS de prod (certresolver + redirection HTTP->HTTPS).
+#
+# NOTE — placeholder structurel, PAS prêt à être déployé aujourd'hui :
+# aucune CI/pipeline ne pousse encore `ghcr.io/barlito/second-brain-mcp`
+# sur un registry. Ce fichier documente la forme cible pour une phase
+# de déploiement ultérieure ; `make deploy.prod` échouera tant que
+# l'image n'existe pas réellement.
+services:
+  second-brain-mcp:
+    image: ghcr.io/barlito/second-brain-mcp:latest
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - VAULT_PATH=/vault
+      - DB_PATH=/data/acl.db
+    volumes:
+      - vault-data:/vault
+      - acl-data:/data
+    networks:
+      - traefik_traefik_proxy
+    deploy:
+      replicas: 1
+      labels:
+        - traefik.enable=true
+
+        - traefik.http.services.second-brain-mcp.loadbalancer.server.port=3000
+
+        - traefik.http.routers.second-brain-mcp.rule=Host(`second-brain.barlito.fr`)
+        - traefik.http.routers.second-brain-mcp.entrypoints=http
+        - traefik.http.routers.second-brain-mcp.middlewares=redirect-to-https@file
+
+        - traefik.http.routers.second-brain-mcp-secure.rule=Host(`second-brain.barlito.fr`)
+        - traefik.http.routers.second-brain-mcp-secure.entrypoints=https
+        - traefik.http.routers.second-brain-mcp-secure.tls=true
+        - traefik.http.routers.second-brain-mcp-secure.tls.certresolver=letsencrypt
+        # Auth native (Bearer token ACL, PR2/PR4) -> pas d'authelia-auth, seulement les headers
+        - traefik.http.routers.second-brain-mcp-secure.middlewares=security-headers@file
+
+networks:
+  traefik_traefik_proxy:
+    external: true
+
+volumes:
+  vault-data:
+  acl-data:

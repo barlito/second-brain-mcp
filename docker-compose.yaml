@@ -1,0 +1,50 @@
+# ────────────────────────────────────────────────────────────────
+# Serveur MCP exposant la base de connaissances partagée (vault Git
+# compatible Obsidian) à Claude, via des tokens d'accès par projet
+# ────────────────────────────────────────────────────────────────
+#
+# Fichier de dev LOCAL, déployé via Docker Swarm (comme en prod) pour
+# coller exactement au comportement réel : `docker stack deploy`
+# ignore `build:`, donc on construit l'image nous-mêmes avec
+# `docker compose build` (d'où le `build:` ci-dessous) puis on la
+# référence par son tag local `second-brain-mcp:local` (pas de
+# registry nécessaire, Swarm single-node trouve l'image locale).
+#
+# Voir docker-compose-prod.yml pour la variante production (domaine,
+# TLS, image publiée).
+services:
+  second-brain-mcp:
+    build: .
+    image: second-brain-mcp:local
+    environment:
+      - NODE_ENV=development
+      - PORT=3000
+      - VAULT_PATH=/vault
+      - DB_PATH=/data/acl.db
+    volumes:
+      - ../second-brain-vault-dev:/vault
+      - acl-data:/data
+    networks:
+      - traefik_traefik_proxy
+    deploy:
+      replicas: 1
+      labels:
+        - traefik.enable=true
+
+        - traefik.http.services.second-brain-mcp.loadbalancer.server.port=3000
+
+        - traefik.http.routers.second-brain-mcp.rule=Host(`second-brain.local.barlito.fr`)
+        - traefik.http.routers.second-brain-mcp.entrypoints=http
+
+        - traefik.http.routers.second-brain-mcp-secure.rule=Host(`second-brain.local.barlito.fr`)
+        - traefik.http.routers.second-brain-mcp-secure.entrypoints=https
+        - traefik.http.routers.second-brain-mcp-secure.tls=true
+        # Auth native (Bearer token ACL, PR2/PR4) -> pas d'authelia-auth, seulement les headers
+        - traefik.http.routers.second-brain-mcp-secure.middlewares=security-headers@file
+
+networks:
+  traefik_traefik_proxy:
+    external: true
+
+volumes:
+  acl-data:

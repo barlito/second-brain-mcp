@@ -6,19 +6,24 @@ Status: scaffolding phase. This PR sets up the Node.js/TypeScript project, Docke
 
 ## Local dev quickstart
 
-No `.env` file is needed for local dev: `docker-compose.override.yml` is auto-applied by Docker Compose and removes the Traefik/network dependency, publishing the port directly instead. (`.env.example` only documents the variables needed for the production compose file — see below.) `MCP_DOMAIN`, `TRAEFIK_CERT_RESOLVER`, and `TRAEFIK_NETWORK_NAME` are required (no silent defaults) in `docker-compose.yml` for production; the `Makefile` passes harmless placeholder values for local dev only, since Compose interpolates the base file before the override discards the labels/network that would have used them.
+Local dev runs in Docker Swarm, exactly like production — this matches how every other app in this setup is run (see `traefik-base`, `affine`, etc.): a single node Swarm cluster, apps deployed via `docker stack deploy`, routed through a shared Traefik stack. No `.env` file is needed: the local domain (`second-brain.local.barlito.fr`) and Traefik options are hardcoded in `docker-compose.yaml`, and `*.local.barlito.fr` already resolves to `127.0.0.1` on this network.
+
+Requires Docker Swarm to be initialized (`docker swarm init`) and the shared `traefik_traefik_proxy` overlay network to exist (provided by the `traefik-base` stack, deployed separately).
 
 ```bash
-make up
-curl http://localhost:3000/health
+make deploy
+curl -sk https://second-brain.local.barlito.fr/health
 # => {"status":"ok"}
-make down
+make logs service=second-brain-mcp
+make undeploy
 ```
 
-The local override bind-mounts `../second-brain-vault-dev` into the container at `/vault`, so that directory must exist as a sibling of this repo on your machine.
+`docker stack deploy` doesn't build images, so `make deploy` runs `docker compose build` first to produce the `second-brain-mcp:local` image tag that `docker-compose.yaml` references — no registry needed for a single-node Swarm.
+
+`docker-compose.yaml` bind-mounts `../second-brain-vault-dev` into the container at `/vault`, so that directory must exist as a sibling of this repo on your machine. The SQLite ACL database lives in a named volume (`acl-data`).
 
 Run `make help` to see all available commands.
 
 ## Production deployment
 
-`docker-compose.yml` is the production file (Traefik labels, external network, GitHub Actions CI/CD, etc.) and is meant to run on the VPS, not locally. It stores the vault and the SQLite ACL database in named Docker volumes (`vault-data`, `acl-data`) rather than host bind-mounts, so a missing/misconfigured environment fails loudly instead of silently mounting the wrong directory. That full deployment pipeline is a later phase and is not implemented yet — in particular, the real VPS target is Docker Swarm, which will require `deploy:`-scoped labels, a pre-built registry image instead of `build:`, and the shared `traefik_traefik_proxy` overlay network (see comment in `docker-compose.yml`).
+`docker-compose-prod.yml` mirrors the local file's structure but targets the real domain (`second-brain.barlito.fr`), adds the Let's Encrypt cert resolver and HTTP→HTTPS redirect middleware, and references a published image (`ghcr.io/barlito/second-brain-mcp:latest`) instead of a local `build:`. **It is a structural placeholder, not deployable yet** — no CI/CD pipeline currently publishes that image to a registry. Once that pipeline exists, production deployment follows the same pattern as local: `make deploy.prod`.

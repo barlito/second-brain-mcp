@@ -1,34 +1,27 @@
 .DEFAULT_GOAL := help
-.PHONY: help up down restart pull status logs
+.PHONY: help deploy deploy.prod undeploy restart logs
 
-# docker-compose.yml rend MCP_DOMAIN / TRAEFIK_CERT_RESOLVER / TRAEFIK_NETWORK_NAME
-# obligatoires (${VAR:?...}) pour échouer bruyamment en cas d'oubli en PRODUCTION.
-# Mais Docker Compose interpole les variables de chaque fichier AVANT de fusionner
-# avec l'override — donc même si docker-compose.override.yml neutralise ensuite les
-# labels/network concernés (!reset []) pour le dev local, l'interpolation du fichier
-# de base échouerait quand même sans valeur. Ces valeurs fictives ne servent qu'à
-# satisfaire cette interpolation ; elles ne sont jamais réellement utilisées en local.
-LOCAL_DEV_ENV := MCP_DOMAIN=localhost TRAEFIK_CERT_RESOLVER=local-dev-unused TRAEFIK_NETWORK_NAME=local-dev-unused
+stack_name=second-brain-mcp
 
 help: ## Affiche cette aide
 	@echo "second-brain-mcp — commandes disponibles :"
-	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
-	  | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-10s\033[0m %s\n", $$1, $$2}'
+	@grep -E '^[a-zA-Z_.-]+:.*?## .*$$' $(MAKEFILE_LIST) \
+	  | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
 
-up: ## Démarre le serveur en local (docker compose, override auto-appliqué)
-	$(LOCAL_DEV_ENV) docker compose up -d --build
+deploy: ## Build l'image et déploie la stack en local (Swarm)
+	docker compose build
+	docker compose config | sed '/^name:/d; s/published: "\([0-9]*\)"/published: \1/g' | docker stack deploy -c - $(stack_name)
 
-down: ## Arrête le serveur
-	$(LOCAL_DEV_ENV) docker compose down
+deploy.prod: ## Déploie en prod (nécessite une image publiée — pas encore le cas)
+	docker compose -f docker-compose-prod.yml config | sed '/^name:/d; s/published: "\([0-9]*\)"/published: \1/g' | docker stack deploy -c - $(stack_name)
 
-restart: ## Redémarre le serveur
-	$(LOCAL_DEV_ENV) docker compose restart
+undeploy: ## Retire la stack
+	docker stack rm $(stack_name)
 
-pull: ## Reconstruit l'image (pas de registry distant pour l'instant)
-	$(LOCAL_DEV_ENV) docker compose build --no-cache
+restart: ## Redémarre (undeploy puis deploy)
+	$(MAKE) undeploy
+	sleep 5
+	$(MAKE) deploy
 
-status: ## État du conteneur
-	$(LOCAL_DEV_ENV) docker compose ps
-
-logs: ## Suit les logs du serveur (Ctrl+C pour sortir)
-	$(LOCAL_DEV_ENV) docker compose logs -f
+logs: ## Suit les logs (make logs service=second-brain-mcp)
+	docker service logs -f $(stack_name)_$(service)
