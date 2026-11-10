@@ -1,3 +1,4 @@
+import { lstatSync, realpathSync } from "node:fs";
 import path from "node:path";
 
 const SLUG_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
@@ -25,6 +26,40 @@ function assertInsideRoot(resolvedRoot: string, resolvedPath: string): void {
   }
 }
 
+// Lexical checks are not enough: a symlink arriving via `git pull` can point
+// anywhere (outside the vault, or at another project's directory). Walk to the
+// deepest existing ancestor and require its real path to equal the lexical
+// one, i.e. no component of the existing prefix is a symlink.
+export function assertSafePath(vaultRoot: string, target: string): void {
+  const root = path.resolve(vaultRoot);
+  const abs = path.resolve(target);
+  assertInsideRoot(root, abs);
+
+  let realRoot: string;
+  try {
+    realRoot = realpathSync(root);
+  } catch {
+    return; // vault root doesn't exist yet: nothing inside it can be a symlink
+  }
+
+  let cur = abs;
+  for (;;) {
+    try {
+      if (lstatSync(cur).isSymbolicLink()) throw new Error(`symlink not allowed in vault: ${cur}`);
+      break;
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code !== "ENOENT" && code !== "ENOTDIR") throw err;
+      if (cur === root) return;
+      cur = path.dirname(cur);
+    }
+  }
+
+  if (realpathSync(cur) !== path.join(realRoot, path.relative(root, cur))) {
+    throw new Error(`path resolves outside its expected location: ${abs}`);
+  }
+}
+
 function assertValidSlug(kind: string, value: string): void {
   if (!isValidSlug(value)) throw new InvalidSlugError(`invalid ${kind} slug: ${value}`);
 }
@@ -43,6 +78,12 @@ export function resolveNotePath(
   const resolvedPath = path.resolve(resolvedRoot, project, section, `${note}.md`);
 
   assertInsideRoot(resolvedRoot, resolvedPath);
+  assertSafePath(resolvedRoot, resolvedPath);
+  try {
+    if (!lstatSync(resolvedPath).isFile()) throw new Error(`not a regular file: ${resolvedPath}`);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+  }
 
   return resolvedPath;
 }
@@ -55,6 +96,7 @@ export function resolveSectionDir(vaultRoot: string, project: string, section: s
   const resolvedPath = path.resolve(resolvedRoot, project, section);
 
   assertInsideRoot(resolvedRoot, resolvedPath);
+  assertSafePath(resolvedRoot, resolvedPath);
 
   return resolvedPath;
 }
