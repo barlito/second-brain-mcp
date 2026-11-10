@@ -3,12 +3,18 @@
 
 stack_name=second-brain-mcp
 
+# Runs the local container as the host user instead of the image's appuser,
+# so it can read/write the bind-mounted vault (host-owned, different uid).
+export HOST_UID := $(shell id -u)
+export HOST_GID := $(shell id -g)
+
 help: ## Show this help
 	@echo "second-brain-mcp — available commands:"
 	@grep -E '^[a-zA-Z_.-]+:.*?## .*$$' $(MAKEFILE_LIST) \
 	  | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
 
 deploy: ## Build the image and deploy the stack locally (Swarm)
+	mkdir -p data
 	docker compose build
 	docker compose config | sed '/^name:/d; s/published: "\([0-9]*\)"/published: \1/g' | docker stack deploy -c - $(stack_name)
 

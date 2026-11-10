@@ -13,6 +13,11 @@ services:
   second-brain-mcp:
     build: .
     image: second-brain-mcp:local
+    # Both mounts below are bind mounts owned by the host user, not the
+    # image's appuser — run as the host uid/gid (set by `make deploy`)
+    # instead. Prod uses named volumes owned by appuser (see Dockerfile),
+    # so it doesn't need this.
+    user: "${HOST_UID}:${HOST_GID}"
     environment:
       - NODE_ENV=development
       - PORT=3000
@@ -20,7 +25,7 @@ services:
       - DB_PATH=/data/acl.db
     volumes:
       - ../second-brain-vault-dev:/vault
-      - acl-data:/data
+      - ./data:/data
     networks:
       - traefik_traefik_proxy
     deploy:
@@ -42,6 +47,3 @@ services:
 networks:
   traefik_traefik_proxy:
     external: true
-
-volumes:
-  acl-data:
