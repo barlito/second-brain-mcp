@@ -1,24 +1,11 @@
 #!/usr/bin/env node
+import { parseArgs as nodeParseArgs } from "node:util";
 import { createToken, listTokens, revokeToken, Scope } from "../auth/tokens";
-
-function parseArgs(argv: string[]): Record<string, string> {
-  const args: Record<string, string> = {};
-  for (let i = 0; i < argv.length; i++) {
-    const arg = argv[i];
-    if (arg.startsWith("--")) {
-      const key = arg.slice(2);
-      const value = argv[i + 1];
-      args[key] = value;
-      i++;
-    }
-  }
-  return args;
-}
 
 function parseScopes(raw: string): Scope[] {
   return raw.split(",").map((entry) => {
     const parts = entry.split(":");
-    if (parts.length !== 3) {
+    if (parts.length !== 3 || !parts[0] || !parts[1]) {
       throw new Error(`invalid scope "${entry}", expected project:section:permission`);
     }
     const [project, section, permission] = parts;
@@ -34,8 +21,15 @@ function fail(message: string): never {
   process.exit(1);
 }
 
-function cmdCreate(args: Record<string, string>): void {
-  const { name, scope } = args;
+function cmdCreate(argv: string[]): void {
+  const { values } = nodeParseArgs({
+    args: argv,
+    options: {
+      name: { type: "string" },
+      scope: { type: "string" },
+    },
+  });
+  const { name, scope } = values;
   if (!name) fail("--name is required");
   if (!scope) fail("--scope is required");
 
@@ -77,8 +71,14 @@ function cmdList(): void {
   }
 }
 
-function cmdRevoke(args: Record<string, string>): void {
-  const { id } = args;
+function cmdRevoke(argv: string[]): void {
+  const { values } = nodeParseArgs({
+    args: argv,
+    options: {
+      id: { type: "string" },
+    },
+  });
+  const { id } = values;
   if (!id) fail("--id is required");
 
   const revoked = revokeToken(id);
@@ -91,18 +91,17 @@ function cmdRevoke(args: Record<string, string>): void {
 
 function main(): void {
   const [command, ...rest] = process.argv.slice(2);
-  const args = parseArgs(rest);
 
   try {
     switch (command) {
       case "create":
-        cmdCreate(args);
+        cmdCreate(rest);
         break;
       case "list":
         cmdList();
         break;
       case "revoke":
-        cmdRevoke(args);
+        cmdRevoke(rest);
         break;
       default:
         fail(`unknown command "${command}". Usage: token.js <create|list|revoke> [options]`);
