@@ -23,6 +23,9 @@ test("name is trimmed and length/control chars are validated", () => {
   assert.throws(() => t.createToken("x".repeat(65), ok), /1-64/);
   assert.throws(() => t.createToken("a\nb", ok), /control/);
   assert.throws(() => t.createToken("a\u0000b", ok), /control/);
+  for (const ch of ["\u202E", "\u200B", "\u2066", "\u2069"]) {
+    assert.throws(() => t.createToken(`a${ch}b`, ok), /format/, `U+${ch.codePointAt(0)!.toString(16)}`);
+  }
   assert.throws(() => t.createToken(undefined as unknown as string, ok), t.TokenValidationError);
 });
 
@@ -47,10 +50,28 @@ test("duplicate scopes are de-duplicated", () => {
   assert.equal(t.verifyToken(c.token)?.scopes.length, 2);
 });
 
-test("a rejected token leaves no rows behind", () => {
-  const before = t.listTokens().length;
-  assert.throws(() => t.createToken("n", [{ project: "BAD", section: "s", permission: "read" }]));
-  assert.equal(t.listTokens().length, before);
+test("a failed insert mid-transaction leaves no partial rows", () => {
+  const countTokens = () => (db.prepare("SELECT COUNT(*) c FROM tokens").get() as { c: number }).c;
+  const countScopes = () => (db.prepare("SELECT COUNT(*) c FROM scopes").get() as { c: number }).c;
+  const t0 = countTokens();
+  const s0 = countScopes();
+  // Validation passes; a trigger aborts the second scope insert, after the token and first scope were written.
+  db.exec(`CREATE TEMP TRIGGER fail_scope BEFORE INSERT ON scopes WHEN NEW.project = 'boom'
+           BEGIN SELECT RAISE(ABORT, 'forced'); END`);
+  try {
+    assert.throws(
+      () =>
+        t.createToken("rollback", [
+          { project: "proj", section: "sect", permission: "read" },
+          { project: "boom", section: "sect", permission: "read" },
+        ]),
+      /forced/,
+    );
+  } finally {
+    db.exec("DROP TRIGGER fail_scope");
+  }
+  assert.equal(countTokens(), t0);
+  assert.equal(countScopes(), s0);
 });
 
 test("verifyToken throttles last_used_at writes", () => {
@@ -68,4 +89,13 @@ test("verifyToken throttles last_used_at writes", () => {
   db.prepare("UPDATE tokens SET last_used_at = ? WHERE id = ?").run(stale, c.id);
   t.verifyToken(c.token);
   assert.notEqual(get(), stale);
+});
+
+test("verifyToken refreshes last_used_at when the stored time is in the future", () => {
+  const c = t.createToken("future", ok);
+  const future = new Date(Date.now() + 3_600_000).toISOString();
+  db.prepare("UPDATE tokens SET last_used_at = ? WHERE id = ?").run(future, c.id);
+  t.verifyToken(c.token);
+  const row = db.prepare("SELECT last_used_at FROM tokens WHERE id = ?").get(c.id) as { last_used_at: string };
+  assert.ok(row.last_used_at < future);
 });

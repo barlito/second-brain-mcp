@@ -1,6 +1,6 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -53,4 +53,18 @@ test("CLI: backup and prune-audit", () => {
   assert.equal(p.status, 0, p.stderr);
   assert.match(p.stdout, /Pruned 1 /);
   assert.notEqual(run("prune-audit").status, 0);
+});
+
+test("backup file is 0600 and a second backup fails without touching the first", async () => {
+  const dest = join(tmpDir, "mode.db");
+  await m.backupDb(dest);
+  assert.equal(statSync(dest).mode & 0o777, 0o600);
+  const before = readFileSync(dest);
+  await assert.rejects(m.backupDb(dest), /already exists/);
+  assert.ok(before.equals(readFileSync(dest)));
+});
+
+test("parseDays rejects huge values", () => {
+  assert.equal(m.parseDays("36500"), 36500);
+  assert.throws(() => m.parseDays("999999999"), /at most 36500/);
 });

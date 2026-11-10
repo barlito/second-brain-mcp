@@ -1,23 +1,16 @@
 #!/usr/bin/env node
 import { parseArgs as nodeParseArgs } from "node:util";
 import { createToken, listTokens, revokeToken } from "../auth/tokens";
-import { PERMISSIONS, Permission, Scope } from "../auth/types";
-import { isValidSlug } from "../vault/paths";
+import { Permission, Scope } from "../auth/types";
 
+// Shape only (project:section:permission); createToken validates the values.
 export function parseScopes(raw: string): Scope[] {
   return raw.split(",").map((entry) => {
     const parts = entry.split(":");
-    if (parts.length !== 3 || !parts[0] || !parts[1]) {
+    if (parts.length !== 3) {
       throw new Error(`invalid scope "${entry}", expected project:section:permission`);
     }
     const [project, section, permission] = parts;
-    // Early, entry-specific errors; createToken re-validates (domain layer).
-    if (!isValidSlug(project) || !isValidSlug(section)) {
-      throw new Error(`invalid scope "${entry}", project and section must be valid slugs`);
-    }
-    if (!(PERMISSIONS as readonly string[]).includes(permission)) {
-      throw new Error(`invalid permission "${permission}" in scope "${entry}", must be ${PERMISSIONS.join(" or ")}`);
-    }
     return { project, section, permission: permission as Permission };
   });
 }

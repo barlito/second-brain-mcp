@@ -24,8 +24,8 @@ export function validateTokenInput(name: unknown, scopes: unknown): { name: stri
     throw new TokenValidationError("name must be 1-64 characters");
   }
   // name ends up in git commit messages
-  if (/\p{Cc}|\p{Zl}|\p{Zp}/u.test(trimmed)) {
-    throw new TokenValidationError("name must not contain control characters or newlines");
+  if (/\p{Cc}|\p{Cf}|\p{Zl}|\p{Zp}/u.test(trimmed)) {
+    throw new TokenValidationError("name must not contain control, format or newline characters");
   }
   if (!Array.isArray(scopes) || scopes.length === 0) {
     throw new TokenValidationError("at least one scope is required");
@@ -129,7 +129,8 @@ export function verifyToken(plaintextToken: string): VerifiedToken | null {
   // Throttled: avoid a synchronous write on every request.
   const now = Date.now();
   const last = row.last_used_at ? Date.parse(row.last_used_at) : NaN;
-  if (Number.isNaN(last) || now - last >= LAST_USED_THROTTLE_MS) {
+  // last > now: clock stepped back, treat as stale.
+  if (Number.isNaN(last) || last > now || now - last >= LAST_USED_THROTTLE_MS) {
     updateLastUsedAtStmt.run(new Date(now).toISOString(), row.id);
   }
 

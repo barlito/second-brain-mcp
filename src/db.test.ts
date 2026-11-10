@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, statSync } from "node:fs";
+import { chmodSync, mkdtempSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
@@ -70,4 +70,93 @@ test("fresh DB lands at v2", async () => {
 test("DB file is created with mode 0600", async () => {
   await import("./db");
   assert.equal(statSync(process.env.DB_PATH!).mode & 0o777, 0o600);
+});
+
+test("legacy DB with an unrelated orphan scopes row still migrates to v2", async () => {
+  const { runMigrations } = await import("./db");
+  const d = new Database(join(tmpDir, "orphan.db"));
+  d.exec(OLD_SCHEMA);
+  d.pragma("foreign_keys = OFF");
+  d.prepare("INSERT INTO scopes (token_id, project, section, permission) VALUES ('ghost','p','s','read')").run();
+  d.pragma("foreign_keys = ON");
+  runMigrations(d);
+  assert.equal(d.pragma("user_version", { simple: true }), 2);
+  assert.equal((d.prepare("SELECT COUNT(*) c FROM scopes").get() as { c: number }).c, 1);
+  d.close();
+});
+
+test("a migration leaving FK violations in a table it touched fails and rolls back", async () => {
+  const { runMigrations, MIGRATIONS } = await import("./db");
+  const d = new Database(":memory:");
+  d.pragma("foreign_keys = ON");
+  runMigrations(d, [MIGRATIONS[0]]);
+  const bad = {
+    tables: ["scopes"],
+    up: (x: Database.Database) => {
+      x.prepare("INSERT INTO scopes (token_id, project, section, permission) VALUES ('nope','p','s','read')").run();
+    },
+  };
+  // runMigrations turns FK enforcement off, so the orphan insert succeeds and only the check catches it.
+  assert.throws(() => runMigrations(d, [MIGRATIONS[0], bad]), /foreign key/);
+  assert.equal(d.pragma("user_version", { simple: true }), 1);
+  assert.equal((d.prepare("SELECT COUNT(*) c FROM scopes").get() as { c: number }).c, 0);
+  d.close();
+});
+
+test("a migration that throws halfway rolls back, leaving the previous version and data", async () => {
+  const { runMigrations, MIGRATIONS } = await import("./db");
+  const d = new Database(":memory:");
+  runMigrations(d, [MIGRATIONS[0]]);
+  d.prepare("INSERT INTO tokens VALUES ('t1','n','h','2024-01-01',NULL,NULL)").run();
+  const boom = {
+    tables: [],
+    up: (x: Database.Database) => {
+      x.exec("DELETE FROM tokens; CREATE TABLE half (a INTEGER);");
+      throw new Error("boom");
+    },
+  };
+  assert.throws(() => runMigrations(d, [MIGRATIONS[0], boom]), /boom/);
+  assert.equal(d.pragma("user_version", { simple: true }), 1);
+  assert.equal((d.prepare("SELECT COUNT(*) c FROM tokens").get() as { c: number }).c, 1);
+  assert.equal(d.prepare("SELECT name FROM sqlite_master WHERE name = 'half'").get(), undefined);
+  d.close();
+});
+
+test("a second handle skips a migration another handle already applied", async () => {
+  const { migrateStep, MIGRATIONS } = await import("./db");
+  const file = join(tmpDir, "race.db");
+  const a = new Database(file);
+  const b = new Database(file);
+  b.pragma("busy_timeout = 5000");
+  let runs = 0;
+  const counted = MIGRATIONS.map((m) => ({
+    ...m,
+    up: (x: Database.Database) => {
+      runs++;
+      m.up(x);
+    },
+  }));
+  // Both handles observed v0; A wins, B must re-read inside its transaction and skip.
+  assert.equal(b.pragma("user_version", { simple: true }), 0);
+  migrateStep(a, 0, counted);
+  migrateStep(a, 1, counted);
+  migrateStep(b, 0, counted);
+  migrateStep(b, 1, counted);
+  assert.equal(runs, 2);
+  assert.equal(b.pragma("user_version", { simple: true }), 2);
+  a.close();
+  b.close();
+});
+
+test("an existing 0644 DB file is chmod'ed to 0600 on open", async () => {
+  const { spawnSync } = await import("node:child_process");
+  const file = join(tmpDir, "perm.db");
+  writeFileSync(file, "");
+  chmodSync(file, 0o644);
+  const r = spawnSync(process.execPath, ["--import", "tsx", "-e", `require(${JSON.stringify(join(__dirname, "db.ts"))})`], {
+    env: { ...process.env, DB_PATH: file },
+    encoding: "utf8",
+  });
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(statSync(file).mode & 0o777, 0o600);
 });

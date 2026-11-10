@@ -1,8 +1,8 @@
 import { db } from "./db";
 
 export interface AuditEntry {
-  tokenId?: string | null;
-  tokenName?: string | null;
+  tokenId: string;
+  tokenName: string;
   action: string;
   project?: string;
   section?: string;
@@ -26,12 +26,20 @@ const insertAuditStmt = db.prepare(
   `INSERT INTO audit_log (ts, token_id, token_name, action, project, section, note, result, detail, git_commit, client_ip)
    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 );
+export const MAX_PRUNE_DAYS = 36500;
 const pruneAuditStmt = db.prepare("DELETE FROM audit_log WHERE ts < ?");
 
 export function logAudit(entry: AuditEntry): void {
+  write(entry);
+}
+
+// Internal: only logAuthFailure may pass a null identity.
+function write(
+  entry: Omit<AuditEntry, "tokenId" | "tokenName"> & { tokenId: string | null; tokenName: string | null },
+): void {
   insertAuditStmt.run(
     new Date().toISOString(),
-    entry.tokenId ?? null,
+    entry.tokenId,
     cap(entry.tokenName),
     cap(entry.action),
     cap(entry.project),
@@ -46,7 +54,9 @@ export function logAudit(entry: AuditEntry): void {
 
 // Records a failed authentication attempt (no token identity).
 export function logAuthFailure(opts: { clientIp?: string; reason: string }): void {
-  logAudit({
+  write({
+    tokenId: null,
+    tokenName: null,
     action: "auth",
     result: "denied",
     clientIp: opts.clientIp,
@@ -56,8 +66,8 @@ export function logAuthFailure(opts: { clientIp?: string; reason: string }): voi
 
 // Deletes audit rows older than N days; returns the number deleted.
 export function pruneAudit(olderThanDays: number): number {
-  if (!Number.isFinite(olderThanDays) || olderThanDays < 0) {
-    throw new Error("olderThanDays must be a non-negative number");
+  if (!Number.isFinite(olderThanDays) || olderThanDays < 0 || olderThanDays > MAX_PRUNE_DAYS) {
+    throw new Error(`olderThanDays must be between 0 and ${MAX_PRUNE_DAYS}`);
   }
   const cutoff = new Date(Date.now() - olderThanDays * 86_400_000).toISOString();
   return pruneAuditStmt.run(cutoff).changes;

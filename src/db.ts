@@ -18,9 +18,15 @@ if (dbPath !== ":memory:") {
 
 // Ordered migrations; index + 1 == schema version stored in PRAGMA user_version.
 // Never edit a released migration — append a new one.
-export const MIGRATIONS: ReadonlyArray<(d: Database.Database) => void> = [
+export interface Migration {
+  // Tables the migration modifies; only these are FK-checked afterwards.
+  tables: string[];
+  up: (d: Database.Database) => void;
+}
+
+export const MIGRATIONS: ReadonlyArray<Migration> = [
   // 1: original schema (IF NOT EXISTS so pre-versioning DBs are adopted as-is)
-  (d) => {
+  { tables: [], up: (d) => {
     d.exec(`
       CREATE TABLE IF NOT EXISTS tokens (
         id TEXT PRIMARY KEY,
@@ -50,9 +56,9 @@ export const MIGRATIONS: ReadonlyArray<(d: Database.Database) => void> = [
         git_commit TEXT
       );
     `);
-  },
+  } },
   // 2: audit_log with nullable token_id/token_name (401s) + client_ip
-  (d) => {
+  { tables: ["audit_log"], up: (d) => {
     d.exec(`
       CREATE TABLE audit_log_new (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -71,27 +77,38 @@ export const MIGRATIONS: ReadonlyArray<(d: Database.Database) => void> = [
       DROP TABLE audit_log;
       ALTER TABLE audit_log_new RENAME TO audit_log;
     `);
-  },
+  } },
 ];
 
-// Applies pending migrations, each in its own transaction. Idempotent.
-export function runMigrations(d: Database.Database): void {
+// Applies migration index `v` under BEGIN IMMEDIATE. user_version is re-read inside the
+// write lock so a concurrent process that already applied it makes this a no-op.
+export function migrateStep(d: Database.Database, v: number, migrations: ReadonlyArray<Migration> = MIGRATIONS): void {
+  d.transaction(() => {
+    const cur = d.pragma("user_version", { simple: true }) as number;
+    if (cur > v) return;
+    migrations[v].up(d);
+    d.pragma(`user_version = ${v + 1}`);
+    for (const t of migrations[v].tables) {
+      const bad = d.pragma(`foreign_key_check(${JSON.stringify(t)})`) as unknown[];
+      if (bad.length > 0) throw new Error(`migration ${v + 1} left foreign key violations in ${t}`);
+    }
+  }).immediate();
+}
+
+// Applies pending migrations, each in its own transaction. Idempotent and multi-process safe.
+export function runMigrations(d: Database.Database, migrations: ReadonlyArray<Migration> = MIGRATIONS): void {
   const current = d.pragma("user_version", { simple: true }) as number;
-  if (current > MIGRATIONS.length) {
-    throw new Error(`DB schema version ${current} is newer than this build supports (${MIGRATIONS.length})`);
+  if (current > migrations.length) {
+    throw new Error(`DB schema version ${current} is newer than this build supports (${migrations.length})`);
   }
   // foreign_keys can't be toggled inside a transaction; off while rebuilding tables.
   const fkWasOn = d.pragma("foreign_keys", { simple: true }) === 1;
   if (fkWasOn) d.pragma("foreign_keys = OFF");
   try {
-    for (let v = current; v < MIGRATIONS.length; v++) {
-      d.transaction(() => {
-        MIGRATIONS[v](d);
-        d.pragma(`user_version = ${v + 1}`);
-        const bad = d.pragma("foreign_key_check") as unknown[];
-        if (bad.length > 0) throw new Error(`migration ${v + 1} left foreign key violations`);
-      })();
-    }
+    for (let v = current; v < migrations.length; v++) migrateStep(d, v, migrations);
+    // Pre-existing violations in untouched tables must not brick startup; just report.
+    const bad = d.pragma("foreign_key_check") as unknown[];
+    if (bad.length > 0) console.warn(`warning: ${bad.length} pre-existing foreign key violation(s) in DB`);
   } finally {
     if (fkWasOn) d.pragma("foreign_keys = ON");
   }

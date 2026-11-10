@@ -55,3 +55,9 @@ test("pruneAudit deletes only old rows and returns the count", () => {
   assert.equal((db.prepare("SELECT COUNT(*) c FROM audit_log").get() as { c: number }).c, 1);
   assert.throws(() => audit.pruneAudit(-1));
 });
+
+test("pruneAudit rejects out-of-range day counts", () => {
+  assert.throws(() => audit.pruneAudit(999_999_999), /between 0 and 36500/);
+  assert.throws(() => audit.pruneAudit(-1), /between 0 and/);
+  assert.equal(audit.pruneAudit(36500), 0);
+});

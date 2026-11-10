@@ -28,20 +28,19 @@ test("parseScopes accepts valid project:section:permission scopes", () => {
   ]);
 });
 
-test("parseScopes rejects a project slug that isn't a valid slug", () => {
-  assert.throws(() => parseScopes("My Project:sect:write"), /invalid scope/);
-});
-
-test("parseScopes rejects a section slug that isn't a valid slug", () => {
-  assert.throws(() => parseScopes("proj:Notes!:write"), /invalid scope/);
-});
-
-test("parseScopes rejects a path-traversal attempt in project or section", () => {
-  assert.throws(() => parseScopes("../../etc:sect:read"), /invalid scope/);
-  assert.throws(() => parseScopes("proj:../../etc:read"), /invalid scope/);
-});
-
-test("parseScopes rejects malformed entries and bad permissions", () => {
+test("parseScopes only checks shape; values are validated by createToken", () => {
   assert.throws(() => parseScopes("proj:sect"), /invalid scope/);
-  assert.throws(() => parseScopes("proj:sect:delete"), /invalid permission/);
+  assert.throws(() => parseScopes("a:b:c:d"), /invalid scope/);
+  assert.deepEqual(parseScopes("My Project:sect:delete"), [
+    { project: "My Project", section: "sect", permission: "delete" },
+  ]);
+});
+
+test("createToken rejects bad slugs, traversal and permissions parsed from the CLI", async () => {
+  const { createToken } = await import("../auth/tokens");
+  assert.throws(() => createToken("n", parseScopes("My Project:sect:write")), /invalid project slug/);
+  assert.throws(() => createToken("n", parseScopes("proj:Notes!:write")), /invalid section slug/);
+  assert.throws(() => createToken("n", parseScopes("../../etc:sect:read")), /invalid project slug/);
+  assert.throws(() => createToken("n", parseScopes("proj:../../etc:read")), /invalid section slug/);
+  assert.throws(() => createToken("n", parseScopes("proj:sect:delete")), /invalid permission/);
 });
