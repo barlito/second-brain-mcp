@@ -17,12 +17,21 @@ export class InvalidSlugError extends Error {
   }
 }
 
+// Thrown when a path is unsafe: a symlink, a non-regular file, or anything that
+// resolves outside the vault root. Lets callers map it to a client message.
+export class UnsafePathError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "UnsafePathError";
+  }
+}
+
 // Defense in depth: re-check the resolved path is still under vaultRoot, in
 // case something slips past the slug regex (e.g. a future regex change).
 function assertInsideRoot(resolvedRoot: string, resolvedPath: string): void {
   const prefix = resolvedRoot.endsWith(path.sep) ? resolvedRoot : resolvedRoot + path.sep;
   if (resolvedPath !== resolvedRoot && !resolvedPath.startsWith(prefix)) {
-    throw new Error(`resolved path escapes vault root: ${resolvedPath}`);
+    throw new UnsafePathError(`resolved path escapes vault root: ${resolvedPath}`);
   }
 }
 
@@ -45,7 +54,7 @@ export function assertSafePath(vaultRoot: string, target: string): void {
   let cur = abs;
   for (;;) {
     try {
-      if (lstatSync(cur).isSymbolicLink()) throw new Error(`symlink not allowed in vault: ${cur}`);
+      if (lstatSync(cur).isSymbolicLink()) throw new UnsafePathError(`symlink not allowed in vault: ${cur}`);
       break;
     } catch (err) {
       const code = (err as NodeJS.ErrnoException).code;
@@ -56,7 +65,7 @@ export function assertSafePath(vaultRoot: string, target: string): void {
   }
 
   if (realpathSync(cur) !== path.join(realRoot, path.relative(root, cur))) {
-    throw new Error(`path resolves outside its expected location: ${abs}`);
+    throw new UnsafePathError(`path resolves outside its expected location: ${abs}`);
   }
 }
 
@@ -80,7 +89,7 @@ export function resolveNotePath(
   assertInsideRoot(resolvedRoot, resolvedPath);
   assertSafePath(resolvedRoot, resolvedPath);
   try {
-    if (!lstatSync(resolvedPath).isFile()) throw new Error(`not a regular file: ${resolvedPath}`);
+    if (!lstatSync(resolvedPath).isFile()) throw new UnsafePathError(`not a regular file: ${resolvedPath}`);
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
   }

@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { resolveNotePath, resolveSectionDir } from "./paths";
+import { UnsafePathError, resolveNotePath, resolveSectionDir } from "./paths";
 
 function withTree(fn: (root: string, outside: string) => void): void {
   const base = mkdtempSync(path.join(tmpdir(), "second-brain-paths-test-"));
@@ -42,6 +42,15 @@ test("rejects a note symlinked outside the vault, even dangling", () => {
     symlinkSync(path.join(outside, "nope.md"), path.join(root, "projb", "notes", "d.md"));
     assert.throws(() => resolveNotePath(root, "projb", "notes", "n"), /symlink/);
     assert.throws(() => resolveNotePath(root, "projb", "notes", "d"), /symlink/);
+  });
+});
+
+test("path rejections throw UnsafePathError (symlink and non-regular file)", () => {
+  withTree((root, outside) => {
+    symlinkSync(path.join(outside, "secret.md"), path.join(root, "projb", "notes", "n.md"));
+    assert.throws(() => resolveNotePath(root, "projb", "notes", "n"), UnsafePathError);
+    mkdirSync(path.join(root, "projb", "notes", "dir.md"));
+    assert.throws(() => resolveNotePath(root, "projb", "notes", "dir"), UnsafePathError);
   });
 });
 

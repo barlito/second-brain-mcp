@@ -11,6 +11,7 @@ import {
   readdirSync,
   rmSync,
   symlinkSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -22,6 +23,8 @@ import {
   ensureVaultRepo,
   getSyncStatus,
   hasRemote,
+  SyncConflictError,
+  VaultBusyError,
   pullRebase,
   startPeriodicSync,
   syncWrite,
@@ -158,7 +161,7 @@ test("push to a bare remote succeeds and is visible there", async () => {
   const { commitSha } = await syncWrite(vault, join(vault, "p", "s", "n.md"), "hi\n", "remote write");
   await drainWrites();
   assert.equal(git(["rev-parse", "main"], remote).trim(), commitSha);
-  const s = getSyncStatus();
+  const s = getSyncStatus(vault);
   assert.equal(s.unpushed, false);
   assert.equal(s.lastPushOk, true);
 });
@@ -176,7 +179,7 @@ test("unreachable remote: write succeeds, push is retried and status reports fai
   } finally {
     console.error = orig;
   }
-  const s = getSyncStatus();
+  const s = getSyncStatus(vault);
   assert.equal(s.unpushed, true);
   assert.equal(s.lastPushOk, false);
   assert.ok(s.lastError);
@@ -215,12 +218,12 @@ test("push retry pulls first when the remote has diverged (non-conflicting)", as
   // Restore the real url so the retry's pull works; the retry pulls then pushes.
   git(["config", "remote.origin.url", remote], vault);
   await drainWrites();
-  assert.equal(getSyncStatus().lastPushOk, true);
+  assert.equal(getSyncStatus(vault).lastPushOk, true);
   assert.equal(git(["show", "main:theirs.md"], remote), "theirs\n");
   assert.equal(git(["show", "main:mine.md"], remote), "mine\n");
 });
 
-test("conflicting diverged remote: write fails, rebase aborted, next write succeeds", async () => {
+test("conflicting diverged remote: backup branch keeps local commit, branch reset to remote, next write succeeds", async () => {
   const { vault, remote } = newVaultWithRemote();
   await syncWrite(vault, join(vault, "note.md"), "base\n", "base");
   await drainWrites();
@@ -229,29 +232,203 @@ test("conflicting diverged remote: write fails, rebase aborted, next write succe
   // Local unpushed commit editing note.md...
   writeFileSync(join(vault, "note.md"), "local\n");
   git(["commit", "-am", "local edit"], vault);
+  const localSha = git(["rev-parse", "HEAD"], vault).trim();
   // ...and a conflicting remote edit.
   writeFileSync(join(other, "note.md"), "remote\n");
   git(["commit", "-am", "remote edit"], other);
   git(["push"], other);
 
-  await assert.rejects(syncWrite(vault, join(vault, "other.md"), "o\n", "o"), /conflict/);
+  const errs: string[] = [];
+  const orig = console.error;
+  console.error = (...a: unknown[]) => void errs.push(a.join(" "));
+  let err: unknown;
+  try {
+    err = await syncWrite(vault, join(vault, "other.md"), "o\n", "o").catch((e) => e);
+    await drainWrites();
+  } finally {
+    console.error = orig;
+  }
+  assert.ok(err instanceof SyncConflictError);
+  assert.ok(errs.some((e) => e.includes("SYNC CONFLICT")));
+  const backup = (err as SyncConflictError).backupBranch!;
+  assert.match(backup, /^conflict\//);
+  assert.equal(git(["rev-parse", backup], vault).trim(), localSha);
+  assert.equal(git(["show", `${backup}:note.md`], vault), "local\n");
+  assert.equal(git(["rev-parse", backup], remote).trim(), localSha); // pushed for the human
+  assert.equal(git(["rev-parse", "HEAD"], vault).trim(), git(["rev-parse", "origin/main"], vault).trim());
+  assert.equal(readFileSync(join(vault, "note.md"), "utf8"), "remote\n");
   assert.equal(existsSync(join(vault, ".git", "rebase-merge")), false);
-  assert.equal(existsSync(join(vault, ".git", "rebase-apply")), false);
   assert.equal(git(["status", "--porcelain"], vault), "");
   assert.equal(existsSync(join(vault, "other.md")), false);
+  assert.deepEqual(getSyncStatus(vault).conflictBranches, [backup]);
+  assert.equal(getSyncStatus(vault).lastError?.kind, "conflict");
 
-  git(["reset", "--hard", "origin/main"], vault);
   await syncWrite(vault, join(vault, "other.md"), "o\n", "o");
   await drainWrites();
   assert.equal(git(["show", "main:other.md"], remote), "o\n");
 });
 
-test("self-heal: stale rebase dir and index.lock are cleared before a write", async () => {
+test("identical re-write succeeds even with untracked files present", async () => {
+  const repo = newRepo();
+  const { commitSha } = await syncWrite(repo, join(repo, "a.md"), "a\n", "a");
+  writeFileSync(join(repo, "untracked.txt"), "u\n");
+  const again = await syncWrite(repo, join(repo, "a.md"), "a\n", "a again");
+  assert.equal(again.commitSha, commitSha);
+  assert.equal(git(["rev-list", "--count", "HEAD"], repo).trim(), "1");
+});
+
+test("pull with a dirty tree (modified tracked file) autostashes instead of failing", async () => {
+  const { vault, remote } = newVaultWithRemote();
+  const other = otherClone(remote);
+  writeFileSync(join(other, "theirs.md"), "t\n");
+  git(["add", "."], other);
+  git(["commit", "-m", "t"], other);
+  git(["push"], other);
+  writeFileSync(join(vault, "seed.md"), "human edit\n");
+  await syncWrite(vault, join(vault, "mine.md"), "m\n", "m");
+  await drainWrites();
+  assert.equal(readFileSync(join(vault, "seed.md"), "utf8"), "human edit\n");
+  assert.equal(git(["show", "main:theirs.md"], remote), "t\n");
+  assert.equal(git(["show", "main:mine.md"], remote), "m\n");
+  assert.equal(getSyncStatus(vault).lastError, null);
+});
+
+test("autostash re-apply conflict is treated as a conflict; human change kept in stash", async () => {
+  const { vault, remote } = newVaultWithRemote();
+  const other = otherClone(remote);
+  writeFileSync(join(other, "seed.md"), "remote\n");
+  git(["commit", "-am", "r"], other);
+  git(["push"], other);
+  writeFileSync(join(vault, "seed.md"), "human\n");
+  const orig = console.error;
+  console.error = () => undefined;
+  try {
+    await assert.rejects(syncWrite(vault, join(vault, "x.md"), "x\n", "x"), SyncConflictError);
+  } finally {
+    console.error = orig;
+  }
+  assert.match(git(["stash", "list"], vault), /./);
+  assert.equal(git(["status", "--porcelain"], vault), "");
+  await syncWrite(vault, join(vault, "x.md"), "x\n", "x");
+  await drainWrites();
+});
+
+test("pull works when the remote was added without upstream tracking", async () => {
+  const remote = tmp("remote");
+  git(["init", "--bare", "-b", "main"], remote);
+  const seed = tmp("seed");
+  git(["clone", remote, "."], seed);
+  git(["checkout", "-B", "main"], seed);
+  configure(seed);
+  writeFileSync(join(seed, "a.md"), "a\n");
+  git(["add", "."], seed);
+  git(["commit", "-m", "a"], seed);
+  git(["push", "-u", "origin", "main"], seed);
+
+  const vault = newRepo();
+  git(["remote", "add", "origin", remote], vault);
+  git(["pull", "origin", "main"], vault);
+  assert.throws(() => git(["rev-parse", "--abbrev-ref", "@{u}"], vault), /./); // no upstream
+  writeFileSync(join(seed, "b.md"), "b\n");
+  git(["add", "."], seed);
+  git(["commit", "-m", "b"], seed);
+  git(["push"], seed);
+
+  await pullRebase(vault);
+  assert.equal(readFileSync(join(vault, "b.md"), "utf8"), "b\n");
+  await syncWrite(vault, join(vault, "c.md"), "c\n", "c");
+  await drainWrites();
+  assert.equal(git(["show", "main:c.md"], remote), "c\n");
+});
+
+test("self-heal: a stale index.lock is cleared before a write", async () => {
   const repo = newRepo();
   await syncWrite(repo, join(repo, "a.md"), "a\n", "a");
-  writeFileSync(join(repo, ".git", "index.lock"), "");
+  const lock = join(repo, ".git", "index.lock");
+  writeFileSync(lock, "");
+  const old = new Date(Date.now() - 3600_000);
+  utimesSync(lock, old, old);
   await syncWrite(repo, join(repo, "b.md"), "b\n", "b");
-  assert.equal(existsSync(join(repo, ".git", "index.lock")), false);
+  assert.equal(existsSync(lock), false);
+});
+
+test("a fresh index.lock fails the write as busy and is left alone", async () => {
+  const repo = newRepo();
+  await syncWrite(repo, join(repo, "a.md"), "a\n", "a");
+  const lock = join(repo, ".git", "index.lock");
+  writeFileSync(lock, "");
+  await assert.rejects(syncWrite(repo, join(repo, "b.md"), "b\n", "b"), VaultBusyError);
+  assert.equal(existsSync(lock), true);
+});
+
+test("a foreign in-progress rebase is not aborted; a server-marked one is healed", async () => {
+  const repo = newRepo();
+  await syncWrite(repo, join(repo, "a.md"), "a\n", "a");
+  mkdirSync(join(repo, ".git", "rebase-merge"));
+  await assert.rejects(syncWrite(repo, join(repo, "b.md"), "b\n", "b"), /rebase in progress/);
+  assert.equal(existsSync(join(repo, ".git", "rebase-merge")), true);
+  // With our marker it is ours: selfHeal tries to abort it and clears the marker.
+  writeFileSync(join(repo, ".git", "second-brain-rebase"), "1");
+  rmSync(join(repo, ".git", "rebase-merge"), { recursive: true });
+  await syncWrite(repo, join(repo, "b.md"), "b\n", "b");
+  assert.equal(existsSync(join(repo, ".git", "second-brain-rebase")), false);
+});
+
+test("sync status is per vault and unpushed stays false without a remote", async () => {
+  const a = newRepo();
+  const { vault: b } = newVaultWithRemote();
+  await syncWrite(a, join(a, "n.md"), "n\n", "n");
+  assert.equal(getSyncStatus(a).unpushed, false);
+  git(["remote", "set-url", "origin", join(tmp("gone"), "x.git")], b);
+  const orig = console.error;
+  console.error = () => undefined;
+  try {
+    await syncWrite(b, join(b, "n.md"), "n\n", "n");
+    await drainWrites();
+  } finally {
+    console.error = orig;
+  }
+  assert.equal(getSyncStatus(b).unpushed, true);
+  assert.equal(getSyncStatus(b).lastError?.kind, "network");
+  assert.equal(getSyncStatus(a).unpushed, false);
+  assert.equal(getSyncStatus(a).lastError, null);
+});
+
+test("push deadline kills a hung push: queue settles and no local push process lingers", async () => {
+  const { vault, remote } = newVaultWithRemote();
+  const gate = join(tmp("gate"), "never");
+  const hook = join(remote, "hooks", "pre-receive");
+  writeFileSync(hook, `#!/bin/sh\nwhile [ ! -f "${gate}" ]; do sleep 0.05; done\n`);
+  chmodSync(hook, 0o755);
+  process.env.SB_PUSH_DEADLINE_MS = "1500";
+  const orig = console.error;
+  console.error = () => undefined;
+  try {
+    const t0 = Date.now();
+    await syncWrite(vault, join(vault, "one.md"), "1\n", "one");
+    await drainWrites();
+    assert.ok(Date.now() - t0 < 10_000);
+  } finally {
+    console.error = orig;
+    delete process.env.SB_PUSH_DEADLINE_MS;
+    writeFileSync(gate, ""); // release the orphaned remote-side hook
+  }
+  const s = getSyncStatus(vault);
+  assert.equal(s.lastPushOk, false);
+  assert.equal(s.unpushed, true);
+  assert.equal(s.lastError?.kind, "network");
+});
+
+test("ensureVaultRepo clone does not check out symlinks", async () => {
+  const { vault, remote } = newVaultWithRemote();
+  symlinkSync("/etc/passwd", join(vault, "link.md"));
+  git(["add", "link.md"], vault);
+  git(["commit", "-m", "symlink"], vault);
+  git(["push"], vault);
+  const dir = tmp("clone");
+  await ensureVaultRepo(dir, { remoteUrl: remote });
+  assert.equal(lstatSync(join(dir, "link.md")).isSymbolicLink(), false);
+  assert.ok(lstatSync(join(dir, "link.md")).isFile());
 });
 
 test("a hung push does not wedge later writes beyond the lock; push holds the queue until settled", async () => {
