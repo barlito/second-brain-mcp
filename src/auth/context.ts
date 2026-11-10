@@ -1,5 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import { Scope } from "./tokens";
+import { Scope } from "./types";
 
 export interface TokenContext {
   tokenId: string;
