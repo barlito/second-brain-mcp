@@ -37,11 +37,14 @@ RUN addgroup -S -g 10001 appgroup && adduser -S -u 10001 -G appgroup appuser
 # git + openssh-client: vault sync shells out to them. tini: PID 1.
 RUN apk add --no-cache git openssh-client tini
 
-# GitHub SSH host keys, verified against the fingerprints GitHub publishes
+# GitHub SSH host keys: vendored (no network at build), verified against the
+# fingerprints GitHub publishes
 # (https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/githubs-ssh-key-fingerprints).
+# Refresh: take ssh_keys from https://api.github.com/meta, prefix each with
+# "github.com ", update docker/github_known_hosts and the fingerprints below.
 # Build fails on any mismatch or missing key type.
+COPY --chmod=644 docker/github_known_hosts /etc/ssh/ssh_known_hosts
 RUN set -eu; \
-    ssh-keyscan -T 10 -t rsa,ecdsa,ed25519 github.com 2>/dev/null | grep -v '^#' > /tmp/gh_keys; \
     ok=0; \
     while read -r line; do \
       echo "$line" > /tmp/one_key; \
@@ -52,10 +55,9 @@ RUN set -eu; \
         SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU) ok=$((ok+1)) ;; \
         *) echo "unexpected GitHub host key fingerprint: $fp" >&2; exit 1 ;; \
       esac; \
-    done < /tmp/gh_keys; \
+    done < /etc/ssh/ssh_known_hosts; \
     [ "$ok" -eq 3 ] || { echo "expected 3 verified GitHub host keys, got $ok" >&2; exit 1; }; \
-    cp /tmp/gh_keys /etc/ssh/ssh_known_hosts; \
-    rm -f /tmp/gh_keys /tmp/one_key
+    rm -f /tmp/one_key
 
 # npm/npx/corepack/yarn are not needed at runtime.
 RUN rm -rf /usr/local/lib/node_modules /usr/local/bin/npm /usr/local/bin/npx \

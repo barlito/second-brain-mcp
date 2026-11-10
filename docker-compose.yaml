@@ -5,14 +5,14 @@
 #
 # LOCAL dev file, deployed via Docker Swarm like prod. Swarm ignores
 # `build:` at deploy time, so `make deploy` runs `docker compose build`
-# first to produce the `second-brain-mcp:local` tag referenced below
+# first to produce the `second-brain-mcp:${IMAGE_TAG}` tag referenced below (unique per build, so the stack rolls)
 # (no registry needed on a single-node Swarm).
 #
 # See docker-compose-prod.yml for the production variant.
 services:
   second-brain-mcp:
     build: .
-    image: second-brain-mcp:local
+    image: second-brain-mcp:${IMAGE_TAG:-local}
     # Both mounts below are bind mounts owned by the host user, not the
     # image's appuser — run as the host uid/gid (set by `make deploy`)
     # instead. Prod uses named volumes owned by appuser (see Dockerfile),
