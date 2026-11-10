@@ -167,6 +167,29 @@ test("garbage Authorization header also gets 401", async () => {
   assert.equal(res.status, 401);
 });
 
+test("a malformed note name is reported distinctly from a real internal error", async () => {
+  const { client, transport } = await connectClient(tokenA);
+  try {
+    // project/section match an ACL scope the token actually has (so this
+    // exercises resolveNotePath's own validation, past the ACL check) but
+    // note is not a valid slug.
+    const result = await client.callTool({
+      name: "kb_read",
+      arguments: { project: "proj-a", section: "sect-a", note: "../evil" },
+    });
+    assert.equal(result.isError, true);
+    assert.equal(textOf(result as CallToolResult), "Invalid project/section/note name.");
+
+    const row = db
+      .prepare("SELECT result, detail FROM audit_log WHERE action = 'kb_read' ORDER BY id DESC LIMIT 1")
+      .get() as { result: string; detail: string };
+    assert.equal(row.result, "error");
+    assert.match(row.detail, /invalid note slug/);
+  } finally {
+    await transport.close();
+  }
+});
+
 test("audit_log has the expected ok/denied rows", () => {
   const rows = db
     .prepare("SELECT action, result FROM audit_log ORDER BY id")

@@ -6,6 +6,16 @@ export function isValidSlug(s: string): boolean {
   return SLUG_RE.test(s);
 }
 
+// Distinguishes caller input errors (bad project/section/note slug) from
+// genuine internal failures, so callers (e.g. mcp.ts) can surface a clearer
+// message instead of a generic "Internal error.".
+export class InvalidSlugError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "InvalidSlugError";
+  }
+}
+
 // Defense in depth: re-check the resolved path is still under vaultRoot, in
 // case something slips past the slug regex (e.g. a future regex change).
 function assertInsideRoot(resolvedRoot: string, resolvedPath: string): void {
@@ -16,7 +26,7 @@ function assertInsideRoot(resolvedRoot: string, resolvedPath: string): void {
 }
 
 function assertValidSlug(kind: string, value: string): void {
-  if (!isValidSlug(value)) throw new Error(`invalid ${kind} slug: ${value}`);
+  if (!isValidSlug(value)) throw new InvalidSlugError(`invalid ${kind} slug: ${value}`);
 }
 
 export function resolveNotePath(

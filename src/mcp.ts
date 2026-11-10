@@ -2,14 +2,14 @@
 // modules built in earlier PRs. A fresh McpServer is created per HTTP
 // request (see server.ts, stateless Streamable HTTP mode), so this just
 // builds and returns one.
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { z } from "zod";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import { getTokenContext } from "./auth/context";
+import { getTokenContext, TokenContext } from "./auth/context";
 import { checkScope } from "./acl/check";
 import { logAudit } from "./audit";
-import { resolveNotePath } from "./vault/paths";
+import { InvalidSlugError, resolveNotePath } from "./vault/paths";
 import { syncWrite } from "./vault/git";
 
 function toolError(message: string): CallToolResult {
@@ -30,6 +30,81 @@ const kbArgsShape = {
   note: z.string().describe("Note slug (without .md extension)"),
 };
 
+// Extra audit fields a tool handler wants recorded alongside its result
+// (e.g. kb_write's commit sha, kb_read's "note not found" detail).
+interface AuditExtra {
+  detail?: string;
+  gitCommit?: string;
+}
+
+interface ToolRunResult {
+  toolResult: CallToolResult;
+  audit?: AuditExtra;
+}
+
+// Shared ACL-check + audit-log + error-handling wrapper for kb_* tools.
+// Centralizes the one piece of behavior that must never be skipped: every
+// call gets exactly one audit row, whether it's denied, ok, a handled
+// tool-level error, or an unexpected exception — so a future tool can't
+// forget to log an exit path the way duplicated per-tool code could.
+async function withAclAndAudit(
+  action: string,
+  project: string,
+  section: string,
+  note: string,
+  permission: "read" | "write",
+  run: (ctx: TokenContext) => Promise<ToolRunResult>,
+): Promise<CallToolResult> {
+  const ctx = getTokenContext();
+
+  if (!checkScope(ctx.scopes, project, section, permission)) {
+    logAudit({
+      tokenId: ctx.tokenId,
+      tokenName: ctx.name,
+      action,
+      project,
+      section,
+      note,
+      result: "denied",
+    });
+    // Generic message — don't reveal whether the project/section exists.
+    return toolError("Permission denied.");
+  }
+
+  try {
+    const { toolResult, audit } = await run(ctx);
+    logAudit({
+      tokenId: ctx.tokenId,
+      tokenName: ctx.name,
+      action,
+      project,
+      section,
+      note,
+      result: toolResult.isError ? "error" : "ok",
+      ...audit,
+    });
+    return toolResult;
+  } catch (err) {
+    logAudit({
+      tokenId: ctx.tokenId,
+      tokenName: ctx.name,
+      action,
+      project,
+      section,
+      note,
+      result: "error",
+      detail: errorMessage(err),
+    });
+    // InvalidSlugError means the caller sent a malformed project/section/note —
+    // their mistake, not a server failure — so say so instead of a generic
+    // "Internal error.". The real reason is still in the audit row above.
+    if (err instanceof InvalidSlugError) {
+      return toolError("Invalid project/section/note name.");
+    }
+    return toolError("Internal error.");
+  }
+}
+
 export function createMcpServer(vaultRoot: string): McpServer {
   const server = new McpServer({ name: "second-brain-mcp", version: "0.1.0" });
 
@@ -39,70 +114,18 @@ export function createMcpServer(vaultRoot: string): McpServer {
       description: "Read a note from the shared knowledge base vault.",
       inputSchema: kbArgsShape,
     },
-    async ({ project, section, note }): Promise<CallToolResult> => {
-      const ctx = getTokenContext();
-      try {
-        if (!checkScope(ctx.scopes, project, section, "read")) {
-          logAudit({
-            tokenId: ctx.tokenId,
-            tokenName: ctx.name,
-            action: "kb_read",
-            project,
-            section,
-            note,
-            result: "denied",
-          });
-          // Generic message — don't reveal whether the project/section exists.
-          return toolError("Permission denied.");
-        }
-
+    async ({ project, section, note }): Promise<CallToolResult> =>
+      withAclAndAudit("kb_read", project, section, note, "read", async () => {
         const absolutePath = resolveNotePath(vaultRoot, project, section, note);
 
-        let content: string;
-        try {
-          content = readFileSync(absolutePath, "utf8");
-        } catch (err) {
-          if ((err as NodeJS.ErrnoException).code === "ENOENT") {
-            logAudit({
-              tokenId: ctx.tokenId,
-              tokenName: ctx.name,
-              action: "kb_read",
-              project,
-              section,
-              note,
-              result: "error",
-              detail: "note not found",
-            });
-            // Distinct from a permission error — the note simply doesn't exist.
-            return toolError("Note not found.");
-          }
-          throw err;
+        if (!existsSync(absolutePath)) {
+          // Distinct from a permission error — the note simply doesn't exist.
+          return { toolResult: toolError("Note not found."), audit: { detail: "note not found" } };
         }
 
-        logAudit({
-          tokenId: ctx.tokenId,
-          tokenName: ctx.name,
-          action: "kb_read",
-          project,
-          section,
-          note,
-          result: "ok",
-        });
-        return toolText(content);
-      } catch (err) {
-        logAudit({
-          tokenId: ctx.tokenId,
-          tokenName: ctx.name,
-          action: "kb_read",
-          project,
-          section,
-          note,
-          result: "error",
-          detail: errorMessage(err),
-        });
-        return toolError("Internal error.");
-      }
-    },
+        const content = readFileSync(absolutePath, "utf8");
+        return { toolResult: toolText(content) };
+      }),
   );
 
   server.registerTool(
@@ -114,22 +137,8 @@ export function createMcpServer(vaultRoot: string): McpServer {
         content: z.string().describe("Full note content, written verbatim"),
       },
     },
-    async ({ project, section, note, content }): Promise<CallToolResult> => {
-      const ctx = getTokenContext();
-      try {
-        if (!checkScope(ctx.scopes, project, section, "write")) {
-          logAudit({
-            tokenId: ctx.tokenId,
-            tokenName: ctx.name,
-            action: "kb_write",
-            project,
-            section,
-            note,
-            result: "denied",
-          });
-          return toolError("Permission denied.");
-        }
-
+    async ({ project, section, note, content }): Promise<CallToolResult> =>
+      withAclAndAudit("kb_write", project, section, note, "write", async (ctx) => {
         const absolutePath = resolveNotePath(vaultRoot, project, section, note);
         const { commitSha } = await syncWrite(
           vaultRoot,
@@ -138,31 +147,8 @@ export function createMcpServer(vaultRoot: string): McpServer {
           `kb_write: ${project}/${section}/${note} via ${ctx.name}`,
         );
 
-        logAudit({
-          tokenId: ctx.tokenId,
-          tokenName: ctx.name,
-          action: "kb_write",
-          project,
-          section,
-          note,
-          result: "ok",
-          gitCommit: commitSha,
-        });
-        return toolText(commitSha);
-      } catch (err) {
-        logAudit({
-          tokenId: ctx.tokenId,
-          tokenName: ctx.name,
-          action: "kb_write",
-          project,
-          section,
-          note,
-          result: "error",
-          detail: errorMessage(err),
-        });
-        return toolError("Internal error.");
-      }
-    },
+        return { toolResult: toolText(commitSha), audit: { gitCommit: commitSha } };
+      }),
   );
 
   return server;

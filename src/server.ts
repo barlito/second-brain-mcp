@@ -46,14 +46,35 @@ app.use("/mcp", bearerAuth);
 // simpleStatelessStreamableHttp example).
 app.post("/mcp", async (req, res) => {
   const server = createMcpServer(vaultRoot);
+  let transport: StreamableHTTPServerTransport | undefined;
+  let cleanedUp = false;
+
+  // Registered right after transport creation (before any await) so a client
+  // disconnect while handleRequest is still pending is never missed — `res`
+  // is an EventEmitter and does not replay a 'close' fired before a listener
+  // is attached. Also reachable from the catch block below, so a throw from
+  // server.connect()/handleRequest() still releases the transport/server.
+  // Guarded by cleanedUp so it's safe to run from both places.
+  const cleanup = () => {
+    if (cleanedUp) return;
+    cleanedUp = true;
+    try {
+      transport?.close();
+    } catch (err) {
+      console.error("Error closing MCP transport:", err);
+    }
+    try {
+      server.close();
+    } catch (err) {
+      console.error("Error closing MCP server:", err);
+    }
+  };
+
   try {
-    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+    transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+    res.on("close", cleanup);
     await server.connect(transport);
     await transport.handleRequest(req, res, req.body);
-    res.on("close", () => {
-      transport.close();
-      server.close();
-    });
   } catch (err) {
     console.error("Error handling MCP request:", err);
     if (!res.headersSent) {
@@ -63,6 +84,7 @@ app.post("/mcp", async (req, res) => {
         id: null,
       });
     }
+    cleanup();
   }
 });
 
