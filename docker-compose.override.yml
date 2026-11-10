@@ -1,0 +1,11 @@
+services:
+  second-brain-mcp:
+    ports:
+      - "3000:3000"
+    networks: !reset []
+    labels: !reset []
+    volumes:
+      - ../second-brain-vault-dev:/vault
+      - ./data:/data
+    environment:
+      - NODE_ENV=development

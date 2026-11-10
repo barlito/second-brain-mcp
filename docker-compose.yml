@@ -1,0 +1,30 @@
+services:
+  # ────────────────────────────────────────────────────────────────
+  # Serveur MCP exposant la base de connaissances partagée (vault Git
+  # compatible Obsidian) à Claude, via des tokens d'accès par projet
+  # ────────────────────────────────────────────────────────────────
+  second-brain-mcp:
+    build: .
+    container_name: second-brain-mcp
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - VAULT_PATH=/vault
+      - DB_PATH=/data/acl.db
+    volumes:
+      - ${VAULT_HOST_PATH:-.}:/vault
+      - ./data:/data
+    networks:
+      - traefik
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.second-brain-mcp.rule=Host(`${MCP_DOMAIN:-localhost}`)"
+      - "traefik.http.routers.second-brain-mcp.entrypoints=websecure"
+      - "traefik.http.routers.second-brain-mcp.tls.certresolver=${TRAEFIK_CERT_RESOLVER:-letsencrypt}"
+      - "traefik.http.services.second-brain-mcp.loadbalancer.server.port=3000"
+    restart: unless-stopped
+
+networks:
+  traefik:
+    external: true
+    name: ${TRAEFIK_NETWORK_NAME:-traefik}
