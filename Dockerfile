@@ -28,13 +28,18 @@ WORKDIR /app
 
 RUN addgroup -S appgroup && adduser -S appuser -G appgroup
 
+# vault/git.ts shells out to the git CLI at runtime (not just build time).
+RUN apk add --no-cache git
+
 COPY --from=builder --chown=appuser:appgroup /app/node_modules ./node_modules
 COPY --from=builder --chown=appuser:appgroup /app/dist ./dist
 COPY --from=builder --chown=appuser:appgroup /app/package.json ./package.json
 
-# Pre-create /data with the right ownership before switching user —
-# Docker would otherwise seed the named volume as root:root.
-RUN mkdir -p /data && chown appuser:appgroup /data
+# Pre-create /data and /vault with the right ownership before switching
+# user — Docker would otherwise seed named volumes as root:root on first
+# mount. Local dev bind-mounts both to host-owned dirs instead and runs
+# as the host uid (see docker-compose.yaml), so ownership matches there too.
+RUN mkdir -p /data /vault && chown appuser:appgroup /data /vault
 
 USER appuser
 
