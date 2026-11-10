@@ -1,7 +1,10 @@
 node_modules
 dist
 .git
+.claude
+.github
 .env
 data/
 npm-debug.log
 *.md
+src/**/*.test.ts

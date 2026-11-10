@@ -7,16 +7,36 @@
 # with a registry image instead of `build:` (Swarm can't build), plus
 # the prod domain/TLS.
 #
-# NOT deployable yet: no CI publishes `ghcr.io/barlito/second-brain-mcp`
-# to a registry. Structural placeholder for the deployment phase.
+# Deployable once an image tagged IMAGE_TAG is published to
+# `ghcr.io/barlito/second-brain-mcp` (CI only builds for now; publishing comes
+# with the deploy phase) and the `vault_deploy_key` secret exists.
+# Images are referenced by immutable tag: `IMAGE_TAG=<tag> make deploy.prod`.
+#
+# Prerequisite (once): docker secret create vault_deploy_key <private key file>
 services:
   second-brain-mcp:
-    image: ghcr.io/barlito/second-brain-mcp:latest
+    image: ghcr.io/barlito/second-brain-mcp:${IMAGE_TAG:?IMAGE_TAG is required}
     environment:
       - NODE_ENV=production
       - PORT=3000
       - VAULT_PATH=/vault
       - DB_PATH=/data/acl.db
+      - VAULT_REMOTE_URL=git@github.com:barlito/second-brain-vault.git
+      - VAULT_BRANCH=main
+      - VAULT_SYNC_INTERVAL_MS=60000
+      - GIT_SSH_COMMAND=ssh -i /run/secrets/vault_deploy_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=10
+      # git refuses to commit without an identity
+      - GIT_AUTHOR_NAME=second-brain-mcp
+      - GIT_AUTHOR_EMAIL=second-brain-mcp@noreply.local
+      - GIT_COMMITTER_NAME=second-brain-mcp
+      - GIT_COMMITTER_EMAIL=second-brain-mcp@noreply.local
+    # One git working tree + one SQLite file: two tasks must never overlap.
+    stop_grace_period: 30s
+    secrets:
+      - source: vault_deploy_key
+        uid: "10001"
+        gid: "10001"
+        mode: 0400
     volumes:
       - vault-data:/vault
       - acl-data:/data
@@ -24,6 +44,13 @@ services:
       - traefik_traefik_proxy
     deploy:
       replicas: 1
+      update_config:
+        order: stop-first
+        failure_action: rollback
+        monitor: 30s
+      restart_policy:
+        condition: any
+        delay: 5s
       labels:
         - traefik.enable=true
 
@@ -37,11 +64,18 @@ services:
         - traefik.http.routers.second-brain-mcp-secure.entrypoints=https
         - traefik.http.routers.second-brain-mcp-secure.tls=true
         - traefik.http.routers.second-brain-mcp-secure.tls.certresolver=letsencrypt
-        # Own Bearer-token ACL (PR2/PR4) -> no Authelia, just security headers
-        - traefik.http.routers.second-brain-mcp-secure.middlewares=security-headers@file
+        # Rate limit sized for a few agents (per source IP)
+        - traefik.http.middlewares.second-brain-mcp-ratelimit.ratelimit.average=20
+        - traefik.http.middlewares.second-brain-mcp-ratelimit.ratelimit.burst=40
+        # Own Bearer-token ACL (PR2/PR4) -> no Authelia, just rate limit + security headers
+        - traefik.http.routers.second-brain-mcp-secure.middlewares=second-brain-mcp-ratelimit,security-headers@file
 
 networks:
   traefik_traefik_proxy:
+    external: true
+
+secrets:
+  vault_deploy_key:
     external: true
 
 volumes:

@@ -5,14 +5,14 @@
 #
 # LOCAL dev file, deployed via Docker Swarm like prod. Swarm ignores
 # `build:` at deploy time, so `make deploy` runs `docker compose build`
-# first to produce the `second-brain-mcp:local` tag referenced below
+# first to produce the `second-brain-mcp:${IMAGE_TAG}` tag referenced below (unique per build, so the stack rolls)
 # (no registry needed on a single-node Swarm).
 #
 # See docker-compose-prod.yml for the production variant.
 services:
   second-brain-mcp:
     build: .
-    image: second-brain-mcp:local
+    image: second-brain-mcp:${IMAGE_TAG:-local}
     # Both mounts below are bind mounts owned by the host user, not the
     # image's appuser — run as the host uid/gid (set by `make deploy`)
     # instead. Prod uses named volumes owned by appuser (see Dockerfile),
@@ -23,6 +23,16 @@ services:
       - PORT=3000
       - VAULT_PATH=/vault
       - DB_PATH=/data/acl.db
+      # No VAULT_REMOTE_URL locally: the vault is a plain local git repo.
+      - VAULT_BRANCH=main
+      - VAULT_SYNC_INTERVAL_MS=60000
+      # git refuses to commit without an identity
+      - GIT_AUTHOR_NAME=second-brain-mcp
+      - GIT_AUTHOR_EMAIL=second-brain-mcp@noreply.local
+      - GIT_COMMITTER_NAME=second-brain-mcp
+      - GIT_COMMITTER_EMAIL=second-brain-mcp@noreply.local
+    # One git working tree + one SQLite file: two tasks must never overlap.
+    stop_grace_period: 30s
     volumes:
       - ../second-brain-vault-dev:/vault
       - ./data:/data
@@ -30,6 +40,13 @@ services:
       - traefik_traefik_proxy
     deploy:
       replicas: 1
+      update_config:
+        order: stop-first
+        failure_action: rollback
+        monitor: 30s
+      restart_policy:
+        condition: any
+        delay: 5s
       labels:
         - traefik.enable=true
 
@@ -37,6 +54,8 @@ services:
 
         - traefik.http.routers.second-brain-mcp.rule=Host(`second-brain.local.barlito.fr`)
         - traefik.http.routers.second-brain-mcp.entrypoints=http
+        # Never serve /mcp (Bearer tokens) over plain HTTP
+        - traefik.http.routers.second-brain-mcp.middlewares=redirect-to-https@file
 
         - traefik.http.routers.second-brain-mcp-secure.rule=Host(`second-brain.local.barlito.fr`)
         - traefik.http.routers.second-brain-mcp-secure.entrypoints=https
