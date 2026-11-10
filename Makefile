@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := help
-.PHONY: help deploy deploy.prod undeploy restart logs
+.PHONY: help deploy deploy.prod undeploy restart logs token-create token-list token-revoke
 
 stack_name=second-brain-mcp
 
@@ -25,3 +25,12 @@ restart: ## Restart (undeploy then deploy)
 
 logs: ## Follow logs (make logs service=second-brain-mcp)
 	docker service logs -f $(stack_name)_$(service)
+
+token-create: ## Create a token (make token-create name=X scope=project:section:perm,...)
+	docker exec $$(docker ps -q -f name=second-brain-mcp_second-brain-mcp | head -1) node dist/cli/token.js create --name $(name) --scope $(scope)
+
+token-list: ## List tokens
+	docker exec $$(docker ps -q -f name=second-brain-mcp_second-brain-mcp | head -1) node dist/cli/token.js list
+
+token-revoke: ## Revoke a token (make token-revoke id=X)
+	docker exec $$(docker ps -q -f name=second-brain-mcp_second-brain-mcp | head -1) node dist/cli/token.js revoke --id $(id)
