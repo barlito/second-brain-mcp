@@ -1,14 +1,18 @@
 #!/usr/bin/env node
 import { parseArgs as nodeParseArgs } from "node:util";
 import { createToken, listTokens, revokeToken, Scope } from "../auth/tokens";
+import { isValidSlug } from "../vault/paths";
 
-function parseScopes(raw: string): Scope[] {
+export function parseScopes(raw: string): Scope[] {
   return raw.split(",").map((entry) => {
     const parts = entry.split(":");
     if (parts.length !== 3 || !parts[0] || !parts[1]) {
       throw new Error(`invalid scope "${entry}", expected project:section:permission`);
     }
     const [project, section, permission] = parts;
+    if (!isValidSlug(project) || !isValidSlug(section)) {
+      throw new Error(`invalid scope "${entry}", project and section must be valid slugs`);
+    }
     if (permission !== "read" && permission !== "write") {
       throw new Error(`invalid permission "${permission}" in scope "${entry}", must be read or write`);
     }
@@ -111,4 +115,8 @@ function main(): void {
   }
 }
 
-main();
+// Guard so this module can be imported for testing (e.g. parseScopes)
+// without running the CLI itself.
+if (require.main === module) {
+  main();
+}

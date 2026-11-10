@@ -15,15 +15,19 @@ function assertInsideRoot(resolvedRoot: string, resolvedPath: string): void {
   }
 }
 
+function assertValidSlug(kind: string, value: string): void {
+  if (!isValidSlug(value)) throw new Error(`invalid ${kind} slug: ${value}`);
+}
+
 export function resolveNotePath(
   vaultRoot: string,
   project: string,
   section: string,
   note: string,
 ): string {
-  if (!isValidSlug(project)) throw new Error(`invalid project slug: ${project}`);
-  if (!isValidSlug(section)) throw new Error(`invalid section slug: ${section}`);
-  if (!isValidSlug(note)) throw new Error(`invalid note slug: ${note}`);
+  assertValidSlug("project", project);
+  assertValidSlug("section", section);
+  assertValidSlug("note", note);
 
   const resolvedRoot = path.resolve(vaultRoot);
   const resolvedPath = path.resolve(resolvedRoot, project, section, `${note}.md`);
@@ -34,8 +38,8 @@ export function resolveNotePath(
 }
 
 export function resolveSectionDir(vaultRoot: string, project: string, section: string): string {
-  if (!isValidSlug(project)) throw new Error(`invalid project slug: ${project}`);
-  if (!isValidSlug(section)) throw new Error(`invalid section slug: ${section}`);
+  assertValidSlug("project", project);
+  assertValidSlug("section", section);
 
   const resolvedRoot = path.resolve(vaultRoot);
   const resolvedPath = path.resolve(resolvedRoot, project, section);
