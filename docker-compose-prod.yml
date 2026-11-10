@@ -1,0 +1,49 @@
+# ────────────────────────────────────────────────────────────────
+# MCP server exposing the shared knowledge base (Obsidian-compatible
+# Git vault) to Claude, with per-project access tokens.
+# ────────────────────────────────────────────────────────────────
+#
+# PRODUCTION variant: same `docker stack deploy` flow as local, but
+# with a registry image instead of `build:` (Swarm can't build), plus
+# the prod domain/TLS.
+#
+# NOT deployable yet: no CI publishes `ghcr.io/barlito/second-brain-mcp`
+# to a registry. Structural placeholder for the deployment phase.
+services:
+  second-brain-mcp:
+    image: ghcr.io/barlito/second-brain-mcp:latest
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - VAULT_PATH=/vault
+      - DB_PATH=/data/acl.db
+    volumes:
+      - vault-data:/vault
+      - acl-data:/data
+    networks:
+      - traefik_traefik_proxy
+    deploy:
+      replicas: 1
+      labels:
+        - traefik.enable=true
+
+        - traefik.http.services.second-brain-mcp.loadbalancer.server.port=3000
+
+        - traefik.http.routers.second-brain-mcp.rule=Host(`second-brain.barlito.fr`)
+        - traefik.http.routers.second-brain-mcp.entrypoints=http
+        - traefik.http.routers.second-brain-mcp.middlewares=redirect-to-https@file
+
+        - traefik.http.routers.second-brain-mcp-secure.rule=Host(`second-brain.barlito.fr`)
+        - traefik.http.routers.second-brain-mcp-secure.entrypoints=https
+        - traefik.http.routers.second-brain-mcp-secure.tls=true
+        - traefik.http.routers.second-brain-mcp-secure.tls.certresolver=letsencrypt
+        # Own Bearer-token ACL (PR2/PR4) -> no Authelia, just security headers
+        - traefik.http.routers.second-brain-mcp-secure.middlewares=security-headers@file
+
+networks:
+  traefik_traefik_proxy:
+    external: true
+
+volumes:
+  vault-data:
+  acl-data:

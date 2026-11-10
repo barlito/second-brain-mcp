@@ -1,0 +1,25 @@
+{
+  "name": "second-brain-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "description": "MCP server exposing a shared knowledge base (Obsidian-compatible git vault) that Claude can read and write across projects, with per-project/per-section access-controlled tokens.",
+  "main": "dist/server.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/server.js",
+    "dev": "tsx watch src/server.ts",
+    "test": "echo \"no tests yet\""
+  },
+  "dependencies": {
+    "express": "^4.21.2"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^20.17.9",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
