@@ -2,6 +2,6 @@
 node_modules/
 dist/
 
-# Contiendra la base SQLite des tokens ACL (introduite en PR2) :
-# exclue dès maintenant pour ne pas avoir à retoucher ce fichier plus tard.
+# Will hold the SQLite ACL token database (PR2) — excluded now so this
+# file doesn't need touching later.
 data/

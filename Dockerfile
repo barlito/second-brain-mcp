@@ -28,10 +28,8 @@ COPY --from=builder --chown=appuser:appgroup /app/node_modules ./node_modules
 COPY --from=builder --chown=appuser:appgroup /app/dist ./dist
 COPY --from=builder --chown=appuser:appgroup /app/package.json ./package.json
 
-# Le volume nommé /data (base SQLite ACL, à partir de la PR2) doit être
-# accessible en écriture par appuser : on prépare le répertoire et son
-# ownership avant de changer d'utilisateur, car Docker le créerait
-# sinon en root:root au premier démarrage du volume nommé.
+# Pre-create /data with the right ownership before switching user —
+# Docker would otherwise seed the named volume as root:root.
 RUN mkdir -p /data && chown appuser:appgroup /data
 
 USER appuser

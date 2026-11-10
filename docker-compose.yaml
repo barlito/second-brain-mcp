@@ -1,17 +1,14 @@
 # ────────────────────────────────────────────────────────────────
-# Serveur MCP exposant la base de connaissances partagée (vault Git
-# compatible Obsidian) à Claude, via des tokens d'accès par projet
+# MCP server exposing the shared knowledge base (Obsidian-compatible
+# Git vault) to Claude, with per-project access tokens.
 # ────────────────────────────────────────────────────────────────
 #
-# Fichier de dev LOCAL, déployé via Docker Swarm (comme en prod) pour
-# coller exactement au comportement réel : `docker stack deploy`
-# ignore `build:`, donc on construit l'image nous-mêmes avec
-# `docker compose build` (d'où le `build:` ci-dessous) puis on la
-# référence par son tag local `second-brain-mcp:local` (pas de
-# registry nécessaire, Swarm single-node trouve l'image locale).
+# LOCAL dev file, deployed via Docker Swarm like prod. Swarm ignores
+# `build:` at deploy time, so `make deploy` runs `docker compose build`
+# first to produce the `second-brain-mcp:local` tag referenced below
+# (no registry needed on a single-node Swarm).
 #
-# Voir docker-compose-prod.yml pour la variante production (domaine,
-# TLS, image publiée).
+# See docker-compose-prod.yml for the production variant.
 services:
   second-brain-mcp:
     build: .
@@ -39,7 +36,7 @@ services:
         - traefik.http.routers.second-brain-mcp-secure.rule=Host(`second-brain.local.barlito.fr`)
         - traefik.http.routers.second-brain-mcp-secure.entrypoints=https
         - traefik.http.routers.second-brain-mcp-secure.tls=true
-        # Auth native (Bearer token ACL, PR2/PR4) -> pas d'authelia-auth, seulement les headers
+        # Own Bearer-token ACL (PR2/PR4) -> no Authelia, just security headers
         - traefik.http.routers.second-brain-mcp-secure.middlewares=security-headers@file
 
 networks:
