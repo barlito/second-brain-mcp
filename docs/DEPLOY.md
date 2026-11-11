@@ -8,7 +8,7 @@ Known gaps (not built yet): there is no publish/deploy GitHub workflow (CI only 
 
 ### 1. Vault repository
 
-- [ ] Create the private GitHub repo `barlito/second-brain-vault` with a `main` branch (at least one commit, e.g. a README, so the clone has a branch).
+- [ ] Create the private GitHub repo `barlito/second-brain-vault` with a `main` branch (an initial commit, e.g. a README, is optional: the server handles an empty remote).
 
 ### 2. Deploy key
 
@@ -44,6 +44,7 @@ Known gaps (not built yet): there is no publish/deploy GitHub workflow (CI only 
   It renders `docker-compose-prod.yml` and runs `docker stack deploy --with-registry-auth` for the stack `second-brain-mcp`. `IMAGE_TAG` is mandatory.
 - [ ] Remote deploy: point the Docker CLI at the manager over SSH, the same pattern traefik-base uses in its GitHub Actions (see its `docs/GITHUB_ACTIONS.md`: SSH agent, pinned host key in `known_hosts`, then `DOCKER_HOST=ssh://...`):
   ```bash
+  # deploy@server.barlito.fr is a placeholder: use your own user and manager host
   DOCKER_HOST=ssh://deploy@server.barlito.fr IMAGE_TAG=<tag> make deploy.prod
   ```
   The `make token-*` and `make backup-db` targets use `docker exec`, so they work the same way over `DOCKER_HOST`.
