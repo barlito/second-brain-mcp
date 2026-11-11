@@ -134,6 +134,85 @@ export interface SyncStatus {
 
 const statuses = new Map<string, SyncStatus>();
 
+// Emitted once the backup branch exists and the local reset was attempted.
+// Injected so this module never touches the DB layer.
+export type SyncConflictOrigin = "write" | "push-retry" | "periodic";
+export interface SyncConflictEvent {
+  vaultRoot: string;
+  origin: SyncConflictOrigin;
+  backupBranch: string;
+  ok: boolean; // false when recovery failed part-way after the backup branch was created
+  error?: string;
+  commits: string[]; // moved commit SHAs, newest first
+  tokens: string[]; // token names parsed from the server's own commit subjects
+  paths: string[];
+}
+type SyncEventHandler = (e: SyncConflictEvent) => void | Promise<void>;
+let syncEventHandler: SyncEventHandler | null = null;
+export function setSyncEventHandler(fn: SyncEventHandler | null): void {
+  syncEventHandler = fn;
+}
+
+// Fire-and-forget: neither a sync throw nor an async rejection may reach the
+// git path or crash the process.
+function emitSyncEvent(e: SyncConflictEvent): void {
+  const handler = syncEventHandler;
+  if (!handler) return;
+  Promise.resolve()
+    .then(() => handler(e))
+    .catch((err) => console.error(`sync event handler failed: ${errText(err)}`));
+}
+
+// Only the exact subjects this server emits: "<tool>: <target> via <token name>".
+const TOKEN_SUBJECT_RE =
+  /^(?:kb_write|kb_append|kb_archive|kb_init_project|kb_propose|inbox accept): \S+ via ([A-Za-z0-9._-]{1,64})$/;
+
+// conflict/* branches that still exist locally; cached so status reads stay
+// cheap. Only the user deletes them.
+let conflictTtlMs = 30_000;
+export function setConflictCacheTtlMs(ms: number): void {
+  conflictTtlMs = ms;
+}
+const conflictCheckedAt = new Map<string, number>();
+const conflictRefreshing = new Map<string, Promise<void>>();
+// Branches added while a refresh is in flight (its for-each-ref result may predate them).
+const addedDuringRefresh = new Map<string, Set<string>>();
+
+function addConflictBranch(vaultRoot: string, branch: string): void {
+  const key = path.resolve(vaultRoot);
+  const list = st(vaultRoot).conflictBranches;
+  if (!list.includes(branch)) list.push(branch);
+  addedDuringRefresh.get(key)?.add(branch);
+  conflictCheckedAt.set(key, 0); // next status read re-lists
+}
+
+// Refreshes st(vaultRoot).conflictBranches from the repo if the cache is stale.
+// Concurrent callers share one in-flight refresh; failures also stamp the cache.
+export function refreshConflictBranches(vaultRoot: string): Promise<void> {
+  const key = path.resolve(vaultRoot);
+  const inflight = conflictRefreshing.get(key);
+  if (inflight) return inflight;
+  const last = conflictCheckedAt.get(key);
+  if (last !== undefined && Date.now() - last < conflictTtlMs) return Promise.resolve();
+  const added = new Set<string>();
+  addedDuringRefresh.set(key, added);
+  const p = (async () => {
+    try {
+      const out = await runGit(["for-each-ref", "--format=%(refname:short)", "refs/heads/conflict/"], vaultRoot);
+      st(vaultRoot).conflictBranches = [...new Set([...out.split("\n").filter(Boolean), ...added])];
+    } catch {
+      /* keep the previous list */
+    } finally {
+      // A branch added mid-refresh invalidated the cache; keep it invalid.
+      conflictCheckedAt.set(key, added.size > 0 ? 0 : Date.now());
+      addedDuringRefresh.delete(key);
+      conflictRefreshing.delete(key);
+    }
+  })();
+  conflictRefreshing.set(key, p);
+  return p;
+}
+
 function st(vaultRoot: string): SyncStatus {
   const key = path.resolve(vaultRoot);
   let s = statuses.get(key);
@@ -264,8 +343,23 @@ async function recoverFromRebaseConflict(
   vaultRoot: string,
   branch: string,
   paths: string[],
+  origin: SyncConflictOrigin,
 ): Promise<SyncConflictError> {
   let backup = conflictBranchName();
+  // Commits about to be moved off the branch, for the sync event.
+  let commits: string[] = [];
+  const tokens = new Set<string>();
+  try {
+    const out = await runGit(["log", "--format=%H%x09%s", `origin/${branch}..HEAD`], vaultRoot);
+    for (const line of out.split("\n").filter(Boolean)) {
+      const [sha, subject = ""] = line.split("\t");
+      commits.push(sha);
+      const m = TOKEN_SUBJECT_RE.exec(subject);
+      if (m) tokens.add(m[1]);
+    }
+  } catch {
+    commits = [];
+  }
   try {
     await runGit(["branch", backup, "HEAD"], vaultRoot);
   } catch {
@@ -273,30 +367,40 @@ async function recoverFromRebaseConflict(
     await runGit(["branch", backup, "HEAD"], vaultRoot);
   }
   const target = `origin/${branch}`;
+  let ok = false;
+  let failure: string | undefined;
   try {
-    await runGit(["reset", "--keep", target], vaultRoot);
-  } catch {
-    let stashed = false;
     try {
-      stashed = !/No local changes/.test(
-        await runGit(["stash", "push", "--include-untracked", "-m", "second-brain conflict recovery"], vaultRoot),
-      );
+      await runGit(["reset", "--keep", target], vaultRoot);
     } catch {
-      /* nothing to stash */
-    }
-    await runGit(["reset", "--hard", target], vaultRoot);
-    if (stashed) {
+      let stashed = false;
       try {
-        await runGit(["stash", "pop"], vaultRoot);
+        stashed = !/No local changes/.test(
+          await runGit(["stash", "push", "--include-untracked", "-m", "second-brain conflict recovery"], vaultRoot),
+        );
       } catch {
-        await runGit(["reset", "--hard", "HEAD"], vaultRoot).catch(() => undefined);
-        console.error("uncommitted changes could not be re-applied after conflict recovery; kept in git stash");
+        /* nothing to stash */
+      }
+      await runGit(["reset", "--hard", target], vaultRoot);
+      if (stashed) {
+        try {
+          await runGit(["stash", "pop"], vaultRoot);
+        } catch {
+          await runGit(["reset", "--hard", "HEAD"], vaultRoot).catch(() => undefined);
+          console.error("uncommitted changes could not be re-applied after conflict recovery; kept in git stash");
+        }
       }
     }
+    ok = true;
+  } catch (err) {
+    failure = errText(err);
+    throw err;
+  } finally {
+    // Backup branch exists: always track it and emit, before any network push.
+    addConflictBranch(vaultRoot, backup);
+    if (ok) st(vaultRoot).unpushed = false;
+    emitSyncEvent({ vaultRoot, origin, backupBranch: backup, ok, error: failure, commits, tokens: [...tokens], paths });
   }
-  const s = st(vaultRoot);
-  s.conflictBranches.push(backup);
-  s.unpushed = false;
   console.error(
     `SYNC CONFLICT: remote changed ${paths.join(", ") || "(unknown paths)"}; local commits saved on branch ${backup}, ${branch} reset to ${target}`,
   );
@@ -327,7 +431,11 @@ async function recoverFromStashConflict(vaultRoot: string, paths: string[]): Pro
 // Pulls origin/<branch> with rebase + autostash. Conflicts are recovered (see
 // above) and thrown as SyncConflictError; other failures (network down) are
 // thrown as plain errors with the repo untouched. No-op without a remote.
-export async function pullRebase(vaultRoot: string, signal?: AbortSignal): Promise<void> {
+export async function pullRebase(
+  vaultRoot: string,
+  signal?: AbortSignal,
+  origin: SyncConflictOrigin = "write",
+): Promise<void> {
   if (!(await hasRemote(vaultRoot))) return;
   const branch = await currentBranch(vaultRoot);
   writeFileSync(markerPath(vaultRoot), String(process.pid));
@@ -342,7 +450,7 @@ export async function pullRebase(vaultRoot: string, signal?: AbortSignal): Promi
         const paths = await unmergedPaths(vaultRoot);
         await abortRebase(vaultRoot); // also restores the autostash
         if (paths.length > 0) {
-          const e = await recoverFromRebaseConflict(vaultRoot, branch, paths);
+          const e = await recoverFromRebaseConflict(vaultRoot, branch, paths, origin);
           recordError(vaultRoot, e);
           throw e;
         }
@@ -441,7 +549,7 @@ async function pushWithRetry(vaultRoot: string): Promise<void> {
     try {
       if (attempt > 1) {
         try {
-          await pullRebase(vaultRoot, signal);
+          await pullRebase(vaultRoot, signal, "push-retry");
         } catch (pullErr) {
           lastErr = pullErr;
           if (pullErr instanceof SyncConflictError) break; // retrying can't help
@@ -784,7 +892,7 @@ export function startPeriodicSync(vaultRoot: string, intervalMs: number): () => 
         await selfHeal(vaultRoot);
         if (!(await hasRemote(vaultRoot))) return idle;
         try {
-          await pullRebase(vaultRoot);
+          await pullRebase(vaultRoot, undefined, "periodic");
         } catch (err) {
           recordError(vaultRoot, err);
           console.error(`periodic sync pull failed: ${errText(err)}`);

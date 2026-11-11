@@ -8,7 +8,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { verifyToken } from "./auth/tokens";
 import { TokenContext, tokenContextStorage } from "./auth/context";
 import { db } from "./db";
-import { logAudit, logAuthFailure } from "./audit";
+import { logAudit, logAuthFailure, MAX_FIELD_LEN } from "./audit";
 import { startAdmin, withAdmin } from "./admin";
 import { listen } from "./listen";
 import { createMcpServer } from "./mcp";
@@ -20,8 +20,11 @@ import {
   getSyncStatus,
   hasRemote,
   redact,
+  refreshConflictBranches,
   runGit,
+  setSyncEventHandler,
   startPeriodicSync,
+  type SyncConflictEvent,
 } from "./vault/git";
 
 export const BODY_LIMIT = "1mb";
@@ -252,6 +255,58 @@ function vaultOk(vaultRoot: string): boolean {
 // Filled by initVault so /health/details never has to spawn git per call.
 const bootInfo = new Map<string, { hasRemote: boolean; branch: string }>();
 
+// Compact JSON audit detail, most important fields first, always within the
+// audit field cap (list sizes shrink and "more" counts what was left out).
+export function syncConflictDetail(e: SyncConflictEvent): string {
+  const shortSha = (c: string): string => c.slice(0, 12);
+  let tokens = e.tokens.slice(0, 5);
+  let paths = e.paths.slice(0, 3).map((p) => (p.length > 60 ? `${p.slice(0, 59)}…` : p));
+  const build = (): string => {
+    const more = e.tokens.length - tokens.length + (e.paths.length - paths.length);
+    const d: Record<string, unknown> = { origin: e.origin, branch: e.backupBranch };
+    if (!e.ok) {
+      d.ok = false;
+      d.error = (e.error ?? "recovery failed").slice(0, 80);
+    }
+    d.tokens = tokens;
+    d.paths = paths;
+    d.commits = e.commits.length;
+    if (e.commits.length > 0) {
+      d.first = shortSha(e.commits[e.commits.length - 1]);
+      d.last = shortSha(e.commits[0]);
+    }
+    if (more > 0) d.more = more;
+    return JSON.stringify(d);
+  };
+  let out = build();
+  while (out.length > MAX_FIELD_LEN && (paths.length > 0 || tokens.length > 0)) {
+    if (paths.length > 0) paths = paths.slice(0, -1);
+    else tokens = tokens.slice(0, -1);
+    out = build();
+  }
+  return out;
+}
+
+// Records an async sync conflict (acknowledged commits moved to a backup
+// branch) in the audit log under a fixed system identity. Synchronous write-path
+// conflicts are already audited by the tool's own row, so only background
+// origins are written here.
+export function auditSyncConflict(e: SyncConflictEvent): void {
+  if (e.origin === "write") return;
+  try {
+    logAudit({
+      tokenId: "system",
+      tokenName: "git-sync",
+      action: "sync_conflict",
+      result: "error",
+      detail: syncConflictDetail(e),
+      gitCommit: e.commits[0],
+    });
+  } catch (err) {
+    console.error(`audit write failed (sync_conflict ${e.backupBranch}): ${redact(err instanceof Error ? err.message : String(err))}`);
+  }
+}
+
 export function createApp(opts: AppOptions): Express {
   const { vaultRoot } = opts;
   const lifecycle = opts.lifecycle ?? new Lifecycle();
@@ -287,6 +342,7 @@ export function createApp(opts: AppOptions): Express {
         /* reported as false */
       }
     }
+    if (vaultUp) await refreshConflictBranches(vaultRoot);
     const sync = getSyncStatus(vaultRoot);
     const broken = !dbUp || !vaultUp;
     const degraded = sync.lastPushOk === false || sync.conflictBranches.length > 0;
@@ -300,6 +356,7 @@ export function createApp(opts: AppOptions): Express {
         unpushed: sync.unpushed,
         lastPushOk: sync.lastPushOk,
         conflicts: sync.conflictBranches.length,
+        conflictBranches: sync.conflictBranches,
       },
     });
   });
@@ -574,6 +631,7 @@ export async function start(): Promise<{ server: Server; shutdown: (signal?: str
   console.log(`second-brain-mcp listening on port ${port}`);
   const adminServer = await startAdmin(vaultRoot, lifecycle);
 
+  setSyncEventHandler(auditSyncConflict);
   const intervalRaw = process.env.VAULT_SYNC_INTERVAL_MS;
   const intervalMs = intervalRaw === undefined || intervalRaw === "" ? 60_000 : Number(intervalRaw);
   const stopSync = intervalMs > 0 ? startPeriodicSync(vaultRoot, intervalMs) : undefined;
