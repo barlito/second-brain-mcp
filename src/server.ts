@@ -10,6 +10,7 @@ import { TokenContext, tokenContextStorage } from "./auth/context";
 import { db } from "./db";
 import { logAudit, logAuthFailure, MAX_FIELD_LEN } from "./audit";
 import { startAdmin, withAdmin } from "./admin";
+import { startWebAdmin } from "./admin/web";
 import { listen } from "./listen";
 import { createMcpServer } from "./mcp";
 import {
@@ -630,6 +631,7 @@ export async function start(): Promise<{ server: Server; shutdown: (signal?: str
   }
   console.log(`second-brain-mcp listening on port ${port}`);
   const adminServer = await startAdmin(vaultRoot, lifecycle);
+  const webAdminServer = await startWebAdmin(vaultRoot, lifecycle, trustedProxy);
 
   setSyncEventHandler(auditSyncConflict);
   const intervalRaw = process.env.VAULT_SYNC_INTERVAL_MS;
@@ -637,7 +639,7 @@ export async function start(): Promise<{ server: Server; shutdown: (signal?: str
   const stopSync = intervalMs > 0 ? startPeriodicSync(vaultRoot, intervalMs) : undefined;
 
   shutdown = createShutdown({
-    server: withAdmin(server, adminServer),
+    server: withAdmin(withAdmin(server, adminServer), webAdminServer),
     lifecycle,
     stopSync: () => {
       stopSync?.();
