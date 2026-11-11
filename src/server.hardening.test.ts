@@ -1,10 +1,12 @@
-import "./server.helpers.test";
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { readdirSync } from "node:fs";
 import type { Response } from "express";
-import { cleanupDirs, lastAudit, listen, newRepo, tmp } from "./server.helpers.test";
+import { cleanup, makeTempDb, newRepo, tmp } from "./test-support/fixtures";
+import { lastAudit, listen } from "./test-support/server";
+
+makeTempDb();
 
 let server: typeof import("./server");
 let db: typeof import("./db").db;
@@ -16,7 +18,7 @@ before(async () => {
   const { createToken } = await import("./auth/tokens");
   token = createToken("hardening", [{ project: "p", section: "s", permission: "read" }]).token;
 });
-after(cleanupDirs);
+after(cleanup);
 
 const rpc = (id: number) => JSON.stringify({ jsonrpc: "2.0", method: "tools/list", id });
 const post = (baseUrl: string, headers: Record<string, string>, body = rpc(1)) =>

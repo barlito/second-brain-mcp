@@ -1,9 +1,11 @@
-import "./server.helpers.test";
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { cleanupDirs, git, listen, newRepo, tmp } from "./server.helpers.test";
+import { cleanup, git, makeTempDb, newRepo, tmp } from "./test-support/fixtures";
+import { listen } from "./test-support/server";
+
+makeTempDb();
 
 let createApp: typeof import("./server").createApp;
 let syncWrite: typeof import("./vault/git").syncWrite;
@@ -16,7 +18,7 @@ before(async () => {
   const { createToken } = await import("./auth/tokens");
   token = createToken("health-token", [{ project: "p", section: "s", permission: "read" }]).token;
 });
-after(cleanupDirs);
+after(cleanup);
 
 async function health(vault: string, details = false) {
   const app = await listen(createApp({ vaultRoot: vault }));
