@@ -2,6 +2,5 @@
 node_modules/
 dist/
 
-# Will hold the SQLite ACL token database (PR2) — excluded now so this
-# file doesn't need touching later.
+# SQLite ACL token database (DB_PATH default /data/acl.db) must never be committed.
 data/

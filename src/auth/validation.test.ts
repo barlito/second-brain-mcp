@@ -1,11 +1,8 @@
-import { test, before } from "node:test";
+import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { cleanup, makeTempDb } from "../test-support/fixtures";
 
-const tmpDir = mkdtempSync(join(tmpdir(), "second-brain-validation-test-"));
-process.env.DB_PATH = join(tmpDir, "test.db");
+makeTempDb();
 
 let t: typeof import("./tokens");
 let db: typeof import("../db").db;
@@ -15,6 +12,8 @@ before(async () => {
   t = await import("./tokens");
   ({ db } = await import("../db"));
 });
+
+after(cleanup);
 
 test("name is trimmed and length/control chars are validated", () => {
   const c = t.createToken("  padded  ", ok);

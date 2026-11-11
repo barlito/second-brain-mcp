@@ -77,7 +77,7 @@ function hashToken(token: string): string {
   return createHash("sha256").update(token).digest("hex");
 }
 
-// Prepared once at module load and reused — verifyToken is the hot path (every MCP request in PR4).
+// Prepared once at module load and reused — verifyToken is the hot path (every MCP request).
 const insertTokenStmt = db.prepare(
   "INSERT INTO tokens (id, name, token_hash, created_at) VALUES (?, ?, ?, ?)",
 );

@@ -11,25 +11,16 @@
 // targets, without relying on timing luck.
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { cleanup, makeTempDb, makeTempVault, sleep } from "./test-support/fixtures";
 import http from "node:http";
 import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 
-const dbDir = mkdtempSync(join(tmpdir(), "second-brain-cleanup-test-db-"));
-process.env.DB_PATH = join(dbDir, "test.db");
-
-const vaultRoot = mkdtempSync(join(tmpdir(), "second-brain-cleanup-test-vault-"));
+makeTempDb();
+const { vault: vaultRoot } = makeTempVault();
 process.env.VAULT_PATH = vaultRoot;
-
-function git(args: string[]): string {
-  return execFileSync("git", args, { cwd: vaultRoot, encoding: "utf8" });
-}
 
 let createToken: typeof import("./auth/tokens").createToken;
 let createApp: typeof import("./server").createApp;
@@ -39,10 +30,6 @@ let port: number;
 let token: string;
 
 before(async () => {
-  git(["init", "-b", "main"]);
-  git(["config", "user.name", "Test User"]);
-  git(["config", "user.email", "test@example.com"]);
-
   ({ createToken } = await import("./auth/tokens"));
   ({ createApp } = await import("./server"));
 
@@ -59,8 +46,7 @@ after(async () => {
   await new Promise<void>((resolve, reject) => {
     server.close((err) => (err ? reject(err) : resolve()));
   });
-  rmSync(vaultRoot, { recursive: true, force: true });
-  rmSync(dbDir, { recursive: true, force: true });
+  cleanup();
 });
 
 // Swaps a method on a prototype, returns a restore function. Used to spy on
@@ -72,10 +58,6 @@ function patch<T extends object, K extends keyof T>(obj: T, key: K, impl: T[K]):
   return () => {
     obj[key] = original;
   };
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function postMcp(): http.ClientRequest {

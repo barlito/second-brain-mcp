@@ -1,11 +1,13 @@
 // Client-facing error mapping in withAclAndAudit: each internal failure maps
 // to a fixed message while the real reason lands in the audit detail.
-import "./server.helpers.test";
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { callTool, cleanupDirs, configure, git, lastAudit, listen, newRepo, tmp } from "./server.helpers.test";
+import { cleanup, cloneRepo, git, makeBareRemote, makeTempDb, newRepo, tmp } from "./test-support/fixtures";
+import { callTool, lastAudit, listen } from "./test-support/server";
+
+makeTempDb();
 
 let createToken: typeof import("./auth/tokens").createToken;
 let createApp: typeof import("./server").createApp;
@@ -23,7 +25,7 @@ before(async () => {
     { project: "proj", section: "sect", permission: "read" },
   ]).token;
 });
-after(cleanupDirs);
+after(cleanup);
 
 const args = { project: "proj", section: "sect", note: "n" };
 
@@ -71,20 +73,14 @@ test("VaultBusyError (fresh index.lock) -> busy message", async () => {
 });
 
 test("SyncConflictError -> conflict message naming the backup branch", async () => {
-  const remote = tmp("remote");
-  git(["init", "--bare", "-b", "main"], remote);
-  const vault = tmp("vault");
-  git(["clone", remote, "."], vault);
-  git(["checkout", "-B", "main"], vault);
-  configure(vault);
+  const remote = makeBareRemote();
+  const vault = cloneRepo(remote, "vault");
   mkdirSync(join(vault, "proj", "sect"), { recursive: true });
   writeFileSync(join(vault, "proj", "sect", "n.md"), "base\n");
   git(["add", "."], vault);
   git(["commit", "-m", "seed"], vault);
   git(["push", "-u", "origin", "main"], vault);
-  const other = tmp("other");
-  git(["clone", remote, "."], other);
-  configure(other);
+  const other = cloneRepo(remote, "other");
 
   // Local unpushed edit vs conflicting remote edit of the same note.
   writeFileSync(join(vault, "proj", "sect", "n.md"), "local\n");

@@ -1,13 +1,13 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import Database from "better-sqlite3";
+import { cleanup, makeTempDb, tmp } from "../test-support/fixtures";
 
-const tmpDir = mkdtempSync(join(tmpdir(), "second-brain-maint-test-"));
-process.env.DB_PATH = join(tmpDir, "test.db");
+makeTempDb();
+const tmpDir = tmp("maint");
 
 let m: typeof import("./maintenance");
 let db: typeof import("../db").db;
@@ -18,7 +18,7 @@ before(async () => {
   db.prepare("INSERT INTO audit_log (ts, action, result) VALUES ('2000-01-01T00:00:00.000Z','a','ok')").run();
 });
 
-after(() => rmSync(tmpDir, { recursive: true, force: true }));
+after(cleanup);
 
 test("backupDb produces a readable copy, creates parent dir, refuses overwrite", async () => {
   const dest = join(tmpDir, "nested", "dir", "copy.db");
