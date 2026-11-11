@@ -24,6 +24,8 @@ services:
       - VAULT_REMOTE_URL=git@github.com:barlito/second-brain-vault.git
       - VAULT_BRANCH=main
       - VAULT_SYNC_INTERVAL_MS=60000
+      # Swarm DNS for the Traefik tasks: only they may set X-Forwarded-For.
+      - TRUSTED_PROXY=tasks.traefik_traefik
       - GIT_SSH_COMMAND=ssh -i /run/secrets/vault_deploy_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=10
       # git refuses to commit without an identity
       - GIT_AUTHOR_NAME=second-brain-mcp

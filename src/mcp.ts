@@ -10,7 +10,7 @@ import { getTokenContext, TokenContext } from "./auth/context";
 import { checkScope } from "./acl/check";
 import { AuditEntry, logAudit } from "./audit";
 import { InvalidSlugError, resolveNotePath, UnsafePathError } from "./vault/paths";
-import { SyncConflictError, syncWrite, VaultBusyError } from "./vault/git";
+import { redact, SyncConflictError, syncWrite, VaultBusyError } from "./vault/git";
 
 // Read at runtime (not imported) so tsc rootDir stays src/; resolves to the
 // repo-root package.json from both src/ and dist/.
@@ -47,11 +47,6 @@ interface AuditExtra {
 interface ToolRunResult {
   toolResult: CallToolResult;
   audit?: AuditExtra;
-}
-
-// Strips credentials from URLs before anything is logged.
-function redact(text: string): string {
-  return text.replace(/:\/\/[^@\/]+@/g, "://***@");
 }
 
 // An audit failure must never turn into a client-visible failure (least of

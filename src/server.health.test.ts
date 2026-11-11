@@ -8,40 +8,64 @@ import { cleanupDirs, git, listen, newRepo, tmp } from "./server.helpers.test";
 let createApp: typeof import("./server").createApp;
 let syncWrite: typeof import("./vault/git").syncWrite;
 let drainWrites: typeof import("./vault/git").drainWrites;
+let token: string;
 
 before(async () => {
   ({ createApp } = await import("./server"));
   ({ syncWrite, drainWrites } = await import("./vault/git"));
+  const { createToken } = await import("./auth/tokens");
+  token = createToken("health-token", [{ project: "p", section: "s", permission: "read" }]).token;
 });
 after(cleanupDirs);
 
-async function health(vault: string) {
+async function health(vault: string, details = false) {
   const app = await listen(createApp({ vaultRoot: vault }));
   try {
-    const res = await fetch(`${app.baseUrl}/health`);
+    const res = await fetch(`${app.baseUrl}/health${details ? "/details" : ""}`, {
+      headers: details ? { Authorization: `Bearer ${token}` } : {},
+    });
     return { status: res.status, body: (await res.json()) as Record<string, any> };
   } finally {
     await app.close();
   }
 }
 
-test("healthy vault: 200 ok, no secrets", async () => {
+test("public /health: only {status}", async () => {
   const { status, body } = await health(newRepo());
+  assert.equal(status, 200);
+  assert.deepEqual(body, { status: "ok" });
+});
+
+test("public /health: 503 when the vault is not a git repo", async () => {
+  const { status, body } = await health(tmp("plain"));
+  assert.equal(status, 503);
+  assert.deepEqual(body, { status: "error" });
+});
+
+test("/health/details requires a token", async () => {
+  const app = await listen(createApp({ vaultRoot: newRepo() }));
+  try {
+    assert.equal((await fetch(`${app.baseUrl}/health/details`)).status, 401);
+  } finally {
+    await app.close();
+  }
+});
+
+test("/health/details: full view for a valid token", async () => {
+  const { status, body } = await health(newRepo(), true);
   assert.equal(status, 200);
   assert.deepEqual(body, {
     status: "ok",
     db: "ok",
     vault: "ok",
-    sync: { hasRemote: false, unpushed: false, lastPushOk: null, conflicts: 0 },
+    sync: { hasRemote: false, branch: null, unpushed: false, lastPushOk: null, conflicts: 0 },
   });
 });
 
-test("vault that is not a git repo: 503", async () => {
-  const { status, body } = await health(tmp("plain"));
+test("/health/details: non-git vault is 503 with details", async () => {
+  const { status, body } = await health(tmp("plain2"), true);
   assert.equal(status, 503);
-  assert.equal(body.status, "error");
   assert.equal(body.vault, "error");
-  assert.equal(body.db, "ok");
 });
 
 test("failed push: 200 degraded", async () => {
@@ -50,7 +74,9 @@ test("failed push: 200 degraded", async () => {
   mkdirSync(join(vault, "p"), { recursive: true });
   await syncWrite(vault, join(vault, "p", "a.md"), "a\n", "a");
   await drainWrites();
-  const { status, body } = await health(vault);
+  const pub = await health(vault);
+  assert.deepEqual(pub, { status: 200, body: { status: "ok" } });
+  const { status, body } = await health(vault, true);
   assert.equal(status, 200);
   assert.equal(body.status, "degraded");
   assert.equal(body.sync.hasRemote, true);

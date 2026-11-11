@@ -259,7 +259,8 @@ test("audit_log has the expected ok/denied rows", async () => {
   assert.ok(rows.every((r) => r.client_ip), "client ip recorded on every row");
 });
 
-test("401 writes an auth/denied audit row with a client IP", async () => {
+test("401 writes a (coalesced) auth/denied audit row with a client IP", async () => {
+  // Same IP: at most one row per minute, so earlier 401s may already have logged it.
   const before = (db.prepare("SELECT COUNT(*) AS c FROM audit_log WHERE action = 'auth'").get() as { c: number }).c;
   for (const headers of [{}, { Authorization: "Bearer nope-not-a-token" }] as Record<string, string>[]) {
     const res = await fetch(baseUrl, {
@@ -272,8 +273,8 @@ test("401 writes an auth/denied audit row with a client IP", async () => {
   const rows = db
     .prepare("SELECT result, client_ip, token_id, detail FROM audit_log WHERE action = 'auth' ORDER BY id")
     .all() as { result: string; client_ip: string; token_id: string | null; detail: string }[];
-  assert.equal(rows.length - before, 2);
-  for (const r of rows.slice(-2)) {
+  assert.ok(rows.length >= 1 && rows.length - before <= 1);
+  for (const r of rows) {
     assert.equal(r.result, "denied");
     assert.match(r.client_ip, /127\.0\.0\.1/);
     assert.equal(r.token_id, null);

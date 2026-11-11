@@ -31,6 +31,10 @@ const PUSH_BACKOFF_MS = 1000;
 // An index.lock younger than this may belong to a live human git process.
 const STALE_LOCK_MS = 10 * 60_000;
 const REBASE_MARKER = "second-brain-rebase";
+// Present in .git while this server runs a git operation that may take
+// index.lock. If it is still there at startup, the previous process died
+// mid-operation and any index.lock is ours to remove.
+const OP_MARKER = "second-brain-op";
 
 function pushDeadlineMs(): number {
   return Number(process.env.SB_PUSH_DEADLINE_MS) || DEFAULT_PUSH_DEADLINE_MS;
@@ -40,7 +44,8 @@ function pushDeadlineMs(): number {
 // GIT_TERMINAL_PROMPT=0: never block waiting for credentials on a tty.
 const GIT_ENV = { ...process.env, LANG: "C", LC_ALL: "C", GIT_TERMINAL_PROMPT: "0" };
 
-function git(
+// The single git runner: every git child in the process goes through here.
+export function runGit(
   args: string[],
   cwd: string,
   timeout = LOCAL_TIMEOUT_MS,
@@ -73,7 +78,8 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
-function redact(text: string): string {
+// Strips credentials from URLs before anything is logged.
+export function redact(text: string): string {
   return text.replace(/:\/\/[^@/\s]+@/g, "://***@");
 }
 
@@ -102,6 +108,14 @@ export class VaultBusyError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "VaultBusyError";
+  }
+}
+
+// Startup was interrupted by a signal between two bootstrap git steps.
+export class BootstrapAbortedError extends Error {
+  constructor() {
+    super("bootstrap aborted by signal");
+    this.name = "BootstrapAbortedError";
   }
 }
 
@@ -169,17 +183,17 @@ function recordError(vaultRoot: string, err: unknown): void {
 
 // No remote configured is the normal local-dev case, not an error.
 export async function hasRemote(vaultRoot: string): Promise<boolean> {
-  return (await git(["remote"], vaultRoot)).trim().length > 0;
+  return (await runGit(["remote"], vaultRoot)).trim().length > 0;
 }
 
 // Not upstream-dependent: we always address `origin <branch>` explicitly.
 async function currentBranch(vaultRoot: string): Promise<string> {
-  return (await git(["symbolic-ref", "--short", "HEAD"], vaultRoot)).trim();
+  return (await runGit(["symbolic-ref", "--short", "HEAD"], vaultRoot)).trim();
 }
 
 async function hasUpstream(vaultRoot: string): Promise<boolean> {
   try {
-    await git(["rev-parse", "--abbrev-ref", "@{u}"], vaultRoot);
+    await runGit(["rev-parse", "--abbrev-ref", "@{u}"], vaultRoot);
     return true;
   } catch {
     return false;
@@ -201,7 +215,7 @@ function markerPath(vaultRoot: string): string {
 // Aborts a half-done rebase (if any); never throws.
 async function abortRebase(vaultRoot: string): Promise<void> {
   try {
-    await git(["rebase", "--abort"], vaultRoot);
+    await runGit(["rebase", "--abort"], vaultRoot);
   } catch {
     /* nothing to abort, or already gone */
   }
@@ -209,7 +223,7 @@ async function abortRebase(vaultRoot: string): Promise<void> {
 
 async function unmergedPaths(vaultRoot: string): Promise<string[]> {
   try {
-    return (await git(["diff", "--name-only", "--diff-filter=U"], vaultRoot)).split("\n").filter(Boolean);
+    return (await runGit(["diff", "--name-only", "--diff-filter=U"], vaultRoot)).split("\n").filter(Boolean);
   } catch {
     return [];
   }
@@ -253,29 +267,29 @@ async function recoverFromRebaseConflict(
 ): Promise<SyncConflictError> {
   let backup = conflictBranchName();
   try {
-    await git(["branch", backup, "HEAD"], vaultRoot);
+    await runGit(["branch", backup, "HEAD"], vaultRoot);
   } catch {
     backup = `${backup}-${randomBytes(2).toString("hex")}`;
-    await git(["branch", backup, "HEAD"], vaultRoot);
+    await runGit(["branch", backup, "HEAD"], vaultRoot);
   }
   const target = `origin/${branch}`;
   try {
-    await git(["reset", "--keep", target], vaultRoot);
+    await runGit(["reset", "--keep", target], vaultRoot);
   } catch {
     let stashed = false;
     try {
       stashed = !/No local changes/.test(
-        await git(["stash", "push", "--include-untracked", "-m", "second-brain conflict recovery"], vaultRoot),
+        await runGit(["stash", "push", "--include-untracked", "-m", "second-brain conflict recovery"], vaultRoot),
       );
     } catch {
       /* nothing to stash */
     }
-    await git(["reset", "--hard", target], vaultRoot);
+    await runGit(["reset", "--hard", target], vaultRoot);
     if (stashed) {
       try {
-        await git(["stash", "pop"], vaultRoot);
+        await runGit(["stash", "pop"], vaultRoot);
       } catch {
-        await git(["reset", "--hard", "HEAD"], vaultRoot).catch(() => undefined);
+        await runGit(["reset", "--hard", "HEAD"], vaultRoot).catch(() => undefined);
         console.error("uncommitted changes could not be re-applied after conflict recovery; kept in git stash");
       }
     }
@@ -287,7 +301,7 @@ async function recoverFromRebaseConflict(
     `SYNC CONFLICT: remote changed ${paths.join(", ") || "(unknown paths)"}; local commits saved on branch ${backup}, ${branch} reset to ${target}`,
   );
   try {
-    await git(["push", "origin", backup], vaultRoot, NETWORK_TIMEOUT_MS);
+    await runGit(["push", "origin", backup], vaultRoot, NETWORK_TIMEOUT_MS);
   } catch (err) {
     console.error(`could not push backup branch ${backup}: ${errText(err)}`);
   }
@@ -301,7 +315,7 @@ async function recoverFromRebaseConflict(
 // Autostash re-apply conflicted: the human's changes are safe in the stash
 // entry git keeps; clear the conflict markers so the tree is usable again.
 async function recoverFromStashConflict(vaultRoot: string, paths: string[]): Promise<SyncConflictError> {
-  await git(["reset", "--hard", "HEAD"], vaultRoot);
+  await runGit(["reset", "--hard", "HEAD"], vaultRoot);
   console.error(`SYNC CONFLICT: uncommitted changes to ${paths.join(", ")} conflict with the remote; kept in git stash`);
   return new SyncConflictError(
     `Uncommitted changes in the vault conflict with remote changes (${paths.join(", ")}); they were kept in git stash. Retry the write.`,
@@ -319,7 +333,7 @@ export async function pullRebase(vaultRoot: string, signal?: AbortSignal): Promi
   writeFileSync(markerPath(vaultRoot), String(process.pid));
   try {
     try {
-      await git(["pull", "--rebase", "--autostash", "origin", branch], vaultRoot, NETWORK_TIMEOUT_MS, signal);
+      await runGit(["pull", "--rebase", "--autostash", "origin", branch], vaultRoot, NETWORK_TIMEOUT_MS, signal);
       st(vaultRoot).lastPullAt = new Date().toISOString();
     } catch (err) {
       // A brand-new remote has no such branch yet: nothing to pull.
@@ -381,27 +395,39 @@ export async function commitFile(
   relativePath: string,
   message: string,
 ): Promise<string> {
-  await git(["add", "--", relativePath], vaultRoot);
+  await runGit(["add", "--", relativePath], vaultRoot);
   let staged = true;
   try {
     // Exit 0 = nothing staged for this path (identical re-write): skip the commit.
-    await git(["diff", "--cached", "--quiet", "--", relativePath], vaultRoot);
+    await runGit(["diff", "--cached", "--quiet", "--", relativePath], vaultRoot);
     staged = false;
   } catch (err) {
     if ((err as { code?: unknown }).code !== 1) throw err;
   }
   if (staged) {
     // Pathspec: never sweep in other staged changes (e.g. a human's drafts).
-    await git(["commit", "-m", message, "--", relativePath], vaultRoot);
+    await runGit(["commit", "-m", message, "--", relativePath], vaultRoot);
   }
-  return (await git(["rev-parse", "HEAD"], vaultRoot)).trim();
+  return (await runGit(["rev-parse", "HEAD"], vaultRoot)).trim();
 }
 
 // ---- push ----------------------------------------------------------------
 
+// Shutdown aborts pending pushes: they are network-only and the next periodic
+// sync retries them. Stays aborted until resetPushAbort() (tests only).
+let pushAbort = new AbortController();
+
+export function abortPendingPushes(): void {
+  pushAbort.abort();
+}
+
+export function resetPushAbort(): void {
+  pushAbort = new AbortController();
+}
+
 async function pushOnce(vaultRoot: string, signal: AbortSignal): Promise<void> {
   const branch = await currentBranch(vaultRoot);
-  await git(["push", "origin", branch], vaultRoot, NETWORK_TIMEOUT_MS, signal);
+  await runGit(["push", "origin", branch], vaultRoot, NETWORK_TIMEOUT_MS, signal);
 }
 
 // Never rejects. Retries pull first (a rejected push is usually non-fast-forward).
@@ -409,7 +435,7 @@ async function pushOnce(vaultRoot: string, signal: AbortSignal): Promise<void> {
 // by the time this settles no git process of ours is left running.
 async function pushWithRetry(vaultRoot: string): Promise<void> {
   const s = st(vaultRoot);
-  const signal = AbortSignal.timeout(pushDeadlineMs());
+  const signal = AbortSignal.any([AbortSignal.timeout(pushDeadlineMs()), pushAbort.signal]);
   let lastErr: unknown;
   for (let attempt = 1; attempt <= PUSH_RETRIES && !signal.aborted; attempt++) {
     try {
@@ -432,7 +458,7 @@ async function pushWithRetry(vaultRoot: string): Promise<void> {
       if (attempt < PUSH_RETRIES) await sleep(PUSH_BACKOFF_MS * attempt, signal);
     }
   }
-  if (signal.aborted && !lastErr) lastErr = new Error("push deadline exceeded");
+  if (signal.aborted && !lastErr) lastErr = new Error(pushAbort.signal.aborted ? "push aborted (shutdown)" : "push deadline exceeded");
   s.lastPushOk = false;
   s.lastPushAt = new Date().toISOString();
   recordError(vaultRoot, lastErr);
@@ -455,11 +481,41 @@ interface LockedResult<T> {
 
 let queue: Promise<unknown> = Promise.resolve();
 
-function withLock<T>(fn: () => Promise<LockedResult<T>>): Promise<T> {
-  const scheduled = queue.then(fn);
+function opMarkerPath(vaultRoot: string): string {
+  return path.join(gitDir(vaultRoot), OP_MARKER);
+}
+
+// Best effort: a failing marker must never fail the operation itself.
+function setOpMarker(vaultRoot: string): void {
+  try {
+    writeFileSync(opMarkerPath(vaultRoot), String(process.pid));
+  } catch {
+    /* no .git yet */
+  }
+}
+
+function clearOpMarker(vaultRoot: string): void {
+  rmSync(opMarkerPath(vaultRoot), { force: true });
+}
+
+// The op marker covers the whole turn, including the background push.
+function withLock<T>(vaultRoot: string, fn: () => Promise<LockedResult<T>>): Promise<T> {
+  const scheduled = queue.then(async () => {
+    setOpMarker(vaultRoot);
+    try {
+      return await fn();
+    } catch (err) {
+      clearOpMarker(vaultRoot);
+      throw err;
+    }
+  });
   queue = scheduled.then(
     async (r) => {
-      await r.settle.catch(() => undefined);
+      try {
+        await r.settle.catch(() => undefined);
+      } finally {
+        clearOpMarker(vaultRoot);
+      }
     },
     () => undefined,
   );
@@ -481,7 +537,7 @@ export function syncWrite(
   content: string,
   commitMessage: string,
 ): Promise<{ commitSha: string }> {
-  return withLock(async () => {
+  return withLock(vaultRoot, async () => {
     assertSafePath(vaultRoot, absolutePath);
     await selfHeal(vaultRoot);
     const remote = await hasRemote(vaultRoot);
@@ -535,13 +591,13 @@ async function restoreNote(
     /* best effort */
   }
   try {
-    await git(["rm", "--cached", "-q", "--ignore-unmatch", "--", relativePath], vaultRoot);
+    await runGit(["rm", "--cached", "-q", "--ignore-unmatch", "--", relativePath], vaultRoot);
   } catch {
     /* best effort */
   }
   // A restored file that is tracked must be re-synced to HEAD's index entry.
   try {
-    await git(["reset", "-q", "--", relativePath], vaultRoot);
+    await runGit(["reset", "-q", "--", relativePath], vaultRoot);
   } catch {
     /* no HEAD yet */
   }
@@ -567,7 +623,7 @@ export function startPeriodicSync(vaultRoot: string, intervalMs: number): () => 
     if (running) return;
     running = true;
     try {
-      await withLock(async () => {
+      await withLock(vaultRoot, async () => {
         await selfHeal(vaultRoot);
         if (!(await hasRemote(vaultRoot))) return idle;
         try {
@@ -597,13 +653,13 @@ async function hasLocalOnlyCommits(vaultRoot: string): Promise<boolean> {
   try {
     const branch = await currentBranch(vaultRoot);
     try {
-      await git(["rev-parse", "--verify", "-q", `origin/${branch}`], vaultRoot);
+      await runGit(["rev-parse", "--verify", "-q", `origin/${branch}`], vaultRoot);
     } catch {
       // Remote has no such branch yet: everything we have is unpushed.
-      await git(["rev-parse", "--verify", "-q", "HEAD"], vaultRoot);
+      await runGit(["rev-parse", "--verify", "-q", "HEAD"], vaultRoot);
       return true;
     }
-    return parseInt(await git(["rev-list", "--count", `origin/${branch}..HEAD`], vaultRoot), 10) > 0;
+    return parseInt(await runGit(["rev-list", "--count", `origin/${branch}..HEAD`], vaultRoot), 10) > 0;
   } catch {
     return false;
   }
@@ -613,8 +669,14 @@ async function hasLocalOnlyCommits(vaultRoot: string): Promise<boolean> {
 
 export async function ensureVaultRepo(
   vaultRoot: string,
-  opts: { remoteUrl?: string; branch?: string },
+  opts: { remoteUrl?: string; branch?: string; shouldAbort?: () => boolean },
 ): Promise<void> {
+  // Checked between git steps so a signal during startup stops it promptly
+  // (each step is itself bounded by its timeout).
+  const check = (): void => {
+    if (opts.shouldAbort?.()) throw new BootstrapAbortedError();
+  };
+  check();
   const branch = opts.branch ?? "main";
   const { remoteUrl } = opts;
   mkdirSync(vaultRoot, { recursive: true });
@@ -625,56 +687,73 @@ export async function ensureVaultRepo(
     }
     if (remoteUrl) {
       try {
-        await git(["clone", "-c", "core.symlinks=false", "--branch", branch, remoteUrl, "."], vaultRoot, NETWORK_TIMEOUT_MS * 4);
+        await runGit(["clone", "-c", "core.symlinks=false", "--branch", branch, remoteUrl, "."], vaultRoot, NETWORK_TIMEOUT_MS * 4);
       } catch (err) {
         // A brand-new empty remote has no branch to clone: start locally instead.
         let emptyRemote = false;
         try {
-          emptyRemote = !(await git(["ls-remote", "--heads", remoteUrl], vaultRoot, NETWORK_TIMEOUT_MS)).trim();
+          emptyRemote = !(await runGit(["ls-remote", "--heads", remoteUrl], vaultRoot, NETWORK_TIMEOUT_MS)).trim();
         } catch {
           /* unreachable: report the clone error */
         }
         if (!emptyRemote) throw new Error(`git clone failed: ${errText(err)}`);
         rmSync(path.join(vaultRoot, ".git"), { recursive: true, force: true });
-        await git(["init", "-b", branch], vaultRoot);
-        await git(["remote", "add", "origin", remoteUrl], vaultRoot);
+        await runGit(["init", "-b", branch], vaultRoot);
+        await runGit(["remote", "add", "origin", remoteUrl], vaultRoot);
       }
     } else {
-      await git(["init", "-b", branch], vaultRoot);
+      await runGit(["init", "-b", branch], vaultRoot);
       console.warn("vault has no git remote: writes will not be replicated");
     }
   }
 
-  await git(["config", "core.symlinks", "false"], vaultRoot);
+  check();
+  // A leftover op marker means the previous server died mid-operation, so an
+  // index.lock is ours. A lock without the marker is foreign: left alone.
+  const opMarker = opMarkerPath(vaultRoot);
+  if (existsSync(opMarker)) {
+    const lock = path.join(gitDir(vaultRoot), "index.lock");
+    const hadLock = existsSync(lock);
+    rmSync(lock, { force: true });
+    rmSync(opMarker, { force: true });
+    console.warn(
+      `previous run died mid-operation${hadLock ? ": removed leftover .git/index.lock" : ""}`,
+    );
+  }
+
+  await runGit(["config", "core.symlinks", "false"], vaultRoot);
+  check();
 
   let origin: string | null = null;
   try {
-    origin = (await git(["remote", "get-url", "origin"], vaultRoot)).trim();
+    origin = (await runGit(["remote", "get-url", "origin"], vaultRoot)).trim();
   } catch {
     /* no origin */
   }
   if (remoteUrl) {
-    if (origin === null) await git(["remote", "add", "origin", remoteUrl], vaultRoot);
+    if (origin === null) await runGit(["remote", "add", "origin", remoteUrl], vaultRoot);
     else if (origin !== remoteUrl) {
       throw new Error(`existing origin remote points elsewhere (${redact(origin)}); expected ${redact(remoteUrl)}`);
     }
   }
   if (origin === null && !remoteUrl) return;
 
-  const current = (await git(["symbolic-ref", "--short", "HEAD"], vaultRoot)).trim();
+  check();
+  const current = (await runGit(["symbolic-ref", "--short", "HEAD"], vaultRoot)).trim();
   if (current !== branch) {
     throw new Error(`vault is on branch "${current}" but "${branch}" was requested`);
   }
+  check();
   if (!(await hasUpstream(vaultRoot))) {
     try {
-      await git(["fetch", "origin"], vaultRoot, NETWORK_TIMEOUT_MS);
+      await runGit(["fetch", "origin"], vaultRoot, NETWORK_TIMEOUT_MS);
     } catch (err) {
       console.error(`startup fetch failed: ${errText(err)}`);
       return;
     }
     try {
-      await git(["rev-parse", "--verify", `origin/${branch}`], vaultRoot);
-      await git(["branch", `--set-upstream-to=origin/${branch}`], vaultRoot);
+      await runGit(["rev-parse", "--verify", `origin/${branch}`], vaultRoot);
+      await runGit(["branch", `--set-upstream-to=origin/${branch}`], vaultRoot);
     } catch {
       /* remote has no such branch yet; first push sets upstream */
     }
