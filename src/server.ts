@@ -1,8 +1,6 @@
 import dns from "node:dns";
-import { existsSync } from "node:fs";
 import type { Server } from "node:http";
 import net from "node:net";
-import path from "node:path";
 import express, { Express, NextFunction, Request, Response } from "express";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { verifyToken } from "./auth/tokens";
@@ -10,6 +8,8 @@ import { TokenContext, tokenContextStorage } from "./auth/context";
 import { db } from "./db";
 import { logAudit, logAuthFailure, MAX_FIELD_LEN } from "./audit";
 import { startAdmin, withAdmin } from "./admin";
+import { startWebAdmin } from "./admin/web";
+import { dbOk, getBootInfo, setBootInfo, vaultOk } from "./health";
 import { listen } from "./listen";
 import { createMcpServer } from "./mcp";
 import {
@@ -238,23 +238,6 @@ function makeBearerAuth(limiter: AuthFailureLimiter) {
   };
 }
 
-// Cheap liveness checks only (no child processes).
-function dbOk(): boolean {
-  try {
-    db.prepare("SELECT 1").get();
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function vaultOk(vaultRoot: string): boolean {
-  return existsSync(path.join(vaultRoot, ".git"));
-}
-
-// Filled by initVault so /health/details never has to spawn git per call.
-const bootInfo = new Map<string, { hasRemote: boolean; branch: string }>();
-
 // Compact JSON audit detail, most important fields first, always within the
 // audit field cap (list sizes shrink and "more" counts what was left out).
 export function syncConflictDetail(e: SyncConflictEvent): string {
@@ -312,7 +295,6 @@ export function createApp(opts: AppOptions): Express {
   const lifecycle = opts.lifecycle ?? new Lifecycle();
   const limiter = opts.authLimiter ?? new AuthFailureLimiter();
   const bearerAuth = makeBearerAuth(limiter);
-  const key = path.resolve(vaultRoot);
 
   const app = express();
   app.disable("x-powered-by");
@@ -332,16 +314,7 @@ export function createApp(opts: AppOptions): Express {
   app.get("/health/details", bearerAuth, async (_req, res) => {
     const dbUp = dbOk();
     const vaultUp = vaultOk(vaultRoot);
-    let info = bootInfo.get(key);
-    if (!info && vaultUp) {
-      // Not bootstrapped through initVault (tests): compute once, then cache.
-      try {
-        info = { hasRemote: await hasRemote(vaultRoot), branch: "" };
-        bootInfo.set(key, info);
-      } catch {
-        /* reported as false */
-      }
-    }
+    const info = await getBootInfo(vaultRoot);
     if (vaultUp) await refreshConflictBranches(vaultRoot);
     const sync = getSyncStatus(vaultRoot);
     const broken = !dbUp || !vaultUp;
@@ -492,13 +465,13 @@ export async function initVault(
     shouldAbort,
   });
   const remote = await hasRemote(vaultRoot);
-  bootInfo.set(path.resolve(vaultRoot), { hasRemote: remote, branch });
   let head = "none";
   try {
     head = (await runGit(["rev-parse", "--short", "HEAD"], vaultRoot)).trim();
   } catch {
     /* no commits yet */
   }
+  setBootInfo(vaultRoot, { hasRemote: remote, branch, head });
   return `vault ok: repo=yes remote=${remote ? "yes" : "no"} branch=${branch} head=${head}`;
 }
 
@@ -630,6 +603,7 @@ export async function start(): Promise<{ server: Server; shutdown: (signal?: str
   }
   console.log(`second-brain-mcp listening on port ${port}`);
   const adminServer = await startAdmin(vaultRoot, lifecycle);
+  const webAdminServer = await startWebAdmin(vaultRoot, lifecycle, trustedProxy);
 
   setSyncEventHandler(auditSyncConflict);
   const intervalRaw = process.env.VAULT_SYNC_INTERVAL_MS;
@@ -637,7 +611,7 @@ export async function start(): Promise<{ server: Server; shutdown: (signal?: str
   const stopSync = intervalMs > 0 ? startPeriodicSync(vaultRoot, intervalMs) : undefined;
 
   shutdown = createShutdown({
-    server: withAdmin(server, adminServer),
+    server: withAdmin(withAdmin(server, adminServer), webAdminServer),
     lifecycle,
     stopSync: () => {
       stopSync?.();

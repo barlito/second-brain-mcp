@@ -37,6 +37,9 @@ jobs:
         env:
           HOST_UID: "1000"
           HOST_GID: "1000"
+          # Dummy values: only checks that the files interpolate.
+          ADMIN_PROXY_SECRET: ci-dummy-admin-proxy-secret-0123456789abcdef
+          ADMIN_WEB_SECRET: ci-dummy-admin-web-secret-0123456789abcdef
         run: |
           docker compose -f docker-compose.yaml config -q
           IMAGE_TAG=ci docker compose -f docker-compose-prod.yml config -q

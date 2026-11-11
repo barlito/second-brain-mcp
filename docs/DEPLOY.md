@@ -35,6 +35,23 @@ Known gaps (not built yet): there is no publish/deploy GitHub workflow (CI only 
   ```
   (Equivalent: `docker build -t second-brain-mcp:ci .` then `docker tag second-brain-mcp:ci ghcr.io/barlito/second-brain-mcp:$TAG` before pushing.)
 
+### 3b. Web admin secrets and Authelia (required: compose refuses to render without them)
+
+The web admin UI (`https://second-brain-admin.barlito.fr`, port 3002) sits behind Traefik + Authelia. Two secrets are needed:
+
+- `ADMIN_PROXY_SECRET` (at least 32 chars): Traefik's `second-brain-admin-proxy` headers middleware sets `X-SB-Admin-Proxy` to this value AFTER Authelia, overwriting any client value. The app only believes `Remote-User`/`Remote-Groups` when this header matches (constant-time compare) and the peer is in `TRUSTED_PROXY`. Without it the web listener does not start.
+- `ADMIN_WEB_SECRET`: key for the CSRF tokens (so they survive restarts).
+
+- [ ] Generate both and store them as GitHub secrets of the deploy workflow (`ADMIN_PROXY_SECRET`, `ADMIN_WEB_SECRET`):
+  ```bash
+  openssl rand -hex 32
+  ```
+  The deploy job must export both in the environment of `make deploy.prod`; the prod compose uses `${ADMIN_PROXY_SECRET:?...}` / `${ADMIN_WEB_SECRET:?...}`. For a manual deploy: `export ADMIN_PROXY_SECRET=... ADMIN_WEB_SECRET=...` first. (Local `make deploy` generates and reuses `data/admin-proxy-secret` and `data/admin-web-secret`, mode 0600, gitignored.)
+- [ ] Authelia (in the traefik-base stack) must satisfy:
+  - the `authelia-auth@file` forwardAuth middleware lists `Remote-User`, `Remote-Groups` (and `Remote-Name`) in `authResponseHeaders`;
+  - an access control rule for host `second-brain-admin.barlito.fr` (and `second-brain-admin.local.barlito.fr` locally) restricted to `subject: ["group:admins"]` with the policy you want (e.g. `two_factor`); the app also checks the `admins` group itself (`ADMIN_GROUP`).
+  - the session cookie is named `authelia_session` (default); set `AUTHELIA_SESSION_COOKIE` if yours differs. CSRF tokens are bound to it, so POSTs are refused without it and a new login invalidates old forms.
+
 ### 4. Deploy
 
 - [ ] From the repo root, on the manager:
