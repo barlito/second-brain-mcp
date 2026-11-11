@@ -5,7 +5,7 @@ const warned = new Set<string>();
 // "*" is only valid as trailing levels (*:*:*, space:*:*, space:project:*). Rows that
 // bypassed createToken (manual SQL, old backups) with a non-"*" level after a "*" are
 // malformed: they match nothing, and we warn once per distinct row.
-function wellFormed(s: Scope): boolean {
+export function wellFormed(s: Scope): boolean {
   const ok = s.space === "*" ? s.project === "*" && s.section === "*" : s.project === "*" ? s.section === "*" : true;
   if (!ok) {
     const key = `${s.space}:${s.project}:${s.section}:${s.permission}`;

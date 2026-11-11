@@ -531,46 +531,200 @@ export async function drainWrites(): Promise<void> {
   } while (q !== queue);
 }
 
+// A create-only write found the note already there.
+export class NoteExistsError extends Error {
+  constructor() {
+    super("note already exists");
+    this.name = "NoteExistsError";
+  }
+}
+
+export interface WriteOptions {
+  // Create-only: refuse if the path exists (any type), checked inside the lock
+  // after the pull and the path-safety check.
+  mustNotExist?: boolean;
+}
+
 export function syncWrite(
   vaultRoot: string,
   absolutePath: string,
   content: string,
   commitMessage: string,
+  opts: WriteOptions = {},
+): Promise<{ commitSha: string }> {
+  return lockedWrite(vaultRoot, absolutePath, () => content, commitMessage, opts);
+}
+
+export class NoteTooLargeError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "NoteTooLargeError";
+  }
+}
+
+// Read-modify-write inside the write lock, so concurrent appends never lose
+// updates. Missing file counts as empty. Exactly one newline joins old and new.
+// `text` may be a function: it runs inside the lock, so anything time-dependent
+// (journal timestamps) is ordered like the file. maxChars caps the resulting note.
+export function syncAppend(
+  vaultRoot: string,
+  absolutePath: string,
+  text: string | (() => string),
+  commitMessage: string,
+  maxChars?: number,
+  // Validates the resulting content inside the lock; throws to refuse.
+  check?: (next: string) => void,
+): Promise<{ commitSha: string }> {
+  return lockedWrite(
+    vaultRoot,
+    absolutePath,
+    (prev) => {
+      const t = typeof text === "function" ? text() : text;
+      const next = (prev === "" || prev.endsWith("\n") ? prev : prev + "\n") + t.replace(/\n+$/, "") + "\n";
+      if (maxChars !== undefined && next.length > maxChars) throw new NoteTooLargeError("note would exceed the size limit");
+      check?.(next);
+      return next;
+    },
+    commitMessage,
+  );
+}
+
+// The source note has local changes that are not committed (a human is editing it).
+export class MoveSourceDirtyError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "MoveSourceDirtyError";
+  }
+}
+
+export class MoveSourceMissingError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "MoveSourceMissingError";
+  }
+}
+
+export class MoveTargetExistsError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "MoveTargetExistsError";
+  }
+}
+
+// Pull (best effort) under the lock; shared by every write operation.
+async function prepareLocked(vaultRoot: string): Promise<boolean> {
+  await selfHeal(vaultRoot);
+  const remote = await hasRemote(vaultRoot);
+  if (remote) {
+    try {
+      await pullRebase(vaultRoot);
+    } catch (err) {
+      if (err instanceof SyncConflictError) throw err;
+      // Remote unreachable: still commit locally; the push retry catches up.
+      recordError(vaultRoot, err);
+      console.error(`git pull failed, writing locally: ${errText(err)}`);
+    }
+  }
+  return remote;
+}
+
+// Resolve the caller now; the lock queue (settle) waits on the push instead.
+function finishLocked<T>(vaultRoot: string, remote: boolean, value: T): LockedResult<T> {
+  let settle: Promise<unknown> = Promise.resolve();
+  if (remote) {
+    st(vaultRoot).unpushed = true;
+    settle = pushWithRetry(vaultRoot);
+  }
+  return { value, settle };
+}
+
+function lockedWrite(
+  vaultRoot: string,
+  absolutePath: string,
+  build: (previous: string) => string,
+  commitMessage: string,
+  opts: WriteOptions = {},
 ): Promise<{ commitSha: string }> {
   return withLock(vaultRoot, async () => {
     assertSafePath(vaultRoot, absolutePath);
-    await selfHeal(vaultRoot);
-    const remote = await hasRemote(vaultRoot);
-    if (remote) {
-      try {
-        await pullRebase(vaultRoot);
-      } catch (err) {
-        if (err instanceof SyncConflictError) throw err;
-        // Remote unreachable: still commit locally; the push retry catches up.
-        recordError(vaultRoot, err);
-        console.error(`git pull failed, writing locally: ${errText(err)}`);
-      }
-    }
+    const remote = await prepareLocked(vaultRoot);
+    if (opts.mustNotExist && lstatOrNull(absolutePath)) throw new NoteExistsError();
 
     const relativePath = path.relative(vaultRoot, absolutePath);
     const previous = existsSync(absolutePath) ? readFileSync(absolutePath) : null;
     let commitSha: string;
     try {
-      writeNoteAtomic(vaultRoot, absolutePath, content);
+      writeNoteAtomic(vaultRoot, absolutePath, build(previous ? previous.toString("utf8") : ""));
       commitSha = await commitFile(vaultRoot, relativePath, commitMessage);
     } catch (err) {
       await restoreNote(vaultRoot, absolutePath, relativePath, previous);
       throw err;
     }
+    return finishLocked(vaultRoot, remote, { commitSha });
+  });
+}
 
-    // Resolve the caller with the commit now — don't make them wait on network
-    // push latency. The lock queue (settle) waits on it instead.
-    let settle: Promise<unknown> = Promise.resolve();
-    if (remote) {
-      st(vaultRoot).unpushed = true;
-      settle = pushWithRetry(vaultRoot);
+// Moves a note inside the lock; refuses to overwrite. Both paths are committed
+// via pathspec so unrelated staged changes are never swept in.
+export function syncMove(
+  vaultRoot: string,
+  fromAbs: string,
+  toAbs: string,
+  commitMessage: string,
+): Promise<{ commitSha: string; to: string }> {
+  return withLock(vaultRoot, async () => {
+    assertSafePath(vaultRoot, fromAbs);
+    assertSafePath(vaultRoot, toAbs);
+    const remote = await prepareLocked(vaultRoot);
+
+    if (!existsSync(fromAbs)) throw new MoveSourceMissingError(`source not found: ${fromAbs}`);
+    if (lstatOrNull(toAbs)) throw new MoveTargetExistsError(`target exists: ${toAbs}`);
+
+    const fromRel = path.relative(vaultRoot, fromAbs);
+    const toRel = path.relative(vaultRoot, toAbs);
+    const inHead = (await runGit(["ls-tree", "--name-only", "HEAD", "--", fromRel], vaultRoot).catch(() => "")).trim() !== "";
+    // A committed note with uncommitted edits: moving it would sweep a human's work into our commit.
+    if (inHead && (await runGit(["status", "--porcelain", "--", fromRel], vaultRoot)).trim() !== "") {
+      throw new MoveSourceDirtyError(`source has uncommitted changes: ${fromRel}`);
     }
-    return { value: { commitSha }, settle };
+    const headBefore = (await runGit(["rev-parse", "HEAD"], vaultRoot).catch(() => "")).trim();
+    let commitSha = "";
+    try {
+      mkdirSync(path.dirname(toAbs), { recursive: true });
+      assertSafePath(vaultRoot, path.dirname(toAbs));
+      const tracked = (await runGit(["ls-files", "--", fromRel], vaultRoot)).trim() !== "";
+      if (tracked) {
+        await runGit(["mv", "--", fromRel, toRel], vaultRoot);
+      } else {
+        // Untracked source: plain rename, stage only the target.
+        renameSync(fromAbs, toAbs);
+        await runGit(["add", "--", toRel], vaultRoot);
+      }
+      // Pathspec from what HEAD really has: a source that was only staged is not in HEAD.
+      const specs = inHead ? [fromRel, toRel] : [toRel];
+      await runGit(["commit", "-m", commitMessage, "--", ...specs], vaultRoot);
+    } catch (err) {
+      // Roll back only if the commit did not land (git may report an error after it did).
+      const headNow = (await runGit(["rev-parse", "HEAD"], vaultRoot).catch(() => "")).trim();
+      if (headNow !== headBefore) {
+        console.error(`git move: error after commit landed, keeping the move: ${errText(err)}`);
+      } else {
+        try {
+          if (!existsSync(fromAbs) && existsSync(toAbs)) renameSync(toAbs, fromAbs);
+        } catch {
+          /* best effort */
+        }
+        await runGit(["reset", "-q", "--", fromRel, toRel], vaultRoot).catch(() => undefined);
+        throw err;
+      }
+    }
+    try {
+      commitSha = (await runGit(["rev-parse", "HEAD"], vaultRoot)).trim();
+    } catch (err) {
+      // The commit is in; never undo the move over a failed read-back.
+      console.error(`git move: rev-parse after commit failed: ${errText(err)}`);
+    }
+    return finishLocked(vaultRoot, remote, { commitSha, to: toAbs });
   });
 }
 

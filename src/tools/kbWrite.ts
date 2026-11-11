@@ -1,15 +1,9 @@
 import { z } from "zod";
 import { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import { resolveNotePath } from "../vault/paths";
-import { syncWrite } from "../vault/git";
-import { kbArgsShape, MAX_CONTENT_CHARS, RegisterTool, toolError, toolText, withAclAndAudit } from "./common";
-import {
-  ENTRY_NOTE,
-  ENTRY_NOTE_MAX_BYTES,
-  entryNoteTooLargeMessage,
-  OVERVIEW_SECTION,
-  RESERVED_SECTIONS_SUMMARY,
-} from "./conventions";
+import { kbArgsShape, MAX_CONTENT_CHARS, RegisterTool, withAclAndAudit } from "./common";
+import { ENTRY_NOTE_MAX_BYTES, RESERVED_SECTIONS_SUMMARY } from "./conventions";
+import { rejectReservedSection } from "./reserved";
+import { writeNote } from "./writeNote";
 
 export const register: RegisterTool = (server, { vaultRoot }) => {
   server.registerTool(
@@ -28,24 +22,14 @@ export const register: RegisterTool = (server, { vaultRoot }) => {
     },
     async ({ space, project, section, note, content }): Promise<CallToolResult> =>
       withAclAndAudit("kb_write", { space, project, section, note }, "write", async (ctx) => {
-        if (section === OVERVIEW_SECTION && note === ENTRY_NOTE) {
-          const bytes = Buffer.byteLength(content, "utf8");
-          if (bytes > ENTRY_NOTE_MAX_BYTES) {
-            return {
-              toolResult: toolError(entryNoteTooLargeMessage(bytes)),
-              audit: { detail: `entry note too large (${bytes} bytes)` },
-            };
-          }
-        }
-        const absolutePath = resolveNotePath(vaultRoot, space, project, section, note);
-        const { commitSha } = await syncWrite(
+        const reserved = rejectReservedSection(section);
+        if (reserved) return reserved;
+        return writeNote(
           vaultRoot,
-          absolutePath,
+          { space, project, section, note },
           content,
           `kb_write: ${space}/${project}/${section}/${note} via ${ctx.name}`,
         );
-
-        return { toolResult: toolText(commitSha), audit: { gitCommit: commitSha } };
       }),
   );
 };

@@ -28,6 +28,12 @@ import {
   pullRebase,
   startPeriodicSync,
   syncWrite,
+  syncAppend,
+  syncMove,
+  MoveSourceDirtyError,
+  MoveSourceMissingError,
+  NoteTooLargeError,
+  MoveTargetExistsError,
   writeNoteAtomic,
 } from "./git";
 import { cleanup, cloneRepo, git, makeBareRemote, makeTempVault, newRepo, sleep, tmp } from "../test-support/fixtures";
@@ -66,7 +72,7 @@ test("commit only includes the target file even if another file is staged", asyn
   writeFileSync(join(repo, "draft.md"), "human draft\n");
   git(["add", "draft.md"], repo);
   await syncWrite(repo, join(repo, "note.md"), "x\n", "write note");
-  assert.equal(git(["show", "--name-only", "--format=", "HEAD"], repo).trim(), "note.md");
+  assert.equal(git(["show", "--no-renames", "--name-only", "--format=", "HEAD"], repo).trim(), "note.md");
   assert.equal(git(["diff", "--cached", "--name-only"], repo).trim(), "draft.md");
 });
 
@@ -82,7 +88,7 @@ test("truly concurrent syncWrite calls: one commit per file, no interleaving", a
   for (const n of names) {
     const line = log.find((l) => l.endsWith(`write ${n}`));
     assert.ok(line);
-    const files = git(["show", "--name-only", "--format=", line.split(" ")[0]], repo).trim();
+    const files = git(["show", "--no-renames", "--name-only", "--format=", line.split(" ")[0]], repo).trim();
     assert.equal(files, `${n}.md`);
   }
   assert.equal(git(["status", "--porcelain"], repo), "");
@@ -587,4 +593,123 @@ test("abortPendingPushes: pending push is abandoned, the commit still lands", as
 
 test("redact strips URL credentials", () => {
   assert.equal(redact("fatal: https://user:tok@host/x.git"), "fatal: https://***@host/x.git");
+});
+
+test("syncAppend: 10 concurrent appends all land, one commit each", async () => {
+  const repo = newRepo();
+  writeFileSync(join(repo, "seed.md"), "s\n");
+  git(["add", "."], repo);
+  git(["commit", "-m", "seed"], repo);
+  const abs = join(repo, "a", "b", "journal", "2026-11.md");
+  const before = Number(git(["rev-list", "--count", "HEAD"], repo));
+  await Promise.all(Array.from({ length: 10 }, (_, i) => syncAppend(repo, abs, `- e${i}`, `append ${i}`)));
+  const lines = readFileSync(abs, "utf8").split("\n").filter(Boolean);
+  assert.equal(lines.length, 10);
+  for (let i = 0; i < 10; i++) assert.ok(lines.includes(`- e${i}`));
+  assert.equal(Number(git(["rev-list", "--count", "HEAD"], repo)) - before, 10);
+  assert.equal(git(["status", "--porcelain"], repo), "");
+});
+
+test("syncAppend: newline handling for existing files", async () => {
+  const repo = newRepo();
+  const abs = join(repo, "n.md");
+  writeFileSync(abs, "no trailing newline");
+  await syncAppend(repo, abs, "x\n\n", "m");
+  assert.equal(readFileSync(abs, "utf8"), "no trailing newline\nx\n");
+  await syncAppend(repo, abs, "y", "m");
+  assert.equal(readFileSync(abs, "utf8"), "no trailing newline\nx\ny\n");
+});
+
+test("syncAppend with a remote: pushes and keeps all entries from concurrent calls", async () => {
+  const { vault, remote } = newVaultWithRemote();
+  const abs = join(vault, "p", "q", "journal", "m.md");
+  await Promise.all([1, 2, 3].map((i) => syncAppend(vault, abs, `- r${i}`, `a${i}`)));
+  await drainWrites();
+  assert.equal(git(["rev-parse", "HEAD"], vault), git(["rev-parse", "main"], remote));
+  assert.equal(readFileSync(abs, "utf8").split("\n").filter(Boolean).length, 3);
+});
+
+test("syncMove: moves tracked file, commits both paths, creates target dir", async () => {
+  const repo = newRepo();
+  const from = join(repo, "a", "b", "notes", "x.md");
+  await syncWrite(repo, from, "body\n", "add");
+  writeFileSync(join(repo, "unrelated.md"), "u\n");
+  git(["add", "unrelated.md"], repo); // staged human change must not be swept in
+  const to = join(repo, "a", "b", "archive", "notes-x.md");
+  const r = await syncMove(repo, from, to, "mv");
+  assert.equal(r.to, to);
+  assert.equal(r.commitSha, git(["rev-parse", "HEAD"], repo).trim());
+  assert.equal(existsSync(from), false);
+  assert.equal(readFileSync(to, "utf8"), "body\n");
+  assert.deepEqual(git(["show", "--no-renames", "--name-only", "--format=", "HEAD"], repo).split("\n").filter(Boolean).sort(), [
+    "a/b/archive/notes-x.md",
+    "a/b/notes/x.md",
+  ]);
+  assert.match(git(["status", "--porcelain"], repo), /unrelated\.md/);
+});
+
+test("syncMove: refuses an existing target, missing source; untracked source works", async () => {
+  const repo = newRepo();
+  const a = join(repo, "a.md");
+  const b = join(repo, "b.md");
+  await syncWrite(repo, a, "A\n", "a");
+  await syncWrite(repo, b, "B\n", "b");
+  await assert.rejects(syncMove(repo, a, b, "mv"), MoveTargetExistsError);
+  assert.equal(readFileSync(b, "utf8"), "B\n");
+  await assert.rejects(syncMove(repo, join(repo, "nope.md"), join(repo, "c.md"), "mv"), MoveSourceMissingError);
+  writeFileSync(join(repo, "u.md"), "U\n"); // never committed
+  await syncMove(repo, join(repo, "u.md"), join(repo, "d", "u.md"), "mv");
+  assert.equal(readFileSync(join(repo, "d", "u.md"), "utf8"), "U\n");
+  assert.equal(git(["status", "--porcelain"], repo), "");
+});
+
+test("syncAppend: text builder runs inside the lock, in file order", async () => {
+  const repo = newRepo();
+  const abs = join(repo, "j.md");
+  let n = 0;
+  await Promise.all(Array.from({ length: 8 }, () => syncAppend(repo, abs, () => `- ${n++}`, "a")));
+  assert.deepEqual(readFileSync(abs, "utf8").split("\n").filter(Boolean), Array.from({ length: 8 }, (_, i) => `- ${i}`));
+});
+
+test("syncAppend: maxChars boundary", async () => {
+  const repo = newRepo();
+  const abs = join(repo, "m.md");
+  await syncAppend(repo, abs, "x".repeat(9), "a", 10); // 9 + \n = 10, allowed
+  await assert.rejects(syncAppend(repo, abs, "y", "a", 11 + 1 - 2), NoteTooLargeError);
+  assert.equal(readFileSync(abs, "utf8"), "x".repeat(9) + "\n");
+  assert.equal(git(["status", "--porcelain"], repo), "");
+});
+
+test("syncMove: source staged but not in HEAD is moved and committed", async () => {
+  const repo = newRepo();
+  writeFileSync(join(repo, "seed.md"), "s\n");
+  git(["add", "."], repo);
+  git(["commit", "-m", "seed"], repo);
+  writeFileSync(join(repo, "new.md"), "N\n");
+  git(["add", "new.md"], repo);
+  await syncMove(repo, join(repo, "new.md"), join(repo, "arch", "new.md"), "mv");
+  assert.equal(readFileSync(join(repo, "arch", "new.md"), "utf8"), "N\n");
+  assert.equal(git(["status", "--porcelain"], repo), "");
+});
+
+test("syncMove: refuses a committed source with uncommitted edits", async () => {
+  const repo = newRepo();
+  const a = join(repo, "a.md");
+  await syncWrite(repo, a, "A\n", "a");
+  writeFileSync(a, "edited\n");
+  await assert.rejects(syncMove(repo, a, join(repo, "z", "a.md"), "mv"), MoveSourceDirtyError);
+  assert.equal(readFileSync(a, "utf8"), "edited\n");
+  assert.equal(existsSync(join(repo, "z", "a.md")), false);
+});
+
+test("syncMove: a failed commit (hook) rolls the move back", async () => {
+  const repo = newRepo();
+  const a = join(repo, "a.md");
+  await syncWrite(repo, a, "A\n", "a");
+  const hook = join(repo, ".git", "hooks", "pre-commit");
+  writeFileSync(hook, "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+  await assert.rejects(syncMove(repo, a, join(repo, "z", "a.md"), "mv"));
+  assert.equal(readFileSync(a, "utf8"), "A\n");
+  assert.equal(existsSync(join(repo, "z", "a.md")), false);
+  assert.equal(git(["status", "--porcelain"], repo), "");
 });

@@ -1,9 +1,6 @@
-import { existsSync } from "node:fs";
 import { z } from "zod";
 import { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import { resolveNotePath } from "../vault/paths";
-import { syncWrite } from "../vault/git";
-import { projectArg, RegisterTool, spaceArg, toolError, toolText, withAclAndAudit } from "./common";
+import { projectArg, RegisterTool, spaceArg, withAclAndAudit } from "./common";
 import {
   ENTRY_NOTE,
   entryNoteTemplate,
@@ -11,6 +8,7 @@ import {
   RESERVED_SECTIONS_SUMMARY,
   SUMMARY_MAX_CHARS,
 } from "./conventions";
+import { writeNote } from "./writeNote";
 
 export const register: RegisterTool = (server, { vaultRoot }) => {
   server.registerTool(
@@ -36,22 +34,13 @@ export const register: RegisterTool = (server, { vaultRoot }) => {
         { space, project, section: OVERVIEW_SECTION, note: ENTRY_NOTE },
         "write",
         async (ctx) => {
-          const absolutePath = resolveNotePath(vaultRoot, space, project, OVERVIEW_SECTION, ENTRY_NOTE);
-          if (existsSync(absolutePath)) {
-            return {
-              toolResult: toolError(
-                `${space}/${project}/overview/index already exists. Edit it with kb_write instead.`,
-              ),
-              audit: { detail: "entry note already exists" },
-            };
-          }
-          const { commitSha } = await syncWrite(
+          return writeNote(
             vaultRoot,
-            absolutePath,
+            { space, project, section: OVERVIEW_SECTION, note: ENTRY_NOTE },
             entryNoteTemplate(project, summary),
             `kb_init_project: ${space}/${project} via ${ctx.name}`,
+            { mustNotExist: true },
           );
-          return { toolResult: toolText(commitSha), audit: { gitCommit: commitSha } };
         },
       ),
   );

@@ -11,7 +11,7 @@
 // targets, without relying on timing luck.
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { cleanup, makeTempDb, makeTempVault, sleep } from "./test-support/fixtures";
+import { cleanup, makeTempDb, makeTempVault } from "./test-support/fixtures";
 import http from "node:http";
 import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -60,6 +60,17 @@ function patch<T extends object, K extends keyof T>(obj: T, key: K, impl: T[K]):
   };
 }
 
+const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
+
+// Polls until cond() holds, with a generous timeout instead of a fixed delay.
+async function waitFor(cond: () => boolean, what: string, timeoutMs = 5000): Promise<void> {
+  const start = Date.now();
+  while (!cond()) {
+    if (Date.now() - start > timeoutMs) throw new Error(`timed out waiting for ${what}`);
+    await new Promise((r) => setTimeout(r, 5));
+  }
+}
+
 function postMcp(): http.ClientRequest {
   const payload = Buffer.from(
     JSON.stringify({
@@ -98,11 +109,21 @@ test("client disconnect while the handler is still mid-flight still closes trans
   const connectGate = new Promise<void>((resolve) => {
     releaseConnect = resolve;
   });
+  let connectEntered!: () => void;
+  const enteredConnect = new Promise<void>((resolve) => {
+    connectEntered = resolve;
+  });
+  let connectReturned!: () => void;
+  const returnedFromConnect = new Promise<void>((resolve) => {
+    connectReturned = resolve;
+  });
 
   const restoreConnect = patch(McpServer.prototype, "connect", async function (
     this: McpServer,
   ) {
+    connectEntered();
     await connectGate; // simulate the handler being stuck mid-await, like a real in-flight request
+    connectReturned();
   } as McpServer["connect"]);
   const restoreTransportClose = patch(
     StreamableHTTPServerTransport.prototype,
@@ -121,21 +142,25 @@ test("client disconnect while the handler is still mid-flight still closes trans
     const req = postMcp();
 
     // Let the request reach the handler and get stuck on the patched connect().
-    await sleep(30);
+    await enteredConnect;
     assert.equal(transportCloseCalls, 0, "sanity: handler should still be mid-flight, not closed yet");
 
     // Client disconnects while still mid-flight — this is the race the fix closes.
     req.destroy();
-    await sleep(30);
+    await waitFor(() => transportCloseCalls > 0 && serverCloseCalls > 0, "cleanup after client disconnect");
+    await tick(); // give any (incorrect) duplicate close a chance to show up
 
     assert.equal(transportCloseCalls, 1, "transport.close() should run exactly once");
     assert.equal(serverCloseCalls, 1, "server.close() should run exactly once");
   } finally {
     releaseConnect();
+    // Let the now-unstuck handler finish unwinding before restoring/next test.
+    // Bounded, since connect() may never have been entered if the test failed early.
+    await Promise.race([returnedFromConnect, new Promise((r) => setTimeout(r, 1000))]);
+    await tick();
     restoreConnect();
     restoreTransportClose();
     restoreServerClose();
-    await sleep(20); // let the now-unstuck handler finish unwinding before the next test
   }
 });
 

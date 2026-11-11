@@ -79,10 +79,13 @@ test("kb_init_project rejects a too-long or empty summary", async () => {
   const { client, transport } = await connectClient(baseUrl, tokenW);
   try {
     for (const summary of ["x".repeat(conv.SUMMARY_MAX_CHARS + 1), "  "]) {
-      const r = await client
+      // The SDK reports a schema failure either as a rejection or as an isError result.
+      const msg = await client
         .callTool({ name: "kb_init_project", arguments: { space: "sp", project: "pj", summary } })
-        .catch(() => ({ isError: true }));
-      assert.equal(r.isError, true);
+        .then((r) => JSON.stringify(r))
+        .catch((e: Error) => e.message);
+      assert.match(msg, /summary/);
+      assert.match(msg, /too long|must not be empty/);
     }
   } finally {
     await transport.close();
@@ -94,6 +97,34 @@ test("kb_init_project rejects a too-long or empty summary", async () => {
     summary: "x".repeat(conv.SUMMARY_MAX_CHARS),
   });
   assert.equal(ok.text, "Permission denied.");
+});
+
+test("kb_append refuses to grow overview/index past the cap", async () => {
+  const a = (entry: string) =>
+    callTool(baseUrl, tokenW, "kb_append", { space: "sp", project: "pj", section: "overview", note: "index", entry });
+  const file = join(vaultRoot, "sp/pj/overview/index.md");
+  assert.equal((await a("small entry")).isError, false);
+  let refused;
+  for (let i = 0; i < 20 && !refused; i++) {
+    const r = await a("x".repeat(900));
+    if (r.isError) refused = r;
+  }
+  assert.ok(refused, "append past the cap must be refused");
+  assert.match(refused.text, /too large.*move detail/s);
+  assert.ok(Buffer.byteLength(readFileSync(file, "utf8")) <= conv.ENTRY_NOTE_MAX_BYTES);
+});
+
+test("every tool named in the instructions is registered", async () => {
+  const { client, transport } = await connectClient(baseUrl, tokenW);
+  try {
+    const registered = new Set((await client.listTools()).tools.map((t) => t.name));
+    const mentioned = new Set(conv.SERVER_INSTRUCTIONS.match(/\bkb_[a-z_]+/g));
+    assert.ok(mentioned.size >= 6);
+    for (const name of mentioned) assert.ok(registered.has(name), `${name} not registered`);
+    for (const r of conv.RESERVED_SECTIONS) assert.ok(conv.SERVER_INSTRUCTIONS.includes(`- ${r.section}:`));
+  } finally {
+    await transport.close();
+  }
 });
 
 test("kb_write caps overview/index at the byte limit", async () => {
