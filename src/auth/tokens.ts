@@ -40,7 +40,6 @@ export function validateTokenInput(name: unknown, scopes: unknown): { name: stri
         throw new TokenValidationError(`invalid ${kinds[i]} slug: ${JSON.stringify(v)}`);
       }
     });
-    if (s.space === "inbox") throw new TokenValidationError('space "inbox" is reserved and cannot be granted');
     // "*" only as trailing levels: once a level is "*", every deeper one must be too.
     for (let i = 0; i < 2; i++) {
       if (levels[i] === "*" && levels[i + 1] !== "*") {

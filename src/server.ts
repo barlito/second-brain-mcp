@@ -10,6 +10,7 @@ import { TokenContext, tokenContextStorage } from "./auth/context";
 import { db } from "./db";
 import { logAudit, logAuthFailure } from "./audit";
 import { startAdmin, withAdmin } from "./admin";
+import { listen } from "./listen";
 import { createMcpServer } from "./mcp";
 import {
   abortPendingPushes,
@@ -514,13 +515,7 @@ export function createShutdown(deps: ShutdownDeps): (signal?: string) => Promise
   };
 }
 
-// Rejects on listen errors (EADDRINUSE, EACCES, ...): Express 5 hands them to
-// the callback.
-export function listen(app: Express, port: number): Promise<Server> {
-  return new Promise<Server>((resolve, reject) => {
-    const s = app.listen(port, (err?: Error) => (err ? reject(err) : resolve(s)));
-  });
-}
+export { listen };
 
 export async function start(): Promise<{ server: Server; shutdown: (signal?: string) => Promise<void> }> {
   const vaultRoot = process.env.VAULT_PATH;
@@ -577,7 +572,7 @@ export async function start(): Promise<{ server: Server; shutdown: (signal?: str
     process.exit(1);
   }
   console.log(`second-brain-mcp listening on port ${port}`);
-  const adminServer = await startAdmin(vaultRoot);
+  const adminServer = await startAdmin(vaultRoot, lifecycle);
 
   const intervalRaw = process.env.VAULT_SYNC_INTERVAL_MS;
   const intervalMs = intervalRaw === undefined || intervalRaw === "" ? 60_000 : Number(intervalRaw);

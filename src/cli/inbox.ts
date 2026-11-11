@@ -1,12 +1,13 @@
 #!/usr/bin/env node
 // Inbox review CLI: talks to the server's local admin listener (never touches git itself).
 import { parseArgs as nodeParseArgs } from "node:util";
+import { ADMIN_HOST, adminPort } from "../admin";
 import { isValidInboxId } from "../inbox";
 
 export const USAGE = "usage: inbox.js <list | show <id> | accept <id> [--overwrite] | reject <id>>";
 
 export function adminUrl(env: NodeJS.ProcessEnv = process.env): string {
-  return `http://127.0.0.1:${env.ADMIN_PORT || 3001}`;
+  return `http://${ADMIN_HOST}:${adminPort(env)}`;
 }
 
 async function call(base: string, method: string, path: string, body?: unknown): Promise<{ status: number; json: any }> {
@@ -29,6 +30,8 @@ function need(r: { status: number; json: any }): any {
   throw new Error(r.json?.error ?? `admin listener returned HTTP ${r.status}`);
 }
 
+const commitNote = (c: string | null): string => (c ? ` (commit ${c})` : " (no commit needed)");
+
 function idArg(positionals: string[]): string {
   const id = positionals[1];
   if (!id) throw new Error(USAGE);
@@ -45,11 +48,13 @@ export async function run(argv: string[], base = adminUrl()): Promise<string> {
   });
   switch (positionals[0]) {
     case "list": {
-      const { proposals } = need(await call(base, "GET", "/admin/inbox"));
+      const { proposals, truncated } = need(await call(base, "GET", "/admin/inbox"));
       if (proposals.length === 0) return "Inbox is empty.";
-      return proposals
-        .map((p: any) => `${p.id}  ${p.target ?? "(malformed)"}  by=${p.proposed_by ?? "?"}  ${p.size}B  ${JSON.stringify(p.reason ?? "")}`)
-        .join("\n");
+      const lines = proposals.map(
+        (p: any) => `${p.id}  ${p.target ?? "(malformed)"}  by=${p.proposed_by ?? "?"}  ${p.size}B  ${JSON.stringify(p.reason ?? "")}`,
+      );
+      if (truncated) lines.push(`(list truncated to the first ${proposals.length} proposals)`);
+      return lines.join("\n");
     }
     case "show": {
       const p = need(await call(base, "GET", `/admin/inbox/${idArg(positionals)}`));
@@ -57,11 +62,11 @@ export async function run(argv: string[], base = adminUrl()): Promise<string> {
     }
     case "accept": {
       const r = need(await call(base, "POST", `/admin/inbox/${idArg(positionals)}/accept`, { overwrite: values.overwrite === true }));
-      return `Accepted into ${r.target} (commit ${r.commit}).`;
+      return `Accepted into ${r.target}${commitNote(r.commit)}.`;
     }
     case "reject": {
       const r = need(await call(base, "POST", `/admin/inbox/${idArg(positionals)}/reject`, {}));
-      return `Rejected proposal for ${r.target} (commit ${r.commit}).`;
+      return `Rejected proposal for ${r.target}${commitNote(r.commit)}.`;
     }
     default:
       throw new Error(USAGE);

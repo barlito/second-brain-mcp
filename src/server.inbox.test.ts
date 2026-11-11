@@ -1,10 +1,11 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import type { AddressInfo } from "node:net";
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { cleanup, git, makeTempDb, makeTempVault } from "./test-support/fixtures";
 import { callTool, lastAudit, listen } from "./test-support/server";
+import { inboxPath, serializeProposal } from "./inbox";
 
 makeTempDb();
 const { vault } = makeTempVault();
@@ -20,8 +21,9 @@ let tRO: string;
 let tW: string;
 let tMaster: string;
 let drain: () => Promise<void>;
+let lc: import("./server").Lifecycle;
 
-const ids = (): string[] => (existsSync(join(vault, "inbox")) ? readdirSync(join(vault, "inbox")).map((f) => f.replace(/\.md$/, "")) : []);
+const ids = (): string[] => (existsSync(join(vault, "_inbox")) ? readdirSync(join(vault, "_inbox")).map((f) => f.replace(/\.md$/, "")) : []);
 const commits = (): number => Number(git(["rev-list", "--count", "HEAD"], vault).trim());
 const post = (path: string, body: unknown = {}, headers: Record<string, string> = {}) =>
   fetch(`${adminUrl}${path}`, { method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(body) });
@@ -32,6 +34,7 @@ before(async () => {
   ({ drainWrites: drain } = await import("./vault/git"));
   const { createApp } = await import("./server");
   const { createAdminApp, listenAdmin } = await import("./admin");
+  lc = new (await import("./server")).Lifecycle();
   tProp = createToken("tok-prop", [{ space: "sp", project: "pj", section: "*", permission: "propose" }]).token;
   tRO = createToken("tok-ro", [{ space: "sp", project: "pj", section: "*", permission: "read" }]).token;
   tW = createToken("tok-w", [{ space: "sp", project: "pj", section: "*", permission: "write" }]).token;
@@ -40,7 +43,7 @@ before(async () => {
     { space: "*", project: "*", section: "*", permission: "write" },
   ]).token;
   ({ baseUrl, close: closeMain } = await listen(createApp({ vaultRoot: vault })));
-  admin = await listenAdmin(createAdminApp(vault), 0);
+  admin = await listenAdmin(createAdminApp(vault, lc), 0);
   adminUrl = `http://127.0.0.1:${(admin.address() as AddressInfo).port}`;
 });
 
@@ -65,7 +68,7 @@ test("kb_propose: propose-only token allowed; stored as a git-tracked inbox file
   const r = await propose(tProp);
   assert.equal(r.isError, false, r.text);
   assert.match(r.text, /^\d{8}T\d{6}Z-[0-9a-f]{6}$/);
-  const raw = readFileSync(join(vault, "inbox", `${r.text}.md`), "utf8");
+  const raw = readFileSync(join(vault, "_inbox", `${r.text}.md`), "utf8");
   assert.match(raw, /^---\ntarget: "sp\/pj\/notes\/idea"\nproposed_by: "tok-prop"\nreason: "worth keeping"\ncreated: "/);
   assert.ok(raw.endsWith("---\n\n# Idea\nbody\n"));
   assert.match(git(["log", "-1", "--format=%s"], vault), /^kb_propose: sp\/pj\/notes\/idea via tok-prop/);
@@ -97,20 +100,20 @@ test("kb_propose: propose does not grant kb_write; archive target and entry-note
   assert.equal((await propose(tW, { reason: "  " })).isError, true);
 });
 
-test("space 'inbox' is rejected by every tool and hidden from list/search", async () => {
+test("space \"_inbox\" is rejected by every tool and hidden from list/search", async () => {
   const marker = (await propose(tW, { content: "zzuniqueneedlezz" })).text;
-  assert.ok(existsSync(join(vault, "inbox", `${marker}.md`)));
-  const base = { space: "inbox", project: "pj", section: "notes", note: "n" };
+  assert.ok(existsSync(join(vault, "_inbox", `${marker}.md`)));
+  const base = { space: "_inbox", project: "pj", section: "notes", note: "n" };
   const calls: Array<[string, Record<string, unknown>]> = [
     ["kb_read", base],
     ["kb_write", { ...base, content: "c" }],
     ["kb_append", { ...base, text: "c" }],
     ["kb_archive", base],
     ["kb_propose", { ...base, content: "c", reason: "r" }],
-    ["kb_init_project", { space: "inbox", project: "pj", summary: "s" }],
-    ["kb_list", { space: "inbox" }],
-    ["kb_list", { space: "inbox", project: "pj" }],
-    ["kb_search", { query: "zzuniqueneedlezz", space: "inbox" }],
+    ["kb_init_project", { space: "_inbox", project: "pj", summary: "s" }],
+    ["kb_list", { space: "_inbox" }],
+    ["kb_list", { space: "_inbox", project: "pj" }],
+    ["kb_search", { query: "zzuniqueneedlezz", space: "_inbox" }],
   ];
   for (const [tool, args] of calls) {
     const r = await callTool(baseUrl, tMaster, tool, args);
@@ -120,9 +123,9 @@ test("space 'inbox' is rejected by every tool and hidden from list/search", asyn
   assert.doesNotMatch(list.text, /inbox/);
   const search = await callTool(baseUrl, tMaster, "kb_search", { query: "zzuniqueneedlezz" });
   assert.equal(search.text, "No matches.");
-  assert.equal(existsSync(join(vault, "inbox", "pj")), false);
+  assert.equal(existsSync(join(vault, "_inbox", "pj")), false);
   const { createToken } = await import("./auth/tokens");
-  assert.throws(() => createToken("x", [{ space: "inbox", project: "p", section: "s", permission: "read" }]), /reserved/);
+  assert.throws(() => createToken("x", [{ space: "_inbox", project: "p", section: "s", permission: "read" }]), /invalid/);
   await drain();
 });
 
@@ -153,11 +156,11 @@ test("admin accept: target created, inbox file gone, ONE commit; re-accept is 40
   assert.equal(r.status, 200, await r.clone().text());
   await drain();
   assert.equal(readFileSync(join(vault, "sp/pj/notes/acc.md"), "utf8"), "accepted body\n");
-  assert.equal(existsSync(join(vault, "inbox", `${id}.md`)), false);
+  assert.equal(existsSync(join(vault, "_inbox", `${id}.md`)), false);
   assert.equal(commits(), before + 1);
   assert.equal(git(["log", "-1", "--format=%s"], vault).trim(), "inbox accept: sp/pj/notes/acc (proposed by tok-prop)");
   const files = git(["show", "--name-status", "--format=", "HEAD"], vault).trim().split("\n").sort();
-  assert.deepEqual(files, [`A\tsp/pj/notes/acc.md`, `D\tinbox/${id}.md`].sort());
+  assert.deepEqual(files, [`A\tsp/pj/notes/acc.md`, `D\t_inbox/${id}.md`].sort());
   assert.equal(git(["status", "--porcelain"], vault).trim(), "");
   const a = lastAudit(db, "action = 'inbox_accept'");
   assert.equal(a.result, "ok");
@@ -172,14 +175,14 @@ test("admin accept onto an existing target is refused unless overwrite", async (
   const r = await post(`/admin/inbox/${id}/accept`);
   assert.equal(r.status, 409);
   assert.equal(readFileSync(join(vault, "sp/pj/notes/exist.md"), "utf8"), "old\n");
-  assert.ok(existsSync(join(vault, "inbox", `${id}.md`)));
+  assert.ok(existsSync(join(vault, "_inbox", `${id}.md`)));
   assert.equal(lastAudit(db, "action = 'inbox_accept'").result, "error");
   assert.equal((await post(`/admin/inbox/${id}/accept`, { overwrite: "yes" })).status, 400);
   const ok = await post(`/admin/inbox/${id}/accept`, { overwrite: true });
   assert.equal(ok.status, 200);
   await drain();
   assert.equal(readFileSync(join(vault, "sp/pj/notes/exist.md"), "utf8"), "new\n");
-  assert.equal(existsSync(join(vault, "inbox", `${id}.md`)), false);
+  assert.equal(existsSync(join(vault, "_inbox", `${id}.md`)), false);
 });
 
 test("admin reject removes the file with one commit; history keeps it", async () => {
@@ -189,11 +192,11 @@ test("admin reject removes the file with one commit; history keeps it", async ()
   const r = await post(`/admin/inbox/${id}/reject`);
   assert.equal(r.status, 200);
   await drain();
-  assert.equal(existsSync(join(vault, "inbox", `${id}.md`)), false);
+  assert.equal(existsSync(join(vault, "_inbox", `${id}.md`)), false);
   assert.equal(existsSync(join(vault, "sp/pj/notes/rej.md")), false);
   assert.equal(commits(), before + 1);
   assert.equal(git(["log", "-1", "--format=%s"], vault).trim(), "inbox reject: sp/pj/notes/rej (proposed by tok-prop)");
-  assert.match(git(["show", `HEAD~1:inbox/${id}.md`], vault), /sp\/pj\/notes\/rej/);
+  assert.match(git(["show", `HEAD~1:_inbox/${id}.md`], vault), /sp\/pj\/notes\/rej/);
   assert.equal(lastAudit(db, "action = 'inbox_reject'").result, "ok");
 });
 
@@ -234,7 +237,7 @@ test("concurrency: accept while a kb_write is in flight stays consistent", async
     assert.equal(readFileSync(join(vault, `sp/pj/notes/conc-${i}.md`), "utf8"), `c${i}\n`);
     assert.equal(readFileSync(join(vault, `sp/pj/notes/w-${i}.md`), "utf8"), `w${i}\n`);
   }
-  for (const id of ids2) assert.equal(existsSync(join(vault, "inbox", `${id}.md`)), false);
+  for (const id of ids2) assert.equal(existsSync(join(vault, "_inbox", `${id}.md`)), false);
   assert.equal(git(["status", "--porcelain"], vault).trim(), "");
 });
 
@@ -257,4 +260,224 @@ test("CLI against the admin listener", async () => {
   await assert.rejects(run(["list"], "http://127.0.0.1:1"), /cannot reach the admin listener.*server running/);
   await assert.rejects(run(["bogus"], adminUrl), /usage/);
   assert.deepEqual(ids().filter((i) => i === id || i === id2), []);
+});
+
+// ---- review-fix tests -------------------------------------------------------
+
+const mid = (n: number): string => `20200101T000000Z-${n.toString(16).padStart(6, "0")}`;
+const manual = (id: string, target: string, content: string): void => {
+  mkdirSync(join(vault, "_inbox"), { recursive: true });
+  writeFileSync(
+    join(vault, "_inbox", `${id}.md`),
+    serializeProposal({ target, proposedBy: "hand", reason: "r", created: "2020-01-01T00:00:00.000Z", content }),
+  );
+};
+const head = (): string => git(["rev-parse", "HEAD"], vault).trim();
+
+test("a user space literally named 'inbox' works normally", async () => {
+  const w = await callTool(baseUrl, tMaster, "kb_write", { space: "inbox", project: "pj", section: "notes", note: "n", content: "user inbox\n" });
+  assert.equal(w.isError, false, w.text);
+  const r = await callTool(baseUrl, tMaster, "kb_read", { space: "inbox", project: "pj", section: "notes", note: "n" });
+  assert.match(r.text, /user inbox/);
+  const list = await callTool(baseUrl, tMaster, "kb_list", {});
+  assert.match(list.text, /\binbox\b/);
+  assert.doesNotMatch(list.text, /_inbox/);
+  const s = await callTool(baseUrl, tMaster, "kb_search", { query: "user inbox" });
+  assert.match(s.text, /inbox\/pj\/notes\/n/);
+  await drain();
+});
+
+test("kb_propose enforces a UTF-8 byte cap on the final file", async () => {
+  const over = await propose(tW, { note: "bytes-over", content: "é".repeat(294_950) });
+  assert.equal(over.isError, true);
+  assert.match(over.text, /too large/);
+  const ok = await propose(tW, { note: "bytes-ok", content: "é".repeat(294_700) });
+  assert.equal(ok.isError, false, ok.text);
+  await drain();
+  const shown = await fetch(`${adminUrl}/admin/inbox/${ok.text}`);
+  assert.equal(shown.status, 200);
+  assert.equal((await post(`/admin/inbox/${ok.text}/reject`)).status, 200);
+  await drain();
+});
+
+test("kb_propose caps pending proposals per token and in total, counted under the lock", async () => {
+  const { createToken } = await import("./auth/tokens");
+  const mk = (n: string) => createToken(n, [{ space: "sp", project: "pj", section: "*", permission: "propose" }]).token;
+  process.env.INBOX_MAX_PER_TOKEN = "2";
+  try {
+    const tq = mk("tok-quota");
+    assert.equal((await propose(tq, { note: "q1" })).isError, false);
+    assert.equal((await propose(tq, { note: "q2" })).isError, false);
+    const third = await propose(tq, { note: "q3" });
+    assert.equal(third.isError, true);
+    assert.match(third.text, /too many pending proposals; ask the user to review the inbox/);
+    assert.equal(lastAudit(db, "action = 'kb_propose'").result, "error");
+    assert.equal((await propose(mk("tok-quota-b"), { note: "q4" })).isError, false, "other tokens keep their own share");
+    await drain();
+
+    process.env.INBOX_MAX_PER_TOKEN = "3";
+    const tc = mk("tok-quota-c");
+    const rs = await Promise.all([1, 2, 3, 4, 5, 6].map((i) => propose(tc, { note: `c${i}` })));
+    assert.equal(rs.filter((r) => !r.isError).length, 3);
+    await drain();
+
+    process.env.INBOX_MAX_TOTAL = String(ids().length);
+    const full = await propose(mk("tok-quota-d"), { note: "q5" });
+    assert.equal(full.isError, true);
+    assert.match(full.text, /too many pending proposals/);
+  } finally {
+    delete process.env.INBOX_MAX_PER_TOKEN;
+    delete process.env.INBOX_MAX_TOTAL;
+  }
+});
+
+test("accept validates and commits what is on disk inside the lock, not a stale read", async () => {
+  const { syncInboxResolve } = await import("./vault/git");
+  const id = (await propose(tW, { note: "stale", content: "old\n" })).text;
+  const holdId = (await propose(tW, { note: "stale-hold" })).text;
+  await drain();
+  let release!: () => void;
+  let entered!: () => void;
+  const gate = new Promise<void>((r) => (release = r));
+  const inLock = new Promise<void>((r) => (entered = r));
+  const holder = syncInboxResolve(vault, inboxPath(vault, holdId), async () => {
+    entered();
+    await gate;
+    return { message: "hold" };
+  });
+  await inLock;
+  const accepting = post(`/admin/inbox/${id}/accept`);
+  await new Promise((r) => setTimeout(r, 150));
+  writeFileSync(
+    inboxPath(vault, id),
+    serializeProposal({ target: "sp/pj/notes/stale", proposedBy: "tok-w", reason: "r", created: "2020-01-01T00:00:00.000Z", content: "new\n" }),
+  );
+  release();
+  await holder;
+  assert.equal((await accepting).status, 200);
+  await drain();
+  assert.equal(readFileSync(join(vault, "sp/pj/notes/stale.md"), "utf8"), "new\n");
+});
+
+test("accept applies kb_write content rules (size cap, archive, entry-note cap, bad target)", async () => {
+  manual(mid(1), "sp/pj/notes/big", "a".repeat(600_000));
+  manual(mid(2), "sp/pj/archive/x", "c\n");
+  manual(mid(3), "sp/pj/overview/index", "x".repeat(5000));
+  manual(mid(4), "_inbox/pj/notes/x", "c\n");
+  manual(mid(5), "sp/pj/notes", "c\n");
+  const expect = [/too large/, /archive/, /too large|index/i, /invalid target/, /invalid target/];
+  for (let i = 1; i <= 5; i++) {
+    const r = await post(`/admin/inbox/${mid(i)}/accept`);
+    assert.equal(r.status, 422, `${mid(i)} ${await r.clone().text()}`);
+    assert.match(((await r.json()) as { error: string }).error, expect[i - 1]);
+    assert.equal((await post(`/admin/inbox/${mid(i)}/reject`)).status, 200);
+  }
+  assert.equal(existsSync(join(vault, "sp/pj/notes/big.md")), false);
+  assert.equal(existsSync(join(vault, "sp/pj/archive/x.md")), false);
+  await drain();
+});
+
+test("commit reporting: untracked reject and identical overwrite report null, no failure", async () => {
+  const h0 = head();
+  manual(mid(10), "sp/pj/notes/untracked", "x\n");
+  const rj = await post(`/admin/inbox/${mid(10)}/reject`);
+  assert.equal(rj.status, 200);
+  assert.equal(((await rj.json()) as { commit: unknown }).commit, null);
+  assert.equal(head(), h0);
+
+  await callTool(baseUrl, tW, "kb_write", { space: "sp", project: "pj", section: "notes", note: "same", content: "same\n" });
+  await drain();
+  const h1 = head();
+  manual(mid(11), "sp/pj/notes/same", "same\n");
+  assert.equal((await post(`/admin/inbox/${mid(11)}/accept`)).status, 409);
+  const ac = await post(`/admin/inbox/${mid(11)}/accept`, { overwrite: true });
+  assert.equal(ac.status, 200);
+  assert.equal(((await ac.json()) as { commit: unknown }).commit, null);
+  assert.equal(head(), h1);
+  assert.equal(existsSync(join(vault, "_inbox", `${mid(11)}.md`)), false);
+
+  // Tracked proposal with identical target content: still one commit (the inbox removal).
+  const id = (await propose(tW, { note: "same", content: "same\n" })).text;
+  await drain();
+  const ac2 = await post(`/admin/inbox/${id}/accept`, { overwrite: true });
+  assert.equal(ac2.status, 200);
+  assert.match(((await ac2.json()) as { commit: string }).commit, /^[0-9a-f]{40}$/);
+  await drain();
+  assert.equal(git(["status", "--porcelain"], vault).trim(), "");
+});
+
+test("admin requests are tracked by the lifecycle and refused during shutdown", async () => {
+  const { createAdminApp, listenAdmin } = await import("./admin");
+  const { Lifecycle } = await import("./server");
+  const http = await import("node:http");
+  const l2 = new Lifecycle();
+  const srv = await listenAdmin(createAdminApp(vault, l2), 0);
+  const port = (srv.address() as AddressInfo).port;
+  try {
+    // Headers sent, body never finished: the request stays in flight.
+    const req = http.request({
+      host: "127.0.0.1",
+      port,
+      path: `/admin/inbox/${mid(99)}/reject`,
+      method: "POST",
+      headers: { "content-type": "application/json", "content-length": "100" },
+    });
+    req.on("error", () => undefined);
+    req.write("{");
+    const until = async (n: number) => {
+      for (let i = 0; i < 100 && l2.inFlight !== n; i++) await new Promise((r) => setTimeout(r, 20));
+      assert.equal(l2.inFlight, n);
+    };
+    await until(1);
+    req.destroy();
+    await until(0);
+    l2.shuttingDown = true;
+    assert.equal((await fetch(`http://127.0.0.1:${port}/admin/inbox`)).status, 503);
+  } finally {
+    srv.closeAllConnections();
+    await new Promise((r) => srv.close(r));
+  }
+});
+
+test("a symlinked _inbox dir is refused for list/show/accept/propose", async () => {
+  const id = (await propose(tW, { note: "symlinked" })).text;
+  await drain();
+  const real = join(vault, "_inbox-real");
+  renameSync(join(vault, "_inbox"), real);
+  symlinkSync(real, join(vault, "_inbox"));
+  try {
+    assert.equal((await fetch(`${adminUrl}/admin/inbox`)).status, 403);
+    assert.equal((await fetch(`${adminUrl}/admin/inbox/${id}`)).status, 403);
+    assert.equal((await post(`/admin/inbox/${id}/accept`)).status, 403);
+    assert.equal((await post(`/admin/inbox/${id}/reject`)).status, 403);
+    const p = await propose(tW, { note: "via-symlink" });
+    assert.equal(p.isError, true);
+  } finally {
+    unlinkSync(join(vault, "_inbox"));
+    renameSync(real, join(vault, "_inbox"));
+  }
+  assert.equal((await fetch(`${adminUrl}/admin/inbox/${id}`)).status, 200);
+  await drain();
+});
+
+test("list reads only a bounded head, handles oversized files, and caps the listing", async () => {
+  manual(mid(20), "sp/pj/notes/huge", "h".repeat(1_200_000));
+  const list = (await (await fetch(`${adminUrl}/admin/inbox`)).json()) as { proposals: Array<Record<string, unknown>>; truncated: boolean };
+  const huge = list.proposals.find((p) => p.id === mid(20))!;
+  assert.equal(huge.target, "sp/pj/notes/huge");
+  assert.ok((huge.size as number) > 1_200_000);
+  assert.equal((await fetch(`${adminUrl}/admin/inbox/${mid(20)}`)).status, 413);
+  assert.equal((await post(`/admin/inbox/${mid(20)}/reject`)).status, 200);
+
+  for (let i = 0; i < 505; i++) manual(mid(1000 + i), "sp/pj/notes/many", "m\n");
+  try {
+    const l = (await (await fetch(`${adminUrl}/admin/inbox`)).json()) as { proposals: unknown[]; truncated: boolean };
+    assert.equal(l.proposals.length, 500);
+    assert.equal(l.truncated, true);
+  } finally {
+    for (let i = 0; i < 505; i++) unlinkSync(join(vault, "_inbox", `${mid(1000 + i)}.md`));
+  }
+  const after = (await (await fetch(`${adminUrl}/admin/inbox`)).json()) as { truncated: boolean };
+  assert.equal(after.truncated, false);
+  await drain();
 });

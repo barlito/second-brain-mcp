@@ -1,9 +1,5 @@
 import { Permission, Scope } from "../auth/types";
 
-// Top-level directory holding pending proposals. Never a usable space: even wildcard
-// scopes grant nothing there, so no tool can read, list, search or write it.
-export const INBOX_SPACE = "inbox";
-
 const warned = new Set<string>();
 
 // "*" is only valid as trailing levels (*:*:*, space:*:*, space:project:*). Rows that
@@ -29,7 +25,6 @@ export function checkScope(
   section: string,
   permission: Permission,
 ): boolean {
-  if (space === INBOX_SPACE) return false;
   return scopes.some(
     (s) =>
       s.permission === permission &&

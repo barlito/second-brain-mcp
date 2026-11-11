@@ -1,10 +1,18 @@
 import { z } from "zod";
 import { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import { MAX_REASON_CHARS, inboxPath, newInboxId, serializeProposal } from "../inbox";
+import {
+  assertInboxQuota,
+  InboxFullError,
+  inboxPath,
+  MAX_PROPOSAL_FILE_BYTES,
+  MAX_REASON_CHARS,
+  newInboxId,
+  serializeProposal,
+} from "../inbox";
 import { syncWrite } from "../vault/git";
 import { kbArgsShape, MAX_CONTENT_CHARS, RegisterTool, toolError, toolText, withAclAndAudit } from "./common";
 import { NoteRuleError, validateNoteContent } from "./conventions";
-import { ARCHIVE_SECTION } from "./reserved";
+import { rejectReservedSection } from "./reserved";
 
 export const register: RegisterTool = (server, { vaultRoot }) => {
   server.registerTool(
@@ -31,12 +39,8 @@ export const register: RegisterTool = (server, { vaultRoot }) => {
     },
     async ({ space, project, section, note, content, reason }): Promise<CallToolResult> =>
       withAclAndAudit("kb_propose", { space, project, section, note }, ["propose", "write"], async (ctx) => {
-        if (section === ARCHIVE_SECTION) {
-          return {
-            toolResult: toolError("Section `archive` is managed by kb_archive; it cannot be a proposal target."),
-            audit: { detail: "reserved section" },
-          };
-        }
+        const reserved = rejectReservedSection(section);
+        if (reserved) return reserved;
         try {
           validateNoteContent({ section, note }, content);
         } catch (err) {
@@ -46,14 +50,24 @@ export const register: RegisterTool = (server, { vaultRoot }) => {
         const target = `${space}/${project}/${section}/${note}`;
         const now = new Date();
         const id = newInboxId(now);
-        const { commitSha } = await syncWrite(
-          vaultRoot,
-          inboxPath(vaultRoot, id),
-          serializeProposal({ target, proposedBy: ctx.name, reason, created: now.toISOString(), content }),
-          `kb_propose: ${target} via ${ctx.name}`,
-          { mustNotExist: true },
-        );
-        return { toolResult: toolText(id), audit: { gitCommit: commitSha, detail: `proposal ${id}` } };
+        const file = serializeProposal({ target, proposedBy: ctx.name, reason, created: now.toISOString(), content });
+        // The admin reader caps what it can show/accept: refuse what it could not manage.
+        if (Buffer.byteLength(file, "utf8") > MAX_PROPOSAL_FILE_BYTES) {
+          return {
+            toolResult: toolError(`Proposal too large (max ${MAX_PROPOSAL_FILE_BYTES / 1024} KiB as UTF-8 including metadata).`),
+            audit: { detail: "proposal too large (bytes)" },
+          };
+        }
+        try {
+          const { commitSha } = await syncWrite(vaultRoot, inboxPath(vaultRoot, id), file, `kb_propose: ${target} via ${ctx.name}`, {
+            mustNotExist: true,
+            precheck: () => assertInboxQuota(vaultRoot, ctx.name),
+          });
+          return { toolResult: toolText(id), audit: { gitCommit: commitSha, detail: `proposal ${id}` } };
+        } catch (err) {
+          if (err instanceof InboxFullError) return { toolResult: toolError(err.message), audit: { detail: "inbox full" } };
+          throw err;
+        }
       }),
   );
 };
