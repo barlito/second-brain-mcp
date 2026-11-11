@@ -134,6 +134,42 @@ export interface SyncStatus {
 
 const statuses = new Map<string, SyncStatus>();
 
+// Emitted after a conflict was recovered (acknowledged commits moved to a
+// backup branch). Injected so this module never touches the DB layer.
+export interface SyncConflictEvent {
+  vaultRoot: string;
+  backupBranch: string;
+  commits: string[]; // moved commit SHAs, newest first
+  tokens: string[]; // token names parsed from "kb_*: ... via <token>" subjects
+  paths: string[];
+}
+let syncEventHandler: ((e: SyncConflictEvent) => void) | null = null;
+export function setSyncEventHandler(fn: ((e: SyncConflictEvent) => void) | null): void {
+  syncEventHandler = fn;
+}
+
+// conflict/* branches that still exist locally; cached so status reads stay
+// cheap. Only the user deletes them.
+let conflictTtlMs = 30_000;
+export function setConflictCacheTtlMs(ms: number): void {
+  conflictTtlMs = ms;
+}
+const conflictCheckedAt = new Map<string, number>();
+
+// Refreshes st(vaultRoot).conflictBranches from the repo if the cache is stale.
+export async function refreshConflictBranches(vaultRoot: string): Promise<void> {
+  const key = path.resolve(vaultRoot);
+  const last = conflictCheckedAt.get(key);
+  if (last !== undefined && Date.now() - last < conflictTtlMs) return;
+  try {
+    const out = await runGit(["for-each-ref", "--format=%(refname:short)", "refs/heads/conflict/"], vaultRoot);
+    st(vaultRoot).conflictBranches = out.split("\n").filter(Boolean);
+    conflictCheckedAt.set(key, Date.now());
+  } catch {
+    /* keep the previous list */
+  }
+}
+
 function st(vaultRoot: string): SyncStatus {
   const key = path.resolve(vaultRoot);
   let s = statuses.get(key);
@@ -266,6 +302,20 @@ async function recoverFromRebaseConflict(
   paths: string[],
 ): Promise<SyncConflictError> {
   let backup = conflictBranchName();
+  // Commits about to be moved off the branch, for the sync event.
+  let commits: string[] = [];
+  const tokens = new Set<string>();
+  try {
+    const out = await runGit(["log", "--format=%H%x09%s", `origin/${branch}..HEAD`], vaultRoot);
+    for (const line of out.split("\n").filter(Boolean)) {
+      const [sha, subject = ""] = line.split("\t");
+      commits.push(sha);
+      const m = /^kb_\w+: .* via (\S+)$/.exec(subject);
+      if (m) tokens.add(m[1]);
+    }
+  } catch {
+    commits = [];
+  }
   try {
     await runGit(["branch", backup, "HEAD"], vaultRoot);
   } catch {
@@ -295,7 +345,7 @@ async function recoverFromRebaseConflict(
     }
   }
   const s = st(vaultRoot);
-  s.conflictBranches.push(backup);
+  if (!s.conflictBranches.includes(backup)) s.conflictBranches.push(backup);
   s.unpushed = false;
   console.error(
     `SYNC CONFLICT: remote changed ${paths.join(", ") || "(unknown paths)"}; local commits saved on branch ${backup}, ${branch} reset to ${target}`,
@@ -304,6 +354,11 @@ async function recoverFromRebaseConflict(
     await runGit(["push", "origin", backup], vaultRoot, NETWORK_TIMEOUT_MS);
   } catch (err) {
     console.error(`could not push backup branch ${backup}: ${errText(err)}`);
+  }
+  try {
+    syncEventHandler?.({ vaultRoot, backupBranch: backup, commits, tokens: [...tokens], paths });
+  } catch (err) {
+    console.error(`sync event handler failed: ${errText(err)}`);
   }
   return new SyncConflictError(
     `The remote changed the same note(s) as unsynced changes (${paths.join(", ")}). Your version was saved to branch ${backup}; retry the write.`,

@@ -2,7 +2,8 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { cleanup, git, makeTempDb, newRepo, tmp } from "./test-support/fixtures";
+import { cleanup, cloneRepo, git, makeTempDb, makeTempVault, newRepo, sleep, tmp } from "./test-support/fixtures";
+import { lastAudit } from "./test-support/server";
 import { listen } from "./test-support/server";
 
 makeTempDb();
@@ -60,7 +61,7 @@ test("/health/details: full view for a valid token", async () => {
     status: "ok",
     db: "ok",
     vault: "ok",
-    sync: { hasRemote: false, branch: null, unpushed: false, lastPushOk: null, conflicts: 0 },
+    sync: { hasRemote: false, branch: null, unpushed: false, lastPushOk: null, conflicts: 0, conflictBranches: [] },
   });
 });
 
@@ -84,4 +85,79 @@ test("failed push: 200 degraded", async () => {
   assert.equal(body.sync.hasRemote, true);
   assert.equal(body.sync.lastPushOk, false);
   assert.doesNotMatch(JSON.stringify(body), /missing\.git/);
+});
+
+test("async periodic-sync conflict: audited, degraded until the conflict branch is deleted; /health never spawns git", async () => {
+  const gitMod = await import("./vault/git");
+  const { auditSyncConflict } = await import("./server");
+  const { db } = await import("./db");
+  const { vault, remote } = makeTempVault({ remote: true }) as { vault: string; remote: string };
+  await syncWrite(vault, join(vault, "note.md"), "base\n", "base");
+  await drainWrites();
+  const other = cloneRepo(remote, "other");
+
+  // An acknowledged-but-unpushed write by token "alice", then a conflicting remote edit.
+  writeFileSync(join(vault, "note.md"), "local\n");
+  git(["commit", "-am", "kb_write: sp/p/s/note via alice"], vault);
+  const localSha = git(["rev-parse", "HEAD"], vault).trim();
+  writeFileSync(join(other, "note.md"), "remote\n");
+  git(["commit", "-am", "remote edit"], other);
+  git(["push"], other);
+
+  gitMod.setSyncEventHandler(auditSyncConflict);
+  gitMod.setConflictCacheTtlMs(0);
+  const orig = console.error;
+  console.error = () => undefined;
+  const stop = gitMod.startPeriodicSync(vault, 30);
+  try {
+    for (let i = 0; i < 200 && !git(["branch", "--list", "conflict/*"], vault).trim(); i++) await sleep(25);
+  } finally {
+    stop();
+    await drainWrites();
+    console.error = orig;
+    gitMod.setSyncEventHandler(null);
+  }
+  const backup = git(["branch", "--list", "conflict/*", "--format=%(refname:short)"], vault).trim();
+  assert.match(backup, /^conflict\//);
+  const row = lastAudit(db, "action = 'sync_conflict'");
+  assert.equal(row.result, "error");
+  assert.equal(row.token_name, "git-sync");
+  assert.ok(row.detail!.includes(`branch=${backup}`));
+  assert.ok(row.detail!.includes(localSha.slice(0, 12)));
+  assert.ok(row.detail!.includes("tokens=alice"));
+  assert.ok(row.detail!.includes("note.md"));
+
+  const d1 = await health(vault, true);
+  assert.equal(d1.body.status, "degraded");
+  assert.deepEqual(d1.body.sync.conflictBranches, [backup]);
+
+  // /health must not spawn git: count child-process spawns.
+  const cp = require("node:child_process");
+  const realExecFile = cp.execFile;
+  let calls = 0;
+  cp.execFile = (...a: unknown[]) => {
+    calls++;
+    return realExecFile(...a);
+  };
+  try {
+    const app = await listen(createApp({ vaultRoot: vault }));
+    try {
+      for (let i = 0; i < 5; i++) assert.equal((await fetch(`${app.baseUrl}/health`)).status, 200);
+      assert.equal(calls, 0);
+      // Sanity: the spy sees git spawned by /health/details.
+      await fetch(`${app.baseUrl}/health/details`, { headers: { Authorization: `Bearer ${token}` } });
+      assert.ok(calls > 0);
+    } finally {
+      await app.close();
+    }
+  } finally {
+    cp.execFile = realExecFile;
+  }
+
+  // The user deletes the backup branch: next refresh returns to ok.
+  git(["branch", "-D", backup], vault);
+  const d2 = await health(vault, true);
+  assert.equal(d2.body.status, "ok");
+  assert.deepEqual(d2.body.sync.conflictBranches, []);
+  gitMod.setConflictCacheTtlMs(30_000);
 });

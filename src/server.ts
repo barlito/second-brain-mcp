@@ -18,8 +18,11 @@ import {
   getSyncStatus,
   hasRemote,
   redact,
+  refreshConflictBranches,
   runGit,
+  setSyncEventHandler,
   startPeriodicSync,
+  type SyncConflictEvent,
 } from "./vault/git";
 
 export const BODY_LIMIT = "1mb";
@@ -250,6 +253,29 @@ function vaultOk(vaultRoot: string): boolean {
 // Filled by initVault so /health/details never has to spawn git per call.
 const bootInfo = new Map<string, { hasRemote: boolean; branch: string }>();
 
+// Records an async sync conflict (acknowledged commits moved to a backup
+// branch) in the audit log under a fixed system identity.
+export function auditSyncConflict(e: SyncConflictEvent): void {
+  const detail = [
+    `branch=${e.backupBranch}`,
+    `commits=${e.commits.map((c) => c.slice(0, 12)).join(",") || "-"}`,
+    `tokens=${e.tokens.join(",") || "-"}`,
+    `paths=${e.paths.join(",") || "-"}`,
+  ].join(" ");
+  try {
+    logAudit({
+      tokenId: "system",
+      tokenName: "git-sync",
+      action: "sync_conflict",
+      result: "error",
+      detail,
+      gitCommit: e.commits[0],
+    });
+  } catch (err) {
+    console.error(`audit write failed (sync_conflict ${e.backupBranch}): ${redact(err instanceof Error ? err.message : String(err))}`);
+  }
+}
+
 export function createApp(opts: AppOptions): Express {
   const { vaultRoot } = opts;
   const lifecycle = opts.lifecycle ?? new Lifecycle();
@@ -285,6 +311,7 @@ export function createApp(opts: AppOptions): Express {
         /* reported as false */
       }
     }
+    if (vaultUp) await refreshConflictBranches(vaultRoot);
     const sync = getSyncStatus(vaultRoot);
     const broken = !dbUp || !vaultUp;
     const degraded = sync.lastPushOk === false || sync.conflictBranches.length > 0;
@@ -298,6 +325,7 @@ export function createApp(opts: AppOptions): Express {
         unpushed: sync.unpushed,
         lastPushOk: sync.lastPushOk,
         conflicts: sync.conflictBranches.length,
+        conflictBranches: sync.conflictBranches,
       },
     });
   });
@@ -577,6 +605,7 @@ export async function start(): Promise<{ server: Server; shutdown: (signal?: str
   }
   console.log(`second-brain-mcp listening on port ${port}`);
 
+  setSyncEventHandler(auditSyncConflict);
   const intervalRaw = process.env.VAULT_SYNC_INTERVAL_MS;
   const intervalMs = intervalRaw === undefined || intervalRaw === "" ? 60_000 : Number(intervalRaw);
   const stopSync = intervalMs > 0 ? startPeriodicSync(vaultRoot, intervalMs) : undefined;
