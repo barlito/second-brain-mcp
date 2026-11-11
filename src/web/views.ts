@@ -124,10 +124,11 @@ export interface TokenForm {
   scopes: string;
   preset: string;
   allowWildcard: boolean;
+  expiresInDays: string;
 }
 
 export function tokensView(ctx: Ctx, tokens: TokenListEntry[], banner?: Banner, form?: TokenForm): SafeHtml {
-  const f = form ?? { name: "", scopes: "", preset: "", allowWildcard: false };
+  const f = form ?? { name: "", scopes: "", preset: "", allowWildcard: false, expiresInDays: "" };
   return layout(
     ctx,
     "/tokens",
@@ -135,18 +136,19 @@ export function tokensView(ctx: Ctx, tokens: TokenListEntry[], banner?: Banner, 
     html`<h1>Tokens</h1>
 ${bannerView(banner)}
 <div class="scroll"><table>
-<thead><tr><th>Name</th><th>Scopes</th><th>Created</th><th>Last used</th><th>Status</th><th></th></tr></thead>
+<thead><tr><th>Name</th><th>Scopes</th><th>Created</th><th>Last used</th><th>Expires</th><th>Status</th><th></th></tr></thead>
 <tbody>
 ${
   tokens.length === 0
-    ? html`<tr><td colspan="6" class="muted">No tokens.</td></tr>`
+    ? html`<tr><td colspan="7" class="muted">No tokens.</td></tr>`
     : tokens.map(
         (t) => html`<tr>
 <td>${t.name}<br><span class="muted mono">${t.id}</span></td>
 <td>${t.scopes.map((s) => html`<div><code>${formatScope(s)}</code></div>`)}</td>
 <td class="mono">${t.created_at}</td>
 <td class="mono">${t.last_used_at ?? "never"}</td>
-<td>${t.revoked_at ? html`<span class="badge err">revoked</span><br><span class="muted mono">${t.revoked_at}</span>` : html`<span class="badge ok">active</span>`}</td>
+<td class="mono">${t.expires_at ?? "never"}</td>
+<td>${t.revoked_at ? html`<span class="badge err">revoked</span><br><span class="muted mono">${t.revoked_at}</span>` : t.expired ? html`<span class="badge err">expired</span>` : html`<span class="badge ok">active</span>`}</td>
 <td>${
           t.revoked_at
             ? ""
@@ -169,13 +171,15 @@ ${csrfField(ctx)}
 </select>
 <label for="scopes">Scopes <span class="hint">(one per line: <code>space:project:section:permission</code>; permission is read, write or propose; <code>*</code> only as trailing levels)</span></label>
 <textarea id="scopes" name="scopes" spellcheck="false" placeholder="pro:second-brain:*:write">${f.scopes}</textarea>
+<label for="expires_in_days">Expires in (days) <span class="hint">(optional, 1-3650; empty = never expires)</span></label>
+<input type="text" id="expires_in_days" name="expires_in_days" inputmode="numeric" maxlength="4" value="${f.expiresInDays}">
 <label class="check"><input type="checkbox" name="allow_wildcard" value="1"${f.allowWildcard ? raw(" checked") : ""}> Allow wildcard (required for any <code>*</code> scope or preset; wildcards also cover spaces/projects created later)</label>
 <div class="actions"><button class="primary" type="submit">Create token</button></div>
 </form>`,
   );
 }
 
-export function tokenCreatedView(ctx: Ctx, created: { id: string; name: string; token: string }, notes: string[]): SafeHtml {
+export function tokenCreatedView(ctx: Ctx, created: { id: string; name: string; token: string; expires_at?: string | null }, notes: string[]): SafeHtml {
   return layout(
     ctx,
     "/tokens",
@@ -185,6 +189,7 @@ export function tokenCreatedView(ctx: Ctx, created: { id: string; name: string; 
 ${notes.length ? html`<div class="banner"><ul>${notes.map((n) => html`<li>${n}</li>`)}</ul></div>` : ""}
 <div class="card">
 <p>Name: <strong>${created.name}</strong> <span class="muted mono">(${created.id})</span></p>
+<p>Expires: <span class="mono">${created.expires_at ?? "never"}</span></p>
 <div class="token mono">${created.token}</div>
 </div>
 <p><a href="/tokens">Back to tokens</a></p>`,
@@ -206,7 +211,7 @@ ${list.truncated ? html`<div class="banner warn">Only the first proposals are li
 <tbody>
 ${
   list.proposals.length === 0
-    ? html`<tr><td colspan="6" class="muted">No pending proposals.</td></tr>`
+    ? html`<tr><td colspan="7" class="muted">No pending proposals.</td></tr>`
     : list.proposals.map(
         (p) => html`<tr>
 <td>${p.target ? html`<code>${p.target}</code>` : html`<span class="badge err">malformed</span>`}</td>

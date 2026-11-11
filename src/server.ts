@@ -3,7 +3,7 @@ import type { Server } from "node:http";
 import net from "node:net";
 import express, { Express, NextFunction, Request, Response } from "express";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import { verifyToken } from "./auth/tokens";
+import { checkToken } from "./auth/tokens";
 import { TokenContext, tokenContextStorage } from "./auth/context";
 import { db } from "./db";
 import { logAudit, logAuthFailure, MAX_FIELD_LEN } from "./audit";
@@ -202,8 +202,9 @@ function makeBearerAuth(limiter: AuthFailureLimiter) {
       return;
     }
 
-    const fail = (reason: string): void => {
-      const { audit, previous } = limiter.record(ip);
+    // countable=false: not a guessing attempt (expired token), so it skips the limiter.
+    const fail = (reason: string, countable = true): void => {
+      const { audit, previous } = countable ? limiter.record(ip) : { audit: true, previous: 0 };
       if (audit) {
         // A DB failure here must still yield a 401.
         try {
@@ -222,8 +223,10 @@ function makeBearerAuth(limiter: AuthFailureLimiter) {
     const match = header ? /^Bearer\s+(.+)$/i.exec(header) : null;
     if (!match) return fail("missing or malformed Authorization header");
 
-    const verified = verifyToken(match[1]);
-    if (!verified) return fail("invalid or revoked token");
+    const checked = checkToken(match[1]);
+    if (checked.status === "expired") return fail("token expired", false);
+    if (checked.status !== "ok") return fail("invalid or revoked token");
+    const verified = checked.token;
 
     const ctx: TokenContext = {
       tokenId: verified.tokenId,

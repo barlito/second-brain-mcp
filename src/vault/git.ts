@@ -1133,32 +1133,42 @@ export interface NoteHistoryEntry {
 
 // Read-only: git log of one note, following renames. No vault lock needed.
 // `path` is the vault-relative path (forward slashes) git was asked about.
+// `canRead` gets the note's vault-relative path AT each commit (newest to oldest); history
+// stops at the first path it refuses, so renames never leak history from unreadable places.
 export async function noteHistory(
   vaultRoot: string,
   absolutePath: string,
   limit: number,
-): Promise<{ path: string; entries: NoteHistoryEntry[] }> {
+  canRead: (relPath: string) => boolean = () => true,
+): Promise<{ path: string; entries: NoteHistoryEntry[]; restricted: boolean }> {
   assertSafePath(vaultRoot, absolutePath);
   const rel = path.relative(path.resolve(vaultRoot), path.resolve(absolutePath)).split(path.sep).join("/");
-  let out: string;
   try {
-    out = await runGit(
-      ["log", "--follow", "-n", String(limit), "--format=%h%x09%aI%x09%s", "--", rel],
-      vaultRoot,
-    );
+    await runGit(["rev-parse", "--verify", "-q", "HEAD"], vaultRoot);
   } catch (err) {
-    // Fresh repo without any commit: no history, not a failure.
-    if (/does not have any commits yet/.test(String((err as { stderr?: string }).stderr ?? ""))) {
-      return { path: rel, entries: [] };
-    }
+    // Fresh repo without any commit (exit 1, quiet): no history, not a failure.
+    if ((err as { code?: unknown }).code === 1) return { path: rel, entries: [], restricted: false };
     throw err;
   }
-  const entries = out
-    .split("\n")
-    .filter(Boolean)
-    .map((line) => {
-      const [sha, date, ...rest] = line.split("\t");
-      return { sha, date, subject: rest.join("\t") };
-    });
-  return { path: rel, entries };
+  // Per commit: a header line starting with \x01, then "M\tpath" or "R100\told\tnew" for the
+  // followed file. A path git had to quote is not a valid slug path, so canRead refuses it.
+  const out = await runGit(
+    ["log", "--follow", "--name-status", "--format=%x01%h%x09%aI%x09%s", "--", rel],
+    vaultRoot,
+  );
+  const entries: NoteHistoryEntry[] = [];
+  let restricted = false;
+  for (const block of out.split("\x01").slice(1)) {
+    const [header, ...statusLines] = block.split("\n");
+    const status = statusLines.find((l) => l.includes("\t"));
+    const atCommit = status ? status.split("\t").pop()! : rel;
+    if (!canRead(atCommit)) {
+      restricted = true;
+      break;
+    }
+    const [sha, date, ...rest] = header.split("\t");
+    entries.push({ sha, date, subject: rest.join("\t") });
+    if (entries.length >= limit) break;
+  }
+  return { path: rel, entries, restricted };
 }

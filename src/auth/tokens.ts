@@ -61,8 +61,10 @@ export function validateTokenInput(name: unknown, scopes: unknown): { name: stri
   return { name: trimmed, scopes: out };
 }
 
+const MAX_EXPIRY_DAYS = 3650;
+
 export interface CreateTokenOptions {
-  expiresAt?: string; // ISO date-time, must be in the future
+  expiresAt?: string; // ISO 8601 with Z/offset, in the future, at most 3650 days ahead
   expiresInDays?: number; // integer 1-3650; not combinable with expiresAt
 }
 
@@ -73,15 +75,24 @@ export function resolveExpiry(opts: CreateTokenOptions = {}, now = Date.now()): 
     throw new TokenValidationError("use either expiresAt or expiresInDays, not both");
   }
   if (expiresInDays !== undefined) {
-    if (!Number.isInteger(expiresInDays) || expiresInDays < 1 || expiresInDays > 3650) {
+    if (!Number.isInteger(expiresInDays) || expiresInDays < 1 || expiresInDays > MAX_EXPIRY_DAYS) {
       throw new TokenValidationError("expiresInDays must be an integer between 1 and 3650");
     }
     return new Date(now + expiresInDays * 86_400_000).toISOString();
   }
   if (expiresAt !== undefined) {
-    const ms = typeof expiresAt === "string" ? Date.parse(expiresAt) : NaN;
-    if (Number.isNaN(ms)) throw new TokenValidationError("expiresAt must be a valid ISO date-time");
+    // Explicit zone required: a zone-less string would be read in the server's local time.
+    const ok =
+      typeof expiresAt === "string" &&
+      /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2})$/.test(expiresAt);
+    const ms = ok ? Date.parse(expiresAt) : NaN;
+    if (Number.isNaN(ms)) {
+      throw new TokenValidationError("expiresAt must be ISO 8601 with an explicit Z or offset, e.g. 2027-01-31T00:00:00Z");
+    }
     if (ms <= now) throw new TokenValidationError("expiresAt must be in the future");
+    if (ms > now + MAX_EXPIRY_DAYS * 86_400_000) {
+      throw new TokenValidationError(`expiresAt must be at most ${MAX_EXPIRY_DAYS} days ahead`);
+    }
     return new Date(ms).toISOString();
   }
   return null;
@@ -122,9 +133,17 @@ const insertTokenStmt = db.prepare(
 const insertScopeStmt = db.prepare(
   "INSERT INTO scopes (token_id, space, project, section, permission) VALUES (?, ?, ?, ?, ?)",
 );
-const selectActiveTokenByHashStmt = db.prepare(
-  "SELECT id, name, last_used_at FROM tokens WHERE token_hash = ? AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ?)",
+// The one expiry rule: stored value is canonical UTC ISO, compared chronologically via
+// julianday (also right for hand-edited values like datetime('now','+7 days')). An
+// unparseable value is expired (fail closed).
+const EXPIRED_SQL =
+  "(expires_at IS NOT NULL AND (julianday(expires_at) IS NULL OR julianday(expires_at) <= julianday('now')))";
+const selectTokenByHashStmt = db.prepare(
+  `SELECT id, name, last_used_at, revoked_at, ${EXPIRED_SQL} AS expired,
+          (expires_at IS NOT NULL AND julianday(expires_at) IS NULL) AS unparseable
+   FROM tokens WHERE token_hash = ?`,
 );
+const COUNT_ACTIVE_SQL = `SELECT COUNT(*) AS n FROM tokens WHERE revoked_at IS NULL AND NOT ${EXPIRED_SQL}`;
 const updateLastUsedAtStmt = db.prepare("UPDATE tokens SET last_used_at = ? WHERE id = ?");
 const selectScopesByTokenIdStmt = db.prepare(
   "SELECT space, project, section, permission FROM scopes WHERE token_id = ?",
@@ -133,8 +152,22 @@ const revokeTokenStmt = db.prepare(
   "UPDATE tokens SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL",
 );
 const selectAllTokensStmt = db.prepare(
-  "SELECT id, name, created_at, revoked_at, last_used_at, expires_at FROM tokens ORDER BY created_at",
+  `SELECT id, name, created_at, revoked_at, last_used_at, expires_at, ${EXPIRED_SQL} AS expired,
+          (expires_at IS NOT NULL AND julianday(expires_at) IS NULL) AS unparseable
+   FROM tokens ORDER BY created_at`,
 );
+
+const warnedBad = new Set<string>();
+function warnUnparseable(id: string, expiresAt: unknown): void {
+  if (warnedBad.has(id)) return;
+  warnedBad.add(id);
+  console.warn(`warning: token ${id} has an unparseable expires_at ${JSON.stringify(expiresAt)}; treating it as expired`);
+}
+
+// Non-revoked, non-expired tokens (dashboard).
+export function countActiveTokens(): number {
+  return (db.prepare(COUNT_ACTIVE_SQL).get() as { n: number }).n;
+}
 
 export function createToken(name: string, scopes: Scope[], opts?: CreateTokenOptions): CreatedToken {
   const v = validateTokenInput(name, scopes);
@@ -156,16 +189,19 @@ export function createToken(name: string, scopes: Scope[], opts?: CreateTokenOpt
   return { id, name, token, expires_at: expiresAt };
 }
 
-export function verifyToken(plaintextToken: string): VerifiedToken | null {
-  const tokenHash = hashToken(plaintextToken);
+export type TokenCheck = { status: "ok"; token: VerifiedToken } | { status: "expired" } | { status: "invalid" };
 
-  // Expired == revoked: the query filters it out. Both sides are toISOString() UTC, so
-  // string comparison is chronological.
-  const row = selectActiveTokenByHashStmt.get(tokenHash, new Date().toISOString()) as
-    | { id: string; name: string; last_used_at: string | null }
+// "expired" = known, non-revoked hash past its expiry; unknown and revoked are "invalid".
+export function checkToken(plaintextToken: string): TokenCheck {
+  const row = selectTokenByHashStmt.get(hashToken(plaintextToken)) as
+    | { id: string; name: string; last_used_at: string | null; revoked_at: string | null; expired: number; unparseable: number }
     | undefined;
 
-  if (!row) return null;
+  if (!row || row.revoked_at) return { status: "invalid" };
+  if (row.expired) {
+    if (row.unparseable) warnUnparseable(row.id, "(stored value)");
+    return { status: "expired" };
+  }
 
   // Throttled: avoid a synchronous write on every request.
   const now = Date.now();
@@ -176,8 +212,12 @@ export function verifyToken(plaintextToken: string): VerifiedToken | null {
   }
 
   const scopes = selectScopesByTokenIdStmt.all(row.id) as Scope[];
+  return { status: "ok", token: { tokenId: row.id, name: row.name, scopes } };
+}
 
-  return { tokenId: row.id, name: row.name, scopes };
+export function verifyToken(plaintextToken: string): VerifiedToken | null {
+  const r = checkToken(plaintextToken);
+  return r.status === "ok" ? r.token : null;
 }
 
 export function revokeToken(id: string): boolean {
@@ -186,12 +226,13 @@ export function revokeToken(id: string): boolean {
 }
 
 export function listTokens(): TokenListEntry[] {
-  const tokens = selectAllTokensStmt.all() as Omit<TokenListEntry, "scopes" | "expired">[];
-  const now = Date.now();
+  const tokens = selectAllTokensStmt.all() as (Omit<TokenListEntry, "scopes" | "expired"> & {
+    expired: number;
+    unparseable: number;
+  })[];
 
-  return tokens.map((t) => ({
-    ...t,
-    expired: t.expires_at !== null && Date.parse(t.expires_at) <= now,
-    scopes: selectScopesByTokenIdStmt.all(t.id) as Scope[],
-  }));
+  return tokens.map(({ expired, unparseable, ...t }) => {
+    if (unparseable) warnUnparseable(t.id, t.expires_at);
+    return { ...t, expired: expired === 1, scopes: selectScopesByTokenIdStmt.all(t.id) as Scope[] };
+  });
 }

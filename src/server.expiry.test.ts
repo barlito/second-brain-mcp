@@ -46,3 +46,33 @@ test("expired token gets 401, not-yet-expired token works", async () => {
   const r = await callTool(app.baseUrl, ok.token, "kb_read", { space: "pro", project: "p", section: "s", note: "n" });
   assert.equal(r.isError, true);
 });
+
+test("expired token: 401 'token expired', audited, not counted by the auth limiter; unknown tokens are", async () => {
+  const { createToken } = await import("./auth/tokens");
+  const { createApp, AuthFailureLimiter } = await import("./server");
+  const lim = await listen(createApp({ vaultRoot: vault, authLimiter: new AuthFailureLimiter(3, 60_000) }));
+  try {
+    const old = createToken("old2", scopes, { expiresInDays: 1 });
+    db.prepare("UPDATE tokens SET expires_at = ? WHERE id = ?").run(new Date(Date.now() - 1000).toISOString(), old.id);
+    const hit = (tok: string) =>
+      fetch(`${lim.baseUrl}/mcp`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream", Authorization: `Bearer ${tok}` },
+        body: JSON.stringify({ jsonrpc: "2.0", method: "tools/list", id: 1 }),
+      });
+    const audited = () => db.prepare("SELECT COUNT(*) AS n FROM audit_log WHERE action = 'auth' AND detail LIKE 'token expired%'").get() as { n: number };
+    const was = audited().n;
+    for (let i = 0; i < 6; i++) {
+      const r = await hit(old.token);
+      assert.equal(r.status, 401, "never 429 for expired");
+      assert.deepEqual(await r.json(), { error: "token expired" });
+    }
+    const rows = { length: audited().n - was };
+    assert.equal(rows.length, 6, "each expired attempt is audited with its reason");
+    // Unknown tokens still feed the limiter.
+    for (let i = 0; i < 3; i++) assert.equal((await hit("sb_nope")).status, 401);
+    assert.equal((await hit("sb_nope")).status, 429);
+  } finally {
+    await lim.close();
+  }
+});
