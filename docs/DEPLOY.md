@@ -64,8 +64,9 @@ Known gaps (not built yet): there is no publish/deploy GitHub workflow (CI only 
 
 - [ ] Create it and store the printed `sb_...` token in a password manager (it is shown once):
   ```bash
-  make token-create name=claude-code scope=<space>:<project>:<section>:read,<space>:<project>:<section>:write
+  make token-create name=claude-code 'scope=meta:smoke:notes:read,meta:smoke:notes:write'
   ```
+  (This narrow scope covers the smoke-test note below; issue your real working tokens afterwards.)
 
 ### 7. Smoke test
 

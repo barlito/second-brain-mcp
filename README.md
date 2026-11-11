@@ -69,7 +69,7 @@ All note-addressed tools take `space`, `project`, `section`, `note` (strings, ma
 
 ### `kb_write`
 
-- Args: the four names plus `content` (string, max 512 x 1024 = 524288 characters, not bytes; the schema rejects more with `content too large (max 512 KB)`). Written verbatim.
+- Args: the four names plus `content` (string, max 512 x 1024 = 524288 characters, not bytes; more is rejected by schema validation, whose message includes `content too large (max 512 KB)`). Written verbatim.
 - Permission: `write` on the section.
 - Creates or overwrites the note and returns the git commit SHA. Commit message: `kb_write: <space>/<project>/<section>/<note> via <token name>`.
 - Errors: ``Section `archive` is managed by kb_archive and cannot be written directly.``; for `overview/index` over 3 KB: `overview/index is too large (<n> bytes, max 3072). The entry note must stay small: move detail into other sections (decisions, conventions, notes) and link to those notes from the Docs map.`
@@ -101,7 +101,7 @@ All note-addressed tools take `space`, `project`, `section`, `note` (strings, ma
 
 ### `kb_search`
 
-- Args: `query` (string, 2-200 characters after trimming; shorter gives `Query must be at least 2 characters.`), optional `space`, `project`, `section` (same hierarchy rule as `kb_list`), `include_archived` (default false).
+- Args: `query` (string, max 200 characters as sent, at least 2 after trimming; shorter gives `Query must be at least 2 characters.`), optional `space`, `project`, `section` (same hierarchy rule as `kb_list`), `include_archived` (default false).
 - Permission: `read`. Only sections the token can read are opened: the ACL is applied before any directory or file is read.
 - Case-insensitive plain substring match (not regex, no ranking) per line. Output lines are `<space>/<project>/<section>/<note>: <snippet>`; up to 50 notes and 3 lines per note, each snippet at most 200 characters around the match. No hits prints `No matches.`
 - Limits: files over 1 MB are skipped; stops after 3 s, 20 MB read or 5000 notes scanned. When it stops early the output ends with `(truncated: <reason>; results may be incomplete, narrow the search)`, where reason is `time limit reached`, `read limit reached`, `too many notes` or `more notes match` (more than 50 notes hit). Unreadable entries are counted in `(skipped <n> unreadable entries)`. Narrow with `space`/`project`/`section` when truncated.
@@ -141,7 +141,7 @@ Returned with `isError: true`:
 | `Conflict: ... Your version was saved on branch (none). ...` | Uncommitted human changes in the vault conflicted with the remote and were put in `git stash`. See [Git sync](#git-sync). |
 | `Internal error.` | Anything else. Details are in the server log and the audit row only. |
 
-Tool-specific messages are listed under each tool. HTTP-level: `401` (missing/invalid/revoked token), `429` (too many failed auths), `503` (shutting down), `405` for `GET /mcp` and `DELETE /mcp`, `413` (request body over 1 MB) and `400` (malformed JSON). The `405`, `413` and `400` responses are JSON-RPC errors.
+Tool-specific messages are listed under each tool. HTTP-level: `401` (missing/invalid/revoked token), `429` (too many failed auths), `503` (shutting down), `405` for `GET /mcp` and `DELETE /mcp`, `413` (request body over 1 MB) and `400` (malformed JSON). The `405`, `413`, `400`, `429` and `/mcp` `503` responses are JSON-RPC errors; `401` is `{"error": "<reason>"}`.
 
 ## Token management
 
@@ -258,12 +258,12 @@ Backups live on the `/data` volume (`./data/backups` locally, the `acl-data` vol
 
 ## Git sync
 
-- A `kb_write` pulls (rebase) first, writes the note atomically and commits locally, then pushes asynchronously with retries. If the remote is unreachable, the write still commits locally and the push is retried later.
+- Every write (`kb_write`, `kb_append`, `kb_archive`, `kb_init_project`) goes through the same locked path: it pulls (rebase) first, writes atomically and commits locally, then pushes asynchronously with retries. If the remote is unreachable, the write still commits locally and the push is retried later.
 - A periodic sync (every `VAULT_SYNC_INTERVAL_MS`, default 60 s; `0` disables it) pulls remote changes and pushes leftover local commits.
 - With no `VAULT_REMOTE_URL` the vault is a local-only repo (the local-dev case).
 - Conflict (before the write): if the remote changed the same note(s) as unsynced local work and this is detected during the pull that precedes a write, the local commits are saved on a backup branch `conflict/<timestamp>` (pushed best-effort), the working branch is reset to the remote, and the write fails with the `Conflict: ...` message. Re-read the note and retry.
 - Conflict (uncommitted human changes): if uncommitted changes in the vault conflict with remote changes, they are kept in `git stash` and the client message says "saved on branch (none)". Recover with `git stash list` (and `git stash show`/`apply`) in the vault.
-- Known limitation, asynchronous conflicts: a conflict detected later, during a push-retry pull or a periodic sync, can move a `kb_write` that was already acknowledged (its SHA was returned) onto a `conflict/<timestamp>` branch and reset `main` to the remote. The client is not told. Notice it via `/health/details` (`sync.conflicts`), `SYNC CONFLICT` in the server logs, or a `conflict/*` branch on the remote.
+- Known limitation, asynchronous conflicts: a conflict detected later, during a push-retry pull or a periodic sync, can move a write that was already acknowledged (its SHA was returned) onto a `conflict/<timestamp>` branch and reset `main` to the remote. The client is not told. Notice it via `/health/details` (`sync.conflicts`), `SYNC CONFLICT` in the server logs, or a `conflict/*` branch on the remote.
 - A human's in-progress git operation is not touched: a rebase the server did not start, or an `index.lock` younger than 10 minutes, makes writes fail with `Vault is busy`. The server aborts only rebases it started (it leaves a marker), removes an `index.lock` left by its own interrupted operation at startup (marker), and treats any `index.lock` older than 10 minutes as stale and removes it regardless of owner.
 - On shutdown, in-flight requests and queued writes are drained (up to 25 s) and pending pushes are aborted; the next sync retries them.
 
