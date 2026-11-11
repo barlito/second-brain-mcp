@@ -4,6 +4,7 @@ export interface AuditEntry {
   tokenId: string;
   tokenName: string;
   action: string;
+  space?: string;
   project?: string;
   section?: string;
   note?: string;
@@ -23,8 +24,8 @@ function cap(v: string | null | undefined): string | null {
 
 // Prepared once at module load and reused, same pattern as tokens.ts.
 const insertAuditStmt = db.prepare(
-  `INSERT INTO audit_log (ts, token_id, token_name, action, project, section, note, result, detail, git_commit, client_ip)
-   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  `INSERT INTO audit_log (ts, token_id, token_name, action, space, project, section, note, result, detail, git_commit, client_ip)
+   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 );
 export const MAX_PRUNE_DAYS = 36500;
 const pruneAuditStmt = db.prepare("DELETE FROM audit_log WHERE ts < ?");
@@ -42,6 +43,7 @@ function write(
     entry.tokenId,
     cap(entry.tokenName),
     cap(entry.action),
+    cap(entry.space),
     cap(entry.project),
     cap(entry.section),
     cap(entry.note),

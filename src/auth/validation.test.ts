@@ -6,7 +6,7 @@ makeTempDb();
 
 let t: typeof import("./tokens");
 let db: typeof import("../db").db;
-const ok = [{ project: "proj", section: "sect", permission: "read" as const }];
+const ok = [{ space: "sp", project: "proj", section: "sect", permission: "read" as const }];
 
 before(async () => {
   t = await import("./tokens");
@@ -31,21 +31,21 @@ test("name is trimmed and length/control chars are validated", () => {
 test("scopes are validated", () => {
   assert.throws(() => t.createToken("n", []), /at least one scope/);
   assert.throws(
-    () => t.createToken("n", [{ project: "Bad Slug", section: "s", permission: "read" }]),
+    () => t.createToken("n", [{ space: "sp", project: "Bad Slug", section: "s", permission: "read" }]),
     /invalid project slug/,
   );
   assert.throws(
-    () => t.createToken("n", [{ project: "p", section: "../x", permission: "read" }]),
+    () => t.createToken("n", [{ space: "sp", project: "p", section: "../x", permission: "read" }]),
     /invalid section slug/,
   );
   assert.throws(
-    () => t.createToken("n", [{ project: "p", section: "s", permission: "admin" as never }]),
+    () => t.createToken("n", [{ space: "sp", project: "p", section: "s", permission: "admin" as never }]),
     /invalid permission/,
   );
 });
 
 test("duplicate scopes are de-duplicated", () => {
-  const c = t.createToken("dup", [...ok, ...ok, { project: "proj", section: "sect", permission: "write" }]);
+  const c = t.createToken("dup", [...ok, ...ok, { space: "sp", project: "proj", section: "sect", permission: "write" }]);
   assert.equal(t.verifyToken(c.token)?.scopes.length, 2);
 });
 
@@ -61,8 +61,8 @@ test("a failed insert mid-transaction leaves no partial rows", () => {
     assert.throws(
       () =>
         t.createToken("rollback", [
-          { project: "proj", section: "sect", permission: "read" },
-          { project: "boom", section: "sect", permission: "read" },
+          { space: "sp", project: "proj", section: "sect", permission: "read" },
+          { space: "sp", project: "boom", section: "sect", permission: "read" },
         ]),
       /forced/,
     );
@@ -97,4 +97,30 @@ test("verifyToken refreshes last_used_at when the stored time is in the future",
   t.verifyToken(c.token);
   const row = db.prepare("SELECT last_used_at FROM tokens WHERE id = ?").get(c.id) as { last_used_at: string };
   assert.ok(row.last_used_at < future);
+});
+
+test("wildcards are only allowed as trailing levels", () => {
+  const mk = (space: string, project: string, section: string) => [
+    { space, project, section, permission: "read" as const },
+  ];
+  for (const bad of [
+    mk("*", "proj", "sect"),
+    mk("*", "*", "sect"),
+    mk("*", "proj", "*"),
+    mk("sp", "*", "sect"),
+  ]) {
+    assert.throws(() => t.createToken("n", bad), /only allowed as trailing levels/);
+  }
+  for (const good of [mk("*", "*", "*"), mk("sp", "*", "*"), mk("sp", "proj", "*"), mk("sp", "proj", "sect")]) {
+    assert.ok(t.createToken("n", good));
+  }
+});
+
+test("space is required and slug-validated; partial wildcards and globs are rejected", () => {
+  assert.throws(
+    () => t.createToken("n", [{ project: "p", section: "s", permission: "read" } as never]),
+    /invalid space slug/,
+  );
+  assert.throws(() => t.createToken("n", [{ space: "Bad", project: "p", section: "s", permission: "read" }]), /invalid space slug/);
+  assert.throws(() => t.createToken("n", [{ space: "sp", project: "p*", section: "*", permission: "read" }]), /invalid project slug/);
 });

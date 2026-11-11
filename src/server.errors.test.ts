@@ -21,20 +21,20 @@ before(async () => {
   ({ db } = await import("./db"));
   ({ drainWrites } = await import("./vault/git"));
   token = createToken("err-token", [
-    { project: "proj", section: "sect", permission: "write" },
-    { project: "proj", section: "sect", permission: "read" },
+    { space: "sp", project: "proj", section: "sect", permission: "write" },
+    { space: "sp", project: "proj", section: "sect", permission: "read" },
   ]).token;
 });
 after(cleanup);
 
-const args = { project: "proj", section: "sect", note: "n" };
+const args = { space: "sp", project: "proj", section: "sect", note: "n" };
 
 test("invalid slug (and over-long slug via the audited handler) maps to the name message", async () => {
   const vault = newRepo();
   const app = await listen(createApp({ vaultRoot: vault }));
   try {
     const r = await callTool(app.baseUrl, token, "kb_read", { ...args, note: "Bad Name" });
-    assert.deepEqual(r, { isError: true, text: "Invalid project/section/note name." });
+    assert.deepEqual(r, { isError: true, text: "Invalid space/project/section/note name." });
     assert.match(lastAudit(db, "token_name = 'err-token'").detail ?? "", /invalid/);
   } finally {
     await app.close();
@@ -44,8 +44,8 @@ test("invalid slug (and over-long slug via the audited handler) maps to the name
 test("UnsafePathError (symlinked section) -> 'Path not allowed.'", async () => {
   const vault = newRepo();
   const outside = tmp("outside");
-  mkdirSync(join(vault, "proj"));
-  symlinkSync(outside, join(vault, "proj", "sect"));
+  mkdirSync(join(vault, "sp", "proj"), { recursive: true });
+  symlinkSync(outside, join(vault, "sp", "proj", "sect"));
   const app = await listen(createApp({ vaultRoot: vault }));
   try {
     const r = await callTool(app.baseUrl, token, "kb_write", { ...args, content: "x" });
@@ -75,17 +75,17 @@ test("VaultBusyError (fresh index.lock) -> busy message", async () => {
 test("SyncConflictError -> conflict message naming the backup branch", async () => {
   const remote = makeBareRemote();
   const vault = cloneRepo(remote, "vault");
-  mkdirSync(join(vault, "proj", "sect"), { recursive: true });
-  writeFileSync(join(vault, "proj", "sect", "n.md"), "base\n");
+  mkdirSync(join(vault, "sp", "proj", "sect"), { recursive: true });
+  writeFileSync(join(vault, "sp", "proj", "sect", "n.md"), "base\n");
   git(["add", "."], vault);
   git(["commit", "-m", "seed"], vault);
   git(["push", "-u", "origin", "main"], vault);
   const other = cloneRepo(remote, "other");
 
   // Local unpushed edit vs conflicting remote edit of the same note.
-  writeFileSync(join(vault, "proj", "sect", "n.md"), "local\n");
+  writeFileSync(join(vault, "sp", "proj", "sect", "n.md"), "local\n");
   git(["commit", "-am", "local"], vault);
-  writeFileSync(join(other, "proj", "sect", "n.md"), "remote\n");
+  writeFileSync(join(other, "sp", "proj", "sect", "n.md"), "remote\n");
   git(["commit", "-am", "remote"], other);
   git(["push"], other);
 
@@ -107,8 +107,8 @@ test("SyncConflictError -> conflict message naming the backup branch", async () 
 test("anything else -> 'Internal error.' with the real reason (credentials stripped) in audit and log", async () => {
   const vault = newRepo();
   // A regular file where the section dir should be makes the write fail generically.
-  mkdirSync(join(vault, "proj"));
-  writeFileSync(join(vault, "proj", "sect"), "not a dir");
+  mkdirSync(join(vault, "sp", "proj"), { recursive: true });
+  writeFileSync(join(vault, "sp", "proj", "sect"), "not a dir");
   const logged: string[] = [];
   const orig = console.error;
   console.error = (...a: unknown[]) => void logged.push(a.join(" "));

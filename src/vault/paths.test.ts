@@ -23,29 +23,35 @@ test("isValidSlug rejects invalid slugs", () => {
 });
 
 test("resolveNotePath resolves to the expected path for valid input", () => {
-  const result = resolveNotePath(vaultRoot, "proj", "sect", "note");
-  assert.equal(result, path.resolve(vaultRoot, "proj", "sect", "note.md"));
+  const result = resolveNotePath(vaultRoot, "sp", "proj", "sect", "note");
+  assert.equal(result, path.resolve(vaultRoot, "sp", "proj", "sect", "note.md"));
 });
 
 test("resolveSectionDir resolves to the expected path for valid input", () => {
-  const result = resolveSectionDir(vaultRoot, "proj", "sect");
-  assert.equal(result, path.resolve(vaultRoot, "proj", "sect"));
+  const result = resolveSectionDir(vaultRoot, "sp", "proj", "sect");
+  assert.equal(result, path.resolve(vaultRoot, "sp", "proj", "sect"));
 });
 
 test("resolveNotePath throws before touching the filesystem for malicious project", () => {
-  assert.throws(() => resolveNotePath(vaultRoot, "../../etc", "sect", "note"), /invalid project slug/);
+  assert.throws(() => resolveNotePath(vaultRoot, "sp", "../../etc", "sect", "note"), /invalid project slug/);
 });
 
 test("resolveNotePath throws for malicious section", () => {
-  assert.throws(() => resolveNotePath(vaultRoot, "proj", "..", "note"), /invalid section slug/);
+  assert.throws(() => resolveNotePath(vaultRoot, "sp", "proj", "..", "note"), /invalid section slug/);
 });
 
 test("resolveNotePath throws for malicious note", () => {
-  assert.throws(() => resolveNotePath(vaultRoot, "proj", "sect", "../../../etc/passwd"), /invalid note slug/);
-  assert.throws(() => resolveNotePath(vaultRoot, "proj", "sect", "a/b"), /invalid note slug/);
+  assert.throws(() => resolveNotePath(vaultRoot, "sp", "proj", "sect", "../../../etc/passwd"), /invalid note slug/);
+  assert.throws(() => resolveNotePath(vaultRoot, "sp", "proj", "sect", "a/b"), /invalid note slug/);
 });
 
 test("resolveSectionDir throws for malicious input", () => {
-  assert.throws(() => resolveSectionDir(vaultRoot, "proj", "../../etc"), /invalid section slug/);
-  assert.throws(() => resolveSectionDir(vaultRoot, "", "sect"), /invalid project slug/);
+  assert.throws(() => resolveSectionDir(vaultRoot, "sp", "proj", "../../etc"), /invalid section slug/);
+  assert.throws(() => resolveSectionDir(vaultRoot, "sp", "", "sect"), /invalid project slug/);
+});
+
+test("resolveNotePath / resolveSectionDir reject a malicious space", () => {
+  assert.throws(() => resolveNotePath(vaultRoot, "../x", "proj", "sect", "note"), /invalid space slug/);
+  assert.throws(() => resolveNotePath(vaultRoot, "*", "proj", "sect", "note"), /invalid space slug/);
+  assert.throws(() => resolveSectionDir(vaultRoot, "", "proj", "sect"), /invalid space slug/);
 });

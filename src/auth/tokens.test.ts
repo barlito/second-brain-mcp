@@ -19,7 +19,7 @@ before(async () => {
 
 test("createToken returns a usable plaintext token that verifyToken accepts with the right scopes", () => {
   const created = createToken("test-token", [
-    { project: "proj", section: "sect", permission: "read" },
+    { space: "sp", project: "proj", section: "sect", permission: "read" },
   ]);
 
   const verified = verifyToken(created.token);
@@ -28,7 +28,7 @@ test("createToken returns a usable plaintext token that verifyToken accepts with
   assert.equal(verified?.tokenId, created.id);
   assert.equal(verified?.name, "test-token");
   assert.deepEqual(verified?.scopes, [
-    { project: "proj", section: "sect", permission: "read" },
+    { space: "sp", project: "proj", section: "sect", permission: "read" },
   ]);
 });
 
@@ -39,7 +39,7 @@ test("verifyToken returns null for a garbage/unknown token", () => {
 
 test("revokeToken makes a previously-valid token fail verifyToken afterward", () => {
   const created = createToken("revoke-me", [
-    { project: "proj", section: "sect", permission: "write" },
+    { space: "sp", project: "proj", section: "sect", permission: "write" },
   ]);
 
   assert.ok(verifyToken(created.token));
@@ -55,7 +55,7 @@ test("revokeToken makes a previously-valid token fail verifyToken afterward", ()
 
 test("listTokens never exposes token_hash or plaintext", () => {
   const created = createToken("list-me", [
-    { project: "proj", section: "sect", permission: "read" },
+    { space: "sp", project: "proj", section: "sect", permission: "read" },
   ]);
 
   const tokens = listTokens();
@@ -65,7 +65,7 @@ test("listTokens never exposes token_hash or plaintext", () => {
   assert.ok(!("token_hash" in (entry as unknown as Record<string, unknown>)));
   assert.ok(!("token" in (entry as unknown as Record<string, unknown>)));
   assert.deepEqual(entry?.scopes, [
-    { project: "proj", section: "sect", permission: "read" },
+    { space: "sp", project: "proj", section: "sect", permission: "read" },
   ]);
 
   for (const t of tokens) {

@@ -7,7 +7,7 @@ export function isValidSlug(s: string): boolean {
   return SLUG_RE.test(s);
 }
 
-// Distinguishes caller input errors (bad project/section/note slug) from
+// Distinguishes caller input errors (bad space/project/section/note slug) from
 // genuine internal failures, so callers (e.g. mcp.ts) can surface a clearer
 // message instead of a generic "Internal error.".
 export class InvalidSlugError extends Error {
@@ -75,16 +75,18 @@ function assertValidSlug(kind: string, value: string): void {
 
 export function resolveNotePath(
   vaultRoot: string,
+  space: string,
   project: string,
   section: string,
   note: string,
 ): string {
+  assertValidSlug("space", space);
   assertValidSlug("project", project);
   assertValidSlug("section", section);
   assertValidSlug("note", note);
 
   const resolvedRoot = path.resolve(vaultRoot);
-  const resolvedPath = path.resolve(resolvedRoot, project, section, `${note}.md`);
+  const resolvedPath = path.resolve(resolvedRoot, space, project, section, `${note}.md`);
 
   assertInsideRoot(resolvedRoot, resolvedPath);
   assertSafePath(resolvedRoot, resolvedPath);
@@ -97,12 +99,13 @@ export function resolveNotePath(
   return resolvedPath;
 }
 
-export function resolveSectionDir(vaultRoot: string, project: string, section: string): string {
+export function resolveSectionDir(vaultRoot: string, space: string, project: string, section: string): string {
+  assertValidSlug("space", space);
   assertValidSlug("project", project);
   assertValidSlug("section", section);
 
   const resolvedRoot = path.resolve(vaultRoot);
-  const resolvedPath = path.resolve(resolvedRoot, project, section);
+  const resolvedPath = path.resolve(resolvedRoot, space, project, section);
 
   assertInsideRoot(resolvedRoot, resolvedPath);
   assertSafePath(resolvedRoot, resolvedPath);

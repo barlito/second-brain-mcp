@@ -33,7 +33,7 @@ before(async () => {
   ({ createToken } = await import("./auth/tokens"));
   ({ createApp } = await import("./server"));
 
-  token = createToken("cleanup-test", [{ project: "proj", section: "sect", permission: "write" }])
+  token = createToken("cleanup-test", [{ space: "sp", project: "proj", section: "sect", permission: "write" }])
     .token;
 
   await new Promise<void>((resolve) => {

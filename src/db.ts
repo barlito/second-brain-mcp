@@ -78,6 +78,45 @@ export const MIGRATIONS: ReadonlyArray<Migration> = [
       ALTER TABLE audit_log_new RENAME TO audit_log;
     `);
   } },
+  // 3: scopes gain a NOT NULL space level; existing rows move to the sentinel space
+  // '!legacy'. '!' fails slug validation, so no token scope, tool argument or vault path can
+  // ever equal it: those rows fail closed until the tokens are re-issued. audit_log gets a
+  // nullable space. (Originally the sentinel was 'legacy', a valid slug; see migration 4.)
+  { tables: ["scopes", "audit_log"], up: (d) => {
+    // Orphan rows (token gone, FK enforcement was off) are dropped rather than carried over.
+    const carried = (d.prepare("SELECT COUNT(*) c FROM scopes WHERE token_id IN (SELECT id FROM tokens)").get() as { c: number }).c;
+    const total = (d.prepare("SELECT COUNT(*) c FROM scopes").get() as { c: number }).c;
+    if (carried > 0) {
+      console.warn(
+        `warning: migration 3 moved ${carried} scope(s) to space '!legacy'; they grant nothing until tokens are re-issued with space:project:section:permission scopes`,
+      );
+    }
+    if (total > carried) {
+      console.warn(`warning: migration 3 dropped ${total - carried} orphan scope(s) whose token no longer exists`);
+    }
+    d.exec(`
+      CREATE TABLE scopes_new (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        token_id TEXT NOT NULL REFERENCES tokens(id) ON DELETE CASCADE,
+        space TEXT NOT NULL,
+        project TEXT NOT NULL,
+        section TEXT NOT NULL,
+        permission TEXT NOT NULL CHECK(permission IN ('read','write')),
+        UNIQUE(token_id, space, project, section, permission)
+      );
+      INSERT INTO scopes_new (id, token_id, space, project, section, permission)
+        SELECT id, token_id, '!legacy', project, section, permission FROM scopes
+        WHERE token_id IN (SELECT id FROM tokens);
+      DROP TABLE scopes;
+      ALTER TABLE scopes_new RENAME TO scopes;
+      ALTER TABLE audit_log ADD COLUMN space TEXT;
+    `);
+  } },
+  // 4: DBs that already ran the first version of migration 3 hold space='legacy' (a valid
+  // slug a real space could later claim); rename those rows to the unmatchable sentinel.
+  { tables: ["scopes"], up: (d) => {
+    d.exec("UPDATE scopes SET space = '!legacy' WHERE space = 'legacy'");
+  } },
 ];
 
 // Applies migration index `v` under BEGIN IMMEDIATE. user_version is re-read inside the

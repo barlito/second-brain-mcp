@@ -35,21 +35,21 @@ before(async () => {
   ));
 
   tokenA = createToken("token-a", [
-    { project: "proj-a", section: "sect-a", permission: "write" },
-    { project: "proj-a", section: "sect-a", permission: "read" },
+    { space: "sp", project: "proj-a", section: "sect-a", permission: "write" },
+    { space: "sp", project: "proj-a", section: "sect-a", permission: "read" },
   ]).token;
 
   tokenRO = createToken("token-ro", [
-    { project: "proj-a", section: "sect-a", permission: "read" },
+    { space: "sp", project: "proj-a", section: "sect-a", permission: "read" },
   ]).token;
   tokenOtherSection = createToken("token-other-section", [
-    { project: "proj-a", section: "sect-z", permission: "read" },
-    { project: "proj-a", section: "sect-z", permission: "write" },
+    { space: "sp", project: "proj-a", section: "sect-z", permission: "read" },
+    { space: "sp", project: "proj-a", section: "sect-z", permission: "write" },
   ]).token;
 
   tokenB = createToken("token-b", [
-    { project: "proj-b", section: "sect-b", permission: "read" },
-    { project: "proj-b", section: "sect-b", permission: "write" },
+    { space: "sp", project: "proj-b", section: "sect-b", permission: "read" },
+    { space: "sp", project: "proj-b", section: "sect-b", permission: "write" },
   ]).token;
 
   await new Promise<void>((resolve) => {
@@ -87,7 +87,7 @@ test("kb_write then kb_read with correctly-scoped token succeeds end-to-end", as
     const writeResult = await client.callTool({
       name: "kb_write",
       arguments: {
-        project: "proj-a",
+        space: "sp", project: "proj-a",
         section: "sect-a",
         note: "note-1",
         content: "hello\n",
@@ -101,11 +101,11 @@ test("kb_write then kb_read with correctly-scoped token succeeds end-to-end", as
     assert.equal(commitSha, headSha);
 
     const log = git(["log", "--oneline", "-1"], vaultRoot);
-    assert.match(log, /kb_write: proj-a\/sect-a\/note-1 via token-a/);
+    assert.match(log, /kb_write: sp\/proj-a\/sect-a\/note-1 via token-a/);
 
     const readResult = await client.callTool({
       name: "kb_read",
-      arguments: { project: "proj-a", section: "sect-a", note: "note-1" },
+      arguments: { space: "sp", project: "proj-a", section: "sect-a", note: "note-1" },
     });
     assert.ok(!readResult.isError, "read should not be a tool error");
     assert.equal(textOf(readResult as CallToolResult), "hello\n");
@@ -120,7 +120,7 @@ test("kb_write / kb_read with a wrongly-scoped token are denied", async () => {
     const writeResult = await client.callTool({
       name: "kb_write",
       arguments: {
-        project: "proj-a",
+        space: "sp", project: "proj-a",
         section: "sect-a",
         note: "note-1",
         content: "should never be written\n",
@@ -131,7 +131,7 @@ test("kb_write / kb_read with a wrongly-scoped token are denied", async () => {
 
     const readResult = await client.callTool({
       name: "kb_read",
-      arguments: { project: "proj-a", section: "sect-a", note: "note-1" },
+      arguments: { space: "sp", project: "proj-a", section: "sect-a", note: "note-1" },
     });
     assert.equal(readResult.isError, true);
     assert.equal(textOf(readResult as CallToolResult), "Permission denied.");
@@ -171,10 +171,10 @@ test("a malformed note name is reported distinctly from a real internal error", 
     // note is not a valid slug.
     const result = await client.callTool({
       name: "kb_read",
-      arguments: { project: "proj-a", section: "sect-a", note: "../evil" },
+      arguments: { space: "sp", project: "proj-a", section: "sect-a", note: "../evil" },
     });
     assert.equal(result.isError, true);
-    assert.equal(textOf(result as CallToolResult), "Invalid project/section/note name.");
+    assert.equal(textOf(result as CallToolResult), "Invalid space/project/section/note name.");
 
     const row = db
       .prepare("SELECT result, detail FROM audit_log WHERE action = 'kb_read' AND token_name = 'token-a' ORDER BY id DESC LIMIT 1")
@@ -192,7 +192,7 @@ test("read-only token cannot write; same-project other-section token is denied",
   try {
     const seeded = await seeder.client.callTool({
       name: "kb_write",
-      arguments: { project: "proj-a", section: "sect-a", note: "note-ro-read", content: "seed\n" },
+      arguments: { space: "sp", project: "proj-a", section: "sect-a", note: "note-ro-read", content: "seed\n" },
     });
     assert.ok(!seeded.isError);
   } finally {
@@ -202,12 +202,12 @@ test("read-only token cannot write; same-project other-section token is denied",
   try {
     const read = await ro.client.callTool({
       name: "kb_read",
-      arguments: { project: "proj-a", section: "sect-a", note: "note-ro-read" },
+      arguments: { space: "sp", project: "proj-a", section: "sect-a", note: "note-ro-read" },
     });
     assert.ok(!read.isError);
     const write = await ro.client.callTool({
       name: "kb_write",
-      arguments: { project: "proj-a", section: "sect-a", note: "note-ro", content: "x" },
+      arguments: { space: "sp", project: "proj-a", section: "sect-a", note: "note-ro", content: "x" },
     });
     assert.equal(write.isError, true);
     assert.equal(textOf(write as CallToolResult), "Permission denied.");
@@ -219,7 +219,7 @@ test("read-only token cannot write; same-project other-section token is denied",
     for (const name of ["kb_read", "kb_write"]) {
       const r = await other.client.callTool({
         name,
-        arguments: { project: "proj-a", section: "sect-a", note: "note-1", content: "x" },
+        arguments: { space: "sp", project: "proj-a", section: "sect-a", note: "note-1", content: "x" },
       });
       assert.equal(r.isError, true);
       assert.equal(textOf(r as CallToolResult), "Permission denied.");
@@ -227,16 +227,16 @@ test("read-only token cannot write; same-project other-section token is denied",
   } finally {
     await other.transport.close();
   }
-  assert.throws(() => git(["cat-file", "-e", "HEAD:proj-a/sect-a/note-ro.md"], vaultRoot));
+  assert.throws(() => git(["cat-file", "-e", "HEAD:sp/proj-a/sect-a/note-ro.md"], vaultRoot));
 });
 
 test("audit_log has the expected ok/denied rows", async () => {
   // Dedicated token: only rows from this test are counted.
   const t = createToken("audit-token", [
-    { project: "proj-au", section: "sect-au", permission: "write" },
-    { project: "proj-au", section: "sect-au", permission: "read" },
+    { space: "sp", project: "proj-au", section: "sect-au", permission: "write" },
+    { space: "sp", project: "proj-au", section: "sect-au", permission: "read" },
   ]).token;
-  const a = { project: "proj-au", section: "sect-au", note: "n" };
+  const a = { space: "sp", project: "proj-au", section: "sect-au", note: "n" };
   const { client, transport } = await connectClient(t);
   try {
     await client.callTool({ name: "kb_write", arguments: { ...a, content: "x\n" } });
@@ -247,13 +247,14 @@ test("audit_log has the expected ok/denied rows", async () => {
     await transport.close();
   }
   const rows = db
-    .prepare("SELECT action, result, client_ip FROM audit_log WHERE token_name = 'audit-token' ORDER BY id")
-    .all() as { action: string; result: string; client_ip: string | null }[];
+    .prepare("SELECT action, result, client_ip, space FROM audit_log WHERE token_name = 'audit-token' ORDER BY id")
+    .all() as { action: string; result: string; client_ip: string | null; space: string | null }[];
   assert.deepEqual(
     rows.map((r) => `${r.action}:${r.result}`),
     ["kb_write:ok", "kb_read:ok", "kb_read:denied", "kb_write:denied"],
   );
   assert.ok(rows.every((r) => r.client_ip), "client ip recorded on every row");
+  assert.ok(rows.every((r) => r.space === "sp"), "space recorded on every row");
 });
 
 test("401 writes a (coalesced) auth/denied audit row with a client IP", async () => {
@@ -324,7 +325,7 @@ test("oversized content (under the body limit) is rejected and nothing is writte
     try {
       const r = await client.callTool({
         name: "kb_write",
-        arguments: { project: "proj-a", section: "sect-a", note: "big", content: "x".repeat(600_000) },
+        arguments: { space: "sp", project: "proj-a", section: "sect-a", note: "big", content: "x".repeat(600_000) },
       });
       isError = r.isError === true;
     } catch {

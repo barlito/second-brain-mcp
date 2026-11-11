@@ -16,7 +16,7 @@ before(async () => {
   server = await import("./server");
   ({ db } = await import("./db"));
   const { createToken } = await import("./auth/tokens");
-  token = createToken("hardening", [{ project: "p", section: "s", permission: "read" }]).token;
+  token = createToken("hardening", [{ space: "sp", project: "p", section: "s", permission: "read" }]).token;
 });
 after(cleanup);
 
