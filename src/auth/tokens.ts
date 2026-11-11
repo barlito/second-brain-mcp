@@ -33,21 +33,30 @@ export function validateTokenInput(name: unknown, scopes: unknown): { name: stri
   const seen = new Set<string>();
   const out: Scope[] = [];
   for (const s of scopes as Scope[]) {
-    if (!s || typeof s.project !== "string" || !isValidSlug(s.project)) {
-      throw new TokenValidationError(`invalid project slug: ${JSON.stringify(s?.project)}`);
-    }
-    if (typeof s.section !== "string" || !isValidSlug(s.section)) {
-      throw new TokenValidationError(`invalid section slug: ${JSON.stringify(s.section)}`);
+    const levels = [s?.space, s?.project, s?.section] as unknown[];
+    const kinds = ["space", "project", "section"];
+    levels.forEach((v, i) => {
+      if (typeof v !== "string" || (v !== "*" && !isValidSlug(v))) {
+        throw new TokenValidationError(`invalid ${kinds[i]} slug: ${JSON.stringify(v)}`);
+      }
+    });
+    // "*" only as trailing levels: once a level is "*", every deeper one must be too.
+    for (let i = 0; i < 2; i++) {
+      if (levels[i] === "*" && levels[i + 1] !== "*") {
+        throw new TokenValidationError(
+          `invalid scope ${levels.join(":")}:${s.permission}: "*" is only allowed as trailing levels (*:*:*, space:*:*, space:project:*)`,
+        );
+      }
     }
     if (!(PERMISSIONS as readonly string[]).includes(s.permission)) {
       throw new TokenValidationError(
         `invalid permission ${JSON.stringify(s.permission)}, must be one of: ${PERMISSIONS.join(", ")}`,
       );
     }
-    const key = `${s.project}\0${s.section}\0${s.permission}`;
+    const key = `${s.space}\0${s.project}\0${s.section}\0${s.permission}`;
     if (seen.has(key)) continue;
     seen.add(key);
-    out.push({ project: s.project, section: s.section, permission: s.permission });
+    out.push({ space: s.space, project: s.project, section: s.section, permission: s.permission });
   }
   return { name: trimmed, scopes: out };
 }
@@ -82,14 +91,14 @@ const insertTokenStmt = db.prepare(
   "INSERT INTO tokens (id, name, token_hash, created_at) VALUES (?, ?, ?, ?)",
 );
 const insertScopeStmt = db.prepare(
-  "INSERT INTO scopes (token_id, project, section, permission) VALUES (?, ?, ?, ?)",
+  "INSERT INTO scopes (token_id, space, project, section, permission) VALUES (?, ?, ?, ?, ?)",
 );
 const selectActiveTokenByHashStmt = db.prepare(
   "SELECT id, name, last_used_at FROM tokens WHERE token_hash = ? AND revoked_at IS NULL",
 );
 const updateLastUsedAtStmt = db.prepare("UPDATE tokens SET last_used_at = ? WHERE id = ?");
 const selectScopesByTokenIdStmt = db.prepare(
-  "SELECT project, section, permission FROM scopes WHERE token_id = ?",
+  "SELECT space, project, section, permission FROM scopes WHERE token_id = ?",
 );
 const revokeTokenStmt = db.prepare(
   "UPDATE tokens SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL",
@@ -110,7 +119,7 @@ export function createToken(name: string, scopes: Scope[]): CreatedToken {
   db.transaction(() => {
     insertTokenStmt.run(id, name, tokenHash, createdAt);
     for (const scope of scopes) {
-      insertScopeStmt.run(id, scope.project, scope.section, scope.permission);
+      insertScopeStmt.run(id, scope.space, scope.project, scope.section, scope.permission);
     }
   })();
 

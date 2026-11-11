@@ -1,6 +1,6 @@
 # second-brain-mcp
 
-An MCP server that exposes a git-backed, Obsidian-compatible knowledge-base vault to Claude and other agents. Access is gated by Bearer tokens with exact per-project/section read and write scopes (stored in SQLite), and every call is audit-logged.
+An MCP server that exposes a git-backed, Obsidian-compatible knowledge-base vault to Claude and other agents. Access is gated by Bearer tokens with hierarchical space/project/section read and write scopes (stored in SQLite), and every call is audit-logged.
 
 - Transport: stateless Streamable HTTP at `POST /mcp` (TypeScript, Express 5, MCP SDK).
 - Two tools: `kb_read` and `kb_write`.
@@ -18,7 +18,7 @@ Traefik -> bearer auth (+ per-IP failure limiter) -> /mcp -> ACL check -> vault 
 1. Traefik terminates TLS (plain HTTP is redirected to HTTPS). Security headers apply in both local and prod; only the rate limit (20 avg / 40 burst per IP) is prod-only.
 2. Bearer auth looks the token up by SHA-256 hash (only hashes are stored). After 10 failed attempts from one IP within 60 s, that IP gets `429` until the window ends. The client IP comes from `X-Forwarded-For`, trusted only from the Traefik tasks (`TRUSTED_PROXY`).
 3. `/mcp` builds a fresh MCP server per request (stateless).
-4. The tool checks the token's scopes (exact match on project, section and permission).
+4. The tool checks the token's scopes (space, project and section match exactly or via trailing `*` wildcards; `read` and `write` are separate permissions). This runs before any filesystem access.
 5. The path is resolved from validated slugs, re-checked against the vault root, and symlinks are refused.
 6. Writes go through a single queue: pull (rebase), atomic write, local commit, then asynchronous push.
 7. One audit row is written per tool call (`ok`, `denied` or `error`), plus rows for HTTP-level errors and (coalesced) auth failures.
@@ -27,16 +27,17 @@ Traefik -> bearer auth (+ per-IP failure limiter) -> /mcp -> ACL check -> vault 
 
 ```
 <vault>/
-  <project>/
-    <section>/
-      <note>.md
+  <space>/            e.g. perso, pro, idees, meta
+    <project>/
+      <section>/
+        <note>.md
 ```
 
-`project`, `section` and `note` must each match `^[a-z0-9][a-z0-9-]{0,63}$` (lowercase letters, digits and hyphens; max 64 chars; no leading hyphen; no dots, slashes or spaces). The `.md` extension is added by the server. Anything else is rejected.
+`space`, `project`, `section` and `note` must each match `^[a-z0-9][a-z0-9-]{0,63}$` (lowercase letters, digits and hyphens; max 64 chars; no leading hyphen; no dots, slashes or spaces). The `.md` extension is added by the server. Anything else is rejected.
 
 ## Tools
 
-Both tools take `project`, `section`, `note` (strings, max 64 chars each).
+Both tools take `space`, `project`, `section`, `note` (strings, max 64 chars each, all required).
 
 | Tool | Extra argument | Result |
 |------|----------------|--------|
@@ -47,9 +48,9 @@ Errors returned to the client (`isError: true`):
 
 | Message | Cause |
 |---------|-------|
-| `Permission denied.` | Token has no exact scope for that project/section/permission. Deliberately does not reveal whether the project exists. |
+| `Permission denied.` | Token has no scope covering that space/project/section/permission. Deliberately does not reveal whether the project exists. |
 | `Note not found.` | `kb_read` on a missing note. |
-| `Invalid project/section/note name.` | A name does not match the slug rules. |
+| `Invalid space/project/section/note name.` | A name does not match the slug rules. |
 | `Path not allowed.` | Path-safety check failed (escape from the vault root, symlink, not a regular file). |
 | `Vault is busy, retry in a moment.` | A human (or other git process) is using the vault repo: a rebase in progress or a recent `index.lock`. Retry. |
 | `Conflict: this note was changed remotely. Your version was saved on branch <conflict/...>. Re-read the note and retry.` | See [Git sync](#git-sync). |
@@ -63,15 +64,21 @@ HTTP-level: `401` (missing/invalid/revoked token), `429` (too many failed auths)
 Tokens are managed with `make` targets that run a CLI inside the running service container (so the stack must be deployed).
 
 ```bash
-make token-create name=claude-code scope=myproj:notes:read,myproj:notes:write
+make token-create name=claude-code scope=pro:myproj:notes:read,pro:myproj:notes:write
+make token-create name=me preset=master        # read+write on *:*:*
+make token-create name=viewer preset=master-ro # read on *:*:*
 make token-list
 make token-revoke id=<token id>
 ```
 
-- Scope format: `project:section:permission`, comma-separated. `permission` is `read` or `write`. `project` and `section` follow the slug rules.
-- Scopes are exact: `write` does not imply `read`, and there are no wildcards. Grant both if you want both.
+- Scope format: `space:project:section:permission`, comma-separated. `permission` is `read` or `write`. `space`, `project` and `section` follow the slug rules.
+- Wildcards: `*` is allowed only as trailing levels: `*:*:*`, `<space>:*:*`, `<space>:<project>:*`, or fully explicit. Patterns like `*:proj:sec` or `space:*:sec` are rejected. A token may hold scopes in several spaces.
+- `read` and `write` are separate: `write` does not imply `read`. Grant both if you want both.
+- Presets: `preset=master` (read+write on `*:*:*`) and `preset=master-ro` (read on `*:*:*`). Use either `preset=` or `scope=`, not both.
+- The CLI prints a warning when a token has any wildcard scope, stating what the token can read/write (including content created later). Prefer explicit scopes unless you need a master token.
+- Upgrade note: scopes created before spaces existed are migrated to the space `legacy`, which matches no real space, so those tokens grant nothing until re-issued with 4-part scopes.
 - The plaintext token (`sb_...`) is printed once at creation and cannot be recovered. Only its hash is stored. If lost, revoke and create a new one.
-- `token-list` shows id, name, created/revoked/last-used timestamps and scopes.
+- `token-list` shows id, name, created/revoked/last-used timestamps and scopes (4-part format).
 
 ## Configuring a Claude Code client
 

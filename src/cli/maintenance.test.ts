@@ -25,7 +25,7 @@ test("backupDb produces a readable copy, creates parent dir, refuses overwrite",
   assert.equal(await m.backupDb(dest), dest);
   const copy = new Database(dest, { readonly: true });
   assert.equal((copy.prepare("SELECT COUNT(*) c FROM audit_log").get() as { c: number }).c, 1);
-  assert.equal(copy.pragma("user_version", { simple: true }), 2);
+  assert.equal(copy.pragma("user_version", { simple: true }), 3);
   copy.close();
   await assert.rejects(m.backupDb(dest), /already exists/);
 });

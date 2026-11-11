@@ -16,7 +16,7 @@ before(async () => {
   ({ createApp } = await import("./server"));
   ({ syncWrite, drainWrites } = await import("./vault/git"));
   const { createToken } = await import("./auth/tokens");
-  token = createToken("health-token", [{ project: "p", section: "s", permission: "read" }]).token;
+  token = createToken("health-token", [{ space: "sp", project: "p", section: "s", permission: "read" }]).token;
 });
 after(cleanup);
 

@@ -68,8 +68,8 @@ restart: ## Restart (undeploy then deploy)
 logs: ## Follow logs (make logs service=second-brain-mcp)
 	docker service logs -f "$(stack_name)_$(service)"
 
-token-create: ## Create a token (make token-create name=X scope=project:section:perm,...)
-	@$(call exec_in_service,node dist/cli/token.js create --name "$(name)" --scope "$(scope)")
+token-create: ## Create a token (make token-create name=X preset=master|master-ro  OR  scope=space:project:section:perm,...)
+	@$(call exec_in_service,node dist/cli/token.js create --name "$(name)" $(if $(preset),--preset "$(preset)",--scope "$(scope)"))
 
 token-list: ## List tokens
 	@$(call exec_in_service,node dist/cli/token.js list)

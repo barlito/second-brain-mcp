@@ -3,16 +3,55 @@ import { parseArgs as nodeParseArgs } from "node:util";
 import { createToken, listTokens, revokeToken } from "../auth/tokens";
 import { Permission, Scope } from "../auth/types";
 
-// Shape only (project:section:permission); createToken validates the values.
+// Shape only (space:project:section:permission); createToken validates the values.
 export function parseScopes(raw: string): Scope[] {
   return raw.split(",").map((entry) => {
     const parts = entry.split(":");
-    if (parts.length !== 3) {
-      throw new Error(`invalid scope "${entry}", expected project:section:permission`);
+    if (parts.length !== 4) {
+      throw new Error(`invalid scope "${entry}", expected space:project:section:permission`);
     }
-    const [project, section, permission] = parts;
-    return { project, section, permission: permission as Permission };
+    const [space, project, section, permission] = parts;
+    return { space, project, section, permission: permission as Permission };
   });
+}
+
+export const PRESETS: Record<string, Scope[]> = {
+  master: [
+    { space: "*", project: "*", section: "*", permission: "read" },
+    { space: "*", project: "*", section: "*", permission: "write" },
+  ],
+  "master-ro": [{ space: "*", project: "*", section: "*", permission: "read" }],
+};
+
+// Resolves --preset / --scope (exactly one) into scopes.
+export function resolveScopes(preset: string | undefined, scope: string | undefined): Scope[] {
+  if (preset && scope) throw new Error("use either --preset or --scope, not both");
+  if (preset) {
+    const p = PRESETS[preset];
+    if (!p) throw new Error(`unknown preset "${preset}", expected one of: ${Object.keys(PRESETS).join(", ")}`);
+    return p.map((s) => ({ ...s }));
+  }
+  if (!scope) throw new Error("--preset or --scope is required");
+  return parseScopes(scope);
+}
+
+export function formatScope(s: Scope): string {
+  return `${s.space}:${s.project}:${s.section}:${s.permission}`;
+}
+
+// One line per wildcard scope; empty when the token has none.
+export function wildcardWarnings(scopes: Scope[]): string[] {
+  return scopes
+    .filter((s) => s.space === "*" || s.project === "*" || s.section === "*")
+    .map((s) => {
+      const where =
+        s.space === "*"
+          ? "EVERY space, project and section"
+          : s.project === "*"
+            ? `every project and section in space "${s.space}"`
+            : `every section of ${s.space}/${s.project}`;
+      return `WARNING: scope ${formatScope(s)} - this token can ${s.permission} ${where}, including ones created later.`;
+    });
 }
 
 function fail(message: string): never {
@@ -26,15 +65,15 @@ function cmdCreate(argv: string[]): void {
     options: {
       name: { type: "string" },
       scope: { type: "string" },
+      preset: { type: "string" },
     },
   });
-  const { name, scope } = values;
+  const { name, scope, preset } = values;
   if (!name) fail("--name is required");
-  if (!scope) fail("--scope is required");
 
   let scopes: Scope[];
   try {
-    scopes = parseScopes(scope);
+    scopes = resolveScopes(preset, scope);
   } catch (err) {
     fail((err as Error).message);
   }
@@ -42,6 +81,8 @@ function cmdCreate(argv: string[]): void {
   // TokenValidationError messages are printed cleanly by main()'s catch.
   const created = createToken(name, scopes);
   console.log("Token created. The plaintext token is shown ONLY ONCE below — store it now:");
+  console.log("");
+  for (const w of wildcardWarnings(scopes)) console.log(w);
   console.log("");
   console.log(`  id:    ${created.id}`);
   console.log(`  token: ${created.token}`);
@@ -56,7 +97,7 @@ function cmdList(): void {
   }
   for (const t of tokens) {
     const scopesStr = t.scopes
-      .map((s) => `${s.project}:${s.section}:${s.permission}`)
+      .map(formatScope)
       .join(", ");
     console.log(
       [

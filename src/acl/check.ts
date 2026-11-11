@@ -1,13 +1,19 @@
 import { Permission, Scope } from "../auth/types";
 
-// Exact match only — no wildcards (current schema/CLI don't support them, by design).
+// A scope level matches exactly or via "*" (only trailing levels may be "*",
+// enforced at token creation). read and write are independent permissions.
 export function checkScope(
   scopes: Scope[],
+  space: string,
   project: string,
   section: string,
   permission: Permission,
 ): boolean {
   return scopes.some(
-    (s) => s.project === project && s.section === section && s.permission === permission,
+    (s) =>
+      s.permission === permission &&
+      (s.space === "*" || s.space === space) &&
+      (s.project === "*" || s.project === project) &&
+      (s.section === "*" || s.section === section),
   );
 }

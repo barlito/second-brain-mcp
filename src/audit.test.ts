@@ -18,8 +18,9 @@ type Row = Record<string, string | null>;
 const last = () => db.prepare("SELECT * FROM audit_log ORDER BY id DESC LIMIT 1").get() as Row;
 
 test("logAudit stays backward compatible and accepts clientIp", () => {
-  audit.logAudit({ tokenId: "t", tokenName: "n", action: "read", result: "ok", clientIp: "1.2.3.4" });
+  audit.logAudit({ tokenId: "t", tokenName: "n", action: "read", result: "ok", clientIp: "1.2.3.4", space: "sp" });
   const r = last();
+  assert.equal(r.space, "sp");
   assert.equal(r.token_id, "t");
   assert.equal(r.client_ip, "1.2.3.4");
 });
@@ -37,9 +38,9 @@ test("logAuthFailure writes a null-token denied auth row", () => {
 
 test("free-text fields are truncated", () => {
   const big = "x".repeat(10_000);
-  audit.logAudit({ action: "read", result: "ok", project: big, section: big, note: big, detail: big });
+  audit.logAudit({ action: "read", result: "ok", space: big, project: big, section: big, note: big, detail: big });
   const r = last();
-  for (const k of ["project", "section", "note", "detail"]) {
+  for (const k of ["space", "project", "section", "note", "detail"]) {
     assert.equal(r[k]!.length, audit.MAX_FIELD_LEN);
   }
 });
