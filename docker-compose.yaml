@@ -26,6 +26,8 @@ services:
       # No VAULT_REMOTE_URL locally: the vault is a plain local git repo.
       - VAULT_BRANCH=main
       - VAULT_SYNC_INTERVAL_MS=60000
+      # Swarm DNS for the Traefik tasks: only they may set X-Forwarded-For.
+      - TRUSTED_PROXY=tasks.traefik_traefik
       # git refuses to commit without an identity
       - GIT_AUTHOR_NAME=second-brain-mcp
       - GIT_AUTHOR_EMAIL=second-brain-mcp@noreply.local

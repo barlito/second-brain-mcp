@@ -5,6 +5,7 @@ export interface TokenContext {
   tokenId: string;
   name: string;
   scopes: Scope[];
+  clientIp?: string;
 }
 
 // Holds the verified token's context for the duration of a request. Set by

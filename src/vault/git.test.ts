@@ -18,11 +18,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
+  abortPendingPushes,
   commitFile,
   drainWrites,
   ensureVaultRepo,
   getSyncStatus,
   hasRemote,
+  redact,
+  resetPushAbort,
   SyncConflictError,
   VaultBusyError,
   pullRebase,
@@ -571,4 +574,67 @@ test("startPeriodicSync pushes leftover local commits", async () => {
     stop();
     await drainWrites();
   }
+});
+
+// ---- op marker / crash-safe lock recovery / push abort --------------------
+
+test("op marker: absent after a write, and a foreign lock without it survives startup", async () => {
+  const repo = newRepo();
+  mkdirSync(join(repo, "p"), { recursive: true });
+  await syncWrite(repo, join(repo, "p", "a.md"), "a\n", "a");
+  await drainWrites();
+  assert.equal(existsSync(join(repo, ".git", "second-brain-op")), false);
+
+  const lock = join(repo, ".git", "index.lock");
+  writeFileSync(lock, "");
+  await ensureVaultRepo(repo, {});
+  assert.ok(existsSync(lock), "lock without marker is a human's: left alone");
+});
+
+test("op marker: leftover marker at startup means we died mid-op, so index.lock and marker are removed", async () => {
+  const repo = newRepo();
+  writeFileSync(join(repo, ".git", "second-brain-op"), "123");
+  writeFileSync(join(repo, ".git", "index.lock"), "");
+  const warns: string[] = [];
+  const orig = console.warn;
+  console.warn = (...a: unknown[]) => void warns.push(a.join(" "));
+  try {
+    await ensureVaultRepo(repo, {});
+  } finally {
+    console.warn = orig;
+  }
+  assert.equal(existsSync(join(repo, ".git", "index.lock")), false);
+  assert.equal(existsSync(join(repo, ".git", "second-brain-op")), false);
+  assert.ok(warns.some((w) => w.includes("died mid-operation")));
+});
+
+test("op marker is present while a write is in flight", async () => {
+  const repo = newRepo();
+  mkdirSync(join(repo, "p"), { recursive: true });
+  const w = syncWrite(repo, join(repo, "p", "a.md"), "a\n", "a");
+  await sleep(0);
+  assert.ok(existsSync(join(repo, ".git", "second-brain-op")));
+  await w;
+  await drainWrites();
+});
+
+test("abortPendingPushes: pending push is abandoned, the commit still lands", async () => {
+  const { vault } = newVaultWithRemote();
+  abortPendingPushes();
+  try {
+    mkdirSync(join(vault, "p"), { recursive: true });
+    const { commitSha } = await syncWrite(vault, join(vault, "p", "a.md"), "a\n", "a");
+    await drainWrites();
+    assert.equal(git(["rev-parse", "HEAD"], vault).trim(), commitSha);
+    const s = getSyncStatus(vault);
+    assert.equal(s.lastPushOk, false);
+    assert.match(s.lastError?.message ?? "", /push aborted/);
+    assert.equal(s.unpushed, true);
+  } finally {
+    resetPushAbort();
+  }
+});
+
+test("redact strips URL credentials", () => {
+  assert.equal(redact("fatal: https://user:tok@host/x.git"), "fatal: https://***@host/x.git");
 });
