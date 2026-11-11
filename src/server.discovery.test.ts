@@ -225,3 +225,72 @@ test("kb_list truncates at 500 entries", async () => {
   assert.equal(lines.length, 501);
   assert.match(lines[500], /truncated/);
 });
+
+test("kb_search stops with truncated + reason on the scan, byte and time caps", async () => {
+  const { limits } = await import("./tools/kbSearch");
+  const saved = { ...limits };
+  try {
+    for (let i = 0; i < 4; i++) put(`pro/lim/notes/l${i}.md`, `zzlim ${"x".repeat(100)}\n`);
+    const args = { query: "zzlim", space: "pro", project: "lim" };
+    const hits = (t: string) => t.split("\n").filter((l) => l.startsWith("pro/lim/")).length;
+
+    assert.equal(hits((await search("master", args)).text), 4);
+
+    limits.maxScannedFiles = 2;
+    let res = await search("master", args);
+    assert.equal(hits(res.text), 2);
+    assert.match(res.text, /truncated: too many notes/);
+    limits.maxScannedFiles = saved.maxScannedFiles;
+
+    limits.maxTotalBytes = 200; // two notes of ~106 bytes cross it
+    res = await search("master", args);
+    assert.equal(hits(res.text), 2);
+    assert.match(res.text, /truncated: read limit/);
+    assert.match((lastAudit(db, "token_name='master'") as { detail: string }).detail, /truncated\(read limit reached\)/);
+    limits.maxTotalBytes = saved.maxTotalBytes;
+
+    limits.deadlineMs = 0;
+    res = await search("master", args);
+    assert.match(res.text, /truncated: time limit/);
+    assert.equal(res.isError, false);
+  } finally {
+    Object.assign(limits, saved);
+  }
+});
+
+test("kb_search skips and counts an unreadable directory and keeps going", async () => {
+  put("pro/skip/aaa/a.md", "zzskip in aaa\n");
+  put("pro/skip/bad/b.md", "zzskip in bad\n");
+  put("pro/skip/ccc/c.md", "zzskip in ccc\n");
+  const { promises: fsp } = await import("node:fs");
+  const orig = fsp.readdir;
+  (fsp as { readdir: unknown }).readdir = async (p: string, ...rest: unknown[]) => {
+    if (String(p).endsWith("pro/skip/bad")) throw Object.assign(new Error("EACCES: denied"), { code: "EACCES" });
+    return (orig as (...a: unknown[]) => unknown)(p, ...rest);
+  };
+  try {
+    const res = await search("master", { query: "zzskip", space: "pro", project: "skip" });
+    assert.equal(res.isError, false);
+    assert.ok(res.text.includes("pro/skip/aaa/a: zzskip in aaa"));
+    assert.ok(res.text.includes("pro/skip/ccc/c: zzskip in ccc"));
+    assert.ok(!res.text.includes("bad"));
+    assert.match(res.text, /skipped 1 unreadable/);
+    assert.match((lastAudit(db, "token_name='master'") as { detail: string }).detail, /skipped=1/);
+  } finally {
+    (fsp as { readdir: unknown }).readdir = orig;
+  }
+});
+
+test("kb_search audit logs the trimmed query length, also when too short", async () => {
+  await search("exact", { query: "   perso secret   " });
+  assert.equal((lastAudit(db, "token_name='exact'") as { detail: string }).detail, "qlen=12 hits=0");
+  assert.equal((await search("exact", { query: "   a   " })).isError, true);
+  assert.equal((lastAudit(db, "token_name='exact'") as { detail: string }).detail, "qlen=1 too short");
+});
+
+test("kb_search snippet is centred on a match deep in a long line", async () => {
+  put("pro/snip/notes/deep.md", `${"a".repeat(400)} zzdeep ${"b".repeat(400)}\n`);
+  const res = await search("master", { query: "zzdeep", space: "pro", project: "snip" });
+  assert.ok(res.text.includes("zzdeep"));
+  assert.ok(res.text.includes("…"));
+});

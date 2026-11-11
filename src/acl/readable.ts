@@ -2,10 +2,7 @@
 // kb_search). Exact per-section checks stay with checkScope. Malformed stored
 // scopes (a non-"*" level after a "*") grant nothing, same as checkScope.
 import { Scope } from "../auth/types";
-
-function wellFormed(s: Scope): boolean {
-  return s.space === "*" ? s.project === "*" && s.section === "*" : s.project === "*" ? s.section === "*" : true;
-}
+import { wellFormed } from "./check";
 
 function readScopes(scopes: Scope[]): Scope[] {
   return scopes.filter((s) => s.permission === "read" && wellFormed(s));

@@ -1,18 +1,25 @@
-import { lstatSync, readFileSync } from "node:fs";
 import { z } from "zod";
 import { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import { listNotes } from "../vault/enumerate";
-import { resolveNotePath, UnsafePathError } from "../vault/paths";
+import { listNoteNames, readFileNoFollow } from "../vault/enumerate";
+import { resolveNotePath } from "../vault/paths";
 import { RegisterTool, toolError, toolText } from "./common";
+import { MAX_LINE_CHARS, snippet } from "./snippet";
 import { discoveryCall, optSlug, readableSections } from "./discovery";
 
+export { MAX_LINE_CHARS };
 export const MAX_HIT_FILES = 50;
 export const MAX_LINES_PER_FILE = 3;
-export const MAX_LINE_CHARS = 200;
 export const MAX_FILE_BYTES = 1024 * 1024;
 export const MAX_SCANNED_FILES = 5000;
 export const MIN_QUERY = 2;
 export const MAX_QUERY = 200;
+
+// Mutable so tests can shrink them.
+export const limits = {
+  maxScannedFiles: MAX_SCANNED_FILES,
+  deadlineMs: 3000,
+  maxTotalBytes: 20 * 1024 * 1024,
+};
 
 export const register: RegisterTool = (server, { vaultRoot }) => {
   server.registerTool(
@@ -31,55 +38,83 @@ export const register: RegisterTool = (server, { vaultRoot }) => {
       },
     },
     async ({ query, space, project, section, include_archived }): Promise<CallToolResult> =>
-      discoveryCall("kb_search", { space, project, section }, (ctx) => {
-        const needle = query.trim().toLowerCase();
+      discoveryCall("kb_search", { space, project, section }, async (ctx) => {
+        const trimmed = query.trim();
+        const needle = trimmed.toLowerCase();
         if (needle.length < MIN_QUERY) {
-          return { result: toolError(`Query must be at least ${MIN_QUERY} characters.`), detail: `qlen=${query.length} too short` };
+          return {
+            toolResult: toolError(`Query must be at least ${MIN_QUERY} characters.`),
+            audit: { detail: `qlen=${trimmed.length} too short` },
+          };
         }
 
         const out: string[] = [];
+        const stats = { skipped: 0 };
+        const started = Date.now();
         let files = 0;
         let scanned = 0;
-        let truncated = false;
+        let bytes = 0;
+        let truncated: string | undefined;
 
-        scan: for (const sec of readableSections(vaultRoot, ctx, { space, project, section }, include_archived === true)) {
-          for (const n of listNotes(vaultRoot, [sec.space, sec.project, sec.section])) {
-            if (++scanned > MAX_SCANNED_FILES) {
-              truncated = true;
+        scan: for await (const sec of readableSections(vaultRoot, ctx.scopes, { space, project, section }, include_archived === true, stats)) {
+          let names: string[];
+          try {
+            names = await listNoteNames(vaultRoot, [sec.space, sec.project, sec.section]);
+          } catch {
+            stats.skipped++;
+            continue;
+          }
+          for (const name of names) {
+            if (Date.now() - started >= limits.deadlineMs) {
+              truncated = "time limit reached";
+              break scan;
+            }
+            if (bytes >= limits.maxTotalBytes) {
+              truncated = "read limit reached";
+              break scan;
+            }
+            if (++scanned > limits.maxScannedFiles) {
+              truncated = "too many notes";
               break scan;
             }
             let content: string;
             try {
-              const p = resolveNotePath(vaultRoot, sec.space, sec.project, sec.section, n.name);
-              const st = lstatSync(p);
-              if (!st.isFile() || st.size > MAX_FILE_BYTES) continue;
-              content = readFileSync(p, "utf8");
-            } catch (err) {
-              if (err instanceof UnsafePathError || (err as NodeJS.ErrnoException).code === "ENOENT") continue;
-              throw err;
+              const p = resolveNotePath(vaultRoot, sec.space, sec.project, sec.section, name);
+              // One fd, O_NOFOLLOW: a swap to a symlink after listing is never followed.
+              const r = await readFileNoFollow(p, MAX_FILE_BYTES);
+              if (!r) continue;
+              content = r.content;
+              bytes += r.bytes;
+            } catch {
+              stats.skipped++;
+              continue;
             }
 
             const lines: string[] = [];
             for (const line of content.split("\n")) {
               if (!line.toLowerCase().includes(needle)) continue;
-              const t = line.trim();
-              lines.push(t.length > MAX_LINE_CHARS ? `${t.slice(0, MAX_LINE_CHARS)}...` : t);
+              lines.push(snippet(line, needle));
               if (lines.length >= MAX_LINES_PER_FILE) break;
             }
             if (!lines.length) continue;
 
             if (files >= MAX_HIT_FILES) {
-              truncated = true;
+              truncated = "more notes match";
               break scan;
             }
             files++;
-            for (const l of lines) out.push(`${sec.space}/${sec.project}/${sec.section}/${n.name}: ${l}`);
+            for (const l of lines) out.push(`${sec.space}/${sec.project}/${sec.section}/${name}: ${l}`);
           }
         }
 
         let text = out.length ? out.join("\n") : "No matches.";
-        if (truncated) text += "\n(truncated: more notes may match, narrow the search)";
-        return { result: toolText(text), detail: `qlen=${query.length} hits=${files}${truncated ? " truncated" : ""}` };
+        if (truncated) text += `\n(truncated: ${truncated}; results may be incomplete, narrow the search)`;
+        if (stats.skipped) text += `\n(skipped ${stats.skipped} unreadable entries)`;
+        const detail =
+          `qlen=${trimmed.length} hits=${files}` +
+          (truncated ? ` truncated(${truncated})` : "") +
+          (stats.skipped ? ` skipped=${stats.skipped}` : "");
+        return { toolResult: toolText(text), audit: { detail } };
       }),
   );
 };

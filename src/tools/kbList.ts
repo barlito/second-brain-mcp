@@ -1,10 +1,8 @@
 import { z } from "zod";
 import { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import { canReadUnderProject, canReadUnderSpace } from "../acl/readable";
-import { checkScope } from "../acl/check";
-import { listNotes, listSubdirs } from "../vault/enumerate";
+import { listNoteNames, statNote } from "../vault/enumerate";
 import { RegisterTool, toolText } from "./common";
-import { ARCHIVE_SECTION, discoveryCall, optSlug } from "./discovery";
+import { discoveryCall, optSlug, readableChildren } from "./discovery";
 
 export const MAX_LIST_ENTRIES = 500;
 
@@ -24,32 +22,33 @@ export const register: RegisterTool = (server, { vaultRoot }) => {
       },
     },
     async ({ space, project, section, include_archived }): Promise<CallToolResult> =>
-      discoveryCall("kb_list", { space, project, section }, (ctx) => {
-        const scopes = ctx.scopes;
+      discoveryCall("kb_list", { space, project, section }, async (ctx) => {
         const archived = include_archived === true;
         let lines: string[];
+        let truncated: boolean;
 
-        if (space === undefined) {
-          lines = listSubdirs(vaultRoot, []).filter((s) => canReadUnderSpace(scopes, s));
-        } else if (project === undefined) {
-          lines = listSubdirs(vaultRoot, [space]).filter((p) => canReadUnderProject(scopes, space, p));
-        } else if (section === undefined) {
-          lines = listSubdirs(vaultRoot, [space, project]).filter(
-            (s) => (archived || s !== ARCHIVE_SECTION) && checkScope(scopes, space, project, s, "read"),
-          );
-        } else if (section === ARCHIVE_SECTION && !archived) {
-          lines = [];
+        if (section === undefined) {
+          const parts = [space, project].filter((p): p is string => p !== undefined);
+          const names = await readableChildren(vaultRoot, ctx.scopes, parts, archived);
+          truncated = names.length > MAX_LIST_ENTRIES;
+          lines = names.slice(0, MAX_LIST_ENTRIES);
         } else {
-          lines = listNotes(vaultRoot, [space, project, section]).map(
-            (n) => `${n.name}\t${n.size} bytes\t${n.mtime.toISOString()}`,
-          );
+          // space and project are set here (hierarchy checked by discoveryCall).
+          const parts = [space as string, project as string, section];
+          const visible = await readableChildren(vaultRoot, ctx.scopes, parts.slice(0, 2), archived, section);
+          const names = visible.length ? await listNoteNames(vaultRoot, parts) : [];
+          truncated = names.length > MAX_LIST_ENTRIES;
+          // Cap BEFORE stat'ing.
+          lines = [];
+          for (const name of names.slice(0, MAX_LIST_ENTRIES)) {
+            const n = await statNote(vaultRoot, parts, name);
+            if (n) lines.push(`${n.name}\t${n.size} bytes\t${n.mtime.toISOString()}`);
+          }
         }
 
-        const truncated = lines.length > MAX_LIST_ENTRIES;
-        if (truncated) lines = lines.slice(0, MAX_LIST_ENTRIES);
         let text = lines.length ? lines.join("\n") : "(empty)";
         if (truncated) text += `\n(truncated: showing the first ${MAX_LIST_ENTRIES} entries)`;
-        return { result: toolText(text), detail: `entries=${lines.length}${truncated ? " truncated" : ""}` };
+        return { toolResult: toolText(text), audit: { detail: `entries=${lines.length}${truncated ? " truncated" : ""}` } };
       }),
   );
 };

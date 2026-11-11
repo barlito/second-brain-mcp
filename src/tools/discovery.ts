@@ -3,13 +3,13 @@
 import { z } from "zod";
 import { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { getTokenContext, TokenContext } from "../auth/context";
+import { Scope } from "../auth/types";
 import { canReadUnderProject, canReadUnderSpace } from "../acl/readable";
 import { checkScope } from "../acl/check";
-import { logAudit } from "../audit";
-import { InvalidSlugError, isValidSlug, UnsafePathError } from "../vault/paths";
+import { isValidSlug } from "../vault/paths";
 import { listSubdirs } from "../vault/enumerate";
 import { redact } from "../vault/git";
-import { toolError } from "./common";
+import { clientMessage, errorMessage, safeAudit, toolError, ToolRunResult } from "./common";
 
 export const ARCHIVE_SECTION = "archive";
 
@@ -22,19 +22,13 @@ export interface ScopeArgs {
   section?: string;
 }
 
-export interface DiscoveryResult {
-  result: CallToolResult;
-  detail?: string;
-}
-
-function errorMessage(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
-}
-
+// Same contract as withAclAndAudit (one audit row per call; slug syntax and
+// ACL before any filesystem access; shared error mapping), but the target
+// levels are optional and the ACL gate is "can read under the deepest level".
 export async function discoveryCall(
   action: string,
   args: ScopeArgs,
-  run: (ctx: TokenContext) => DiscoveryResult,
+  run: (ctx: TokenContext) => Promise<ToolRunResult>,
 ): Promise<CallToolResult> {
   let ctx: TokenContext | undefined;
   try {
@@ -49,19 +43,12 @@ export async function discoveryCall(
       section: args.section,
       clientIp: c.clientIp,
     };
-    const audit = (result: "ok" | "denied" | "error", detail?: string) => {
-      try {
-        logAudit({ ...base, result, detail });
-      } catch (err) {
-        console.error(`audit write failed (action=${action} token=${c.name}): ${redact(errorMessage(err))}`);
-      }
-    };
 
     // Syntax and hierarchy first; neither reveals anything about the vault.
     for (const field of ["space", "project", "section"] as const) {
       const v = args[field];
       if (v !== undefined && !isValidSlug(v)) {
-        audit("error", `invalid ${field} slug`);
+        safeAudit({ ...base, result: "error", detail: `invalid ${field} slug` }, c.name);
         return toolError("Invalid space/project/section/note name.");
       }
     }
@@ -69,7 +56,7 @@ export async function discoveryCall(
       (args.project !== undefined && args.space === undefined) ||
       (args.section !== undefined && args.project === undefined)
     ) {
-      audit("error", "hierarchy violation");
+      safeAudit({ ...base, result: "error", detail: "hierarchy violation" }, c.name);
       return toolError("Invalid arguments: project requires space, section requires project.");
     }
 
@@ -84,20 +71,19 @@ export async function discoveryCall(
             ? canReadUnderProject(c.scopes, space, project)
             : checkScope(c.scopes, space, project, section, "read");
     if (!allowed) {
-      audit("denied");
+      safeAudit({ ...base, result: "denied" }, c.name);
       return toolError("Permission denied.");
     }
 
     try {
-      const { result, detail } = run(c);
-      audit(result.isError ? "error" : "ok", detail);
-      return result;
+      const { toolResult, audit } = await run(c);
+      safeAudit({ ...base, result: toolResult.isError ? "error" : "ok", ...audit }, c.name);
+      return toolResult;
     } catch (err) {
       const reason = redact(errorMessage(err));
       console.error(`tool ${action} failed (token=${c.name}): ${reason}`);
-      audit("error", reason);
-      if (err instanceof InvalidSlugError) return toolError("Invalid space/project/section/note name.");
-      return toolError(err instanceof UnsafePathError ? "Path not allowed." : "Internal error.");
+      safeAudit({ ...base, result: "error", detail: reason }, c.name);
+      return toolError(clientMessage(err));
     }
   } catch (err) {
     console.error(`tool ${action} failed (token=${ctx?.name ?? "unknown"}): ${redact(errorMessage(err))}`);
@@ -111,26 +97,45 @@ export interface SectionRef {
   section: string;
 }
 
-// Readable sections under the given (optional) filters, sorted. The ACL is
-// applied at every level BEFORE the next directory is read, so names the token
-// cannot read are never even enumerated.
-export function* readableSections(
+// The single ACL/archive rule for "children of <parts> this token may see":
+// parts=[] -> spaces, [space] -> projects, [space, project] -> sections.
+// `only` names one child instead of listing the directory. The ACL is applied
+// before any deeper directory is read.
+export async function readableChildren(
   vaultRoot: string,
-  ctx: TokenContext,
+  scopes: Scope[],
+  parts: string[],
+  includeArchived: boolean,
+  only?: string,
+): Promise<string[]> {
+  const names = only !== undefined ? [only] : await listSubdirs(vaultRoot, parts);
+  return names.filter((name) => {
+    if (parts.length === 0) return canReadUnderSpace(scopes, name);
+    if (parts.length === 1) return canReadUnderProject(scopes, parts[0], name);
+    return (includeArchived || name !== ARCHIVE_SECTION) && checkScope(scopes, parts[0], parts[1], name, "read");
+  });
+}
+
+// Readable sections under the optional filters, sorted. A directory that
+// cannot be listed (EACCES, EIO, symlinked, ...) is skipped and counted.
+export async function* readableSections(
+  vaultRoot: string,
+  scopes: Scope[],
   f: ScopeArgs,
   includeArchived: boolean,
-): Generator<SectionRef> {
-  const spaces = f.space ? [f.space] : listSubdirs(vaultRoot, []).filter((s) => canReadUnderSpace(ctx.scopes, s));
-  for (const space of spaces) {
-    const projects = f.project
-      ? [f.project]
-      : listSubdirs(vaultRoot, [space]).filter((p) => canReadUnderProject(ctx.scopes, space, p));
-    for (const project of projects) {
-      if (!canReadUnderProject(ctx.scopes, space, project)) continue;
-      const sections = f.section ? [f.section] : listSubdirs(vaultRoot, [space, project]);
-      for (const section of sections) {
-        if (section === ARCHIVE_SECTION && !includeArchived) continue;
-        if (!checkScope(ctx.scopes, space, project, section, "read")) continue;
+  stats: { skipped: number },
+): AsyncGenerator<SectionRef> {
+  const children = async (parts: string[], only?: string): Promise<string[]> => {
+    try {
+      return await readableChildren(vaultRoot, scopes, parts, includeArchived, only);
+    } catch {
+      stats.skipped++;
+      return [];
+    }
+  };
+  for (const space of await children([], f.space)) {
+    for (const project of await children([space], f.project)) {
+      for (const section of await children([space, project], f.section)) {
         yield { space, project, section };
       }
     }
