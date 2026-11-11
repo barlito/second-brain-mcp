@@ -26,6 +26,12 @@ services:
       - VAULT_SYNC_INTERVAL_MS=60000
       # Swarm DNS for the Traefik tasks: only they may set X-Forwarded-For.
       - TRUSTED_PROXY=tasks.traefik_traefik
+      # Web admin UI (behind Authelia): own port, only users in this group
+      - ADMIN_WEB_PORT=3002
+      - ADMIN_GROUP=admins
+      # Shared secret Traefik injects (X-SB-Admin-Proxy) after Authelia, and the CSRF key
+      - ADMIN_PROXY_SECRET=${ADMIN_PROXY_SECRET:?ADMIN_PROXY_SECRET is required (see docs/DEPLOY.md)}
+      - ADMIN_WEB_SECRET=${ADMIN_WEB_SECRET:?ADMIN_WEB_SECRET is required (see docs/DEPLOY.md)}
       - GIT_SSH_COMMAND=ssh -i /run/secrets/vault_deploy_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=10
       # git refuses to commit without an identity
       - GIT_AUTHOR_NAME=second-brain-mcp
@@ -57,12 +63,15 @@ services:
         - traefik.enable=true
 
         - traefik.http.services.second-brain-mcp.loadbalancer.server.port=3000
+        - traefik.http.services.second-brain-admin.loadbalancer.server.port=3002
 
         - traefik.http.routers.second-brain-mcp.rule=Host(`second-brain.barlito.fr`)
+        - traefik.http.routers.second-brain-mcp.service=second-brain-mcp
         - traefik.http.routers.second-brain-mcp.entrypoints=http
         - traefik.http.routers.second-brain-mcp.middlewares=redirect-to-https@file
 
         - traefik.http.routers.second-brain-mcp-secure.rule=Host(`second-brain.barlito.fr`)
+        - traefik.http.routers.second-brain-mcp-secure.service=second-brain-mcp
         - traefik.http.routers.second-brain-mcp-secure.entrypoints=https
         - traefik.http.routers.second-brain-mcp-secure.tls=true
         - traefik.http.routers.second-brain-mcp-secure.tls.certresolver=letsencrypt
@@ -71,6 +80,21 @@ services:
         - traefik.http.middlewares.second-brain-mcp-ratelimit.ratelimit.burst=40
         # Own Bearer-token ACL -> no Authelia, just rate limit + security headers
         - traefik.http.routers.second-brain-mcp-secure.middlewares=second-brain-mcp-ratelimit,security-headers@file
+
+        # Web admin UI: Authelia SSO (Remote-User/Remote-Groups), never exposed without it
+        - traefik.http.routers.second-brain-admin.rule=Host(`second-brain-admin.barlito.fr`)
+        - traefik.http.routers.second-brain-admin.service=second-brain-admin
+        - traefik.http.routers.second-brain-admin.entrypoints=http
+        - traefik.http.routers.second-brain-admin.middlewares=redirect-to-https@file
+
+        - traefik.http.routers.second-brain-admin-secure.rule=Host(`second-brain-admin.barlito.fr`)
+        - traefik.http.routers.second-brain-admin-secure.service=second-brain-admin
+        - traefik.http.routers.second-brain-admin-secure.entrypoints=https
+        - traefik.http.routers.second-brain-admin-secure.tls=true
+        - traefik.http.routers.second-brain-admin-secure.tls.certresolver=letsencrypt
+        # Injected after Authelia (overwrites any client value): proves the request went through Traefik
+        - traefik.http.middlewares.second-brain-admin-proxy.headers.customrequestheaders.X-SB-Admin-Proxy=${ADMIN_PROXY_SECRET:?ADMIN_PROXY_SECRET is required (see docs/DEPLOY.md)}
+        - traefik.http.routers.second-brain-admin-secure.middlewares=second-brain-mcp-ratelimit,authelia-auth@file,second-brain-admin-proxy,security-headers@file
 
 networks:
   traefik_traefik_proxy:

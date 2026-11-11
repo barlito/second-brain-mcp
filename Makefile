@@ -44,11 +44,13 @@ help: ## Show this help
 deploy: export IMAGE_TAG := $(LOCAL_TAG)
 deploy: ## Build the image and deploy the stack locally (Swarm)
 	mkdir -p data
-	docker compose build
-	$(call stack_deploy,,)
+	@# Admin web secrets: generated once (0600, data/ is gitignored), reused on every deploy.
+	@umask 077; for f in admin-proxy-secret admin-web-secret; do [ -s data/$$f ] || openssl rand -hex 32 > data/$$f; chmod 600 data/$$f; done
+	export ADMIN_PROXY_SECRET=$$(cat data/admin-proxy-secret) ADMIN_WEB_SECRET=$$(cat data/admin-web-secret); \
+	  docker compose build && $(call stack_deploy,,)
 	$(MAKE) prune-local-images
 
-deploy.prod: ## Deploy to prod (make deploy.prod IMAGE_TAG=<tag>; image must be published)
+deploy.prod: ## Deploy to prod (IMAGE_TAG + ADMIN_PROXY_SECRET + ADMIN_WEB_SECRET in the env; image must be published)
 	@test -n "$(IMAGE_TAG)" || { echo "IMAGE_TAG is required (make deploy.prod IMAGE_TAG=<tag>)" >&2; exit 1; }
 	$(call stack_deploy,-f docker-compose-prod.yml,--with-registry-auth)
 
