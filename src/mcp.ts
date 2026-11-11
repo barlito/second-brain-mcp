@@ -2,6 +2,8 @@
 // server.ts, stateless Streamable HTTP mode); each tool module registers itself.
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { RegisterTool } from "./tools/common";
+import { register as registerKbAppend } from "./tools/kbAppend";
+import { register as registerKbArchive } from "./tools/kbArchive";
 import { register as registerKbRead } from "./tools/kbRead";
 import { register as registerKbWrite } from "./tools/kbWrite";
 import { register as registerKbList } from "./tools/kbList";
@@ -13,7 +15,14 @@ import { register as registerKbSearch } from "./tools/kbSearch";
 const pkg = require("../package.json") as { name: string; version: string };
 
 // Add new tools here (one line each).
-const TOOLS: RegisterTool[] = [registerKbRead, registerKbWrite, registerKbList, registerKbSearch];
+const TOOLS: RegisterTool[] = [
+  registerKbRead,
+  registerKbWrite,
+  registerKbAppend,
+  registerKbArchive,
+  registerKbList,
+  registerKbSearch,
+];
 
 export function createMcpServer(vaultRoot: string): McpServer {
   const server = new McpServer({ name: pkg.name, version: pkg.version });
