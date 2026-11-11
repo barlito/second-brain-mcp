@@ -913,3 +913,70 @@ export async function ensureVaultRepo(
     }
   }
 }
+
+// ---- inbox review (accept / reject) ---------------------------------------
+
+// The proposal file vanished before the locked step (already accepted/rejected).
+export class InboxMissingError extends Error {
+  constructor() {
+    super("inbox proposal not found");
+    this.name = "InboxMissingError";
+  }
+}
+
+export interface InboxAccept {
+  targetAbs: string;
+  content: string;
+  // Default false: refuse when the target exists.
+  overwrite?: boolean;
+}
+
+// Removes an inbox proposal and, on accept, writes its content to the target, in ONE
+// commit under the write lock. Target and inbox file are committed via pathspec.
+export function syncInboxResolve(
+  vaultRoot: string,
+  inboxAbs: string,
+  accept: InboxAccept | null,
+  commitMessage: string,
+): Promise<{ commitSha: string }> {
+  return withLock(vaultRoot, async () => {
+    assertSafePath(vaultRoot, inboxAbs);
+    if (accept) assertSafePath(vaultRoot, accept.targetAbs);
+    const remote = await prepareLocked(vaultRoot);
+
+    if (!lstatOrNull(inboxAbs)) throw new InboxMissingError();
+    if (accept && !accept.overwrite && lstatOrNull(accept.targetAbs)) throw new NoteExistsError();
+
+    const inboxRel = path.relative(vaultRoot, inboxAbs);
+    const targetRel = accept ? path.relative(vaultRoot, accept.targetAbs) : undefined;
+    const inboxPrev = readFileSync(inboxAbs);
+    const targetPrev = accept && existsSync(accept.targetAbs) ? readFileSync(accept.targetAbs) : null;
+    const inHead = (await runGit(["ls-tree", "--name-only", "HEAD", "--", inboxRel], vaultRoot).catch(() => "")).trim() !== "";
+    const headBefore = (await runGit(["rev-parse", "HEAD"], vaultRoot).catch(() => "")).trim();
+
+    let commitSha = headBefore;
+    try {
+      if (accept && targetRel) {
+        writeNoteAtomic(vaultRoot, accept.targetAbs, accept.content);
+        await runGit(["add", "--", targetRel], vaultRoot);
+      }
+      unlinkSync(inboxAbs);
+      await runGit(["rm", "-q", "--cached", "--ignore-unmatch", "--", inboxRel], vaultRoot);
+      const specs = [...(targetRel ? [targetRel] : []), ...(inHead ? [inboxRel] : [])];
+      if (specs.length > 0) {
+        await runGit(["commit", "-m", commitMessage, "--", ...specs], vaultRoot);
+        commitSha = (await runGit(["rev-parse", "HEAD"], vaultRoot)).trim();
+      }
+    } catch (err) {
+      const headNow = (await runGit(["rev-parse", "HEAD"], vaultRoot).catch(() => "")).trim();
+      if (headNow !== headBefore) {
+        console.error(`inbox resolve: error after commit landed, keeping it: ${errText(err)}`);
+        return finishLocked(vaultRoot, remote, { commitSha: headNow });
+      }
+      await restoreNote(vaultRoot, inboxAbs, inboxRel, inboxPrev);
+      if (accept && targetRel) await restoreNote(vaultRoot, accept.targetAbs, targetRel, targetPrev);
+      throw err;
+    }
+    return finishLocked(vaultRoot, remote, { commitSha });
+  });
+}

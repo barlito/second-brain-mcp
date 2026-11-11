@@ -117,6 +117,24 @@ export const MIGRATIONS: ReadonlyArray<Migration> = [
   { tables: ["scopes"], up: (d) => {
     d.exec("UPDATE scopes SET space = '!legacy' WHERE space = 'legacy'");
   } },
+  // 5: scopes.permission CHECK also allows 'propose' (kb_propose inbox permission).
+  { tables: ["scopes"], up: (d) => {
+    d.exec(`
+      CREATE TABLE scopes_new (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        token_id TEXT NOT NULL REFERENCES tokens(id) ON DELETE CASCADE,
+        space TEXT NOT NULL,
+        project TEXT NOT NULL,
+        section TEXT NOT NULL,
+        permission TEXT NOT NULL CHECK(permission IN ('read','write','propose')),
+        UNIQUE(token_id, space, project, section, permission)
+      );
+      INSERT INTO scopes_new (id, token_id, space, project, section, permission)
+        SELECT id, token_id, space, project, section, permission FROM scopes;
+      DROP TABLE scopes;
+      ALTER TABLE scopes_new RENAME TO scopes;
+    `);
+  } },
 ];
 
 // Applies migration index `v` under BEGIN IMMEDIATE. user_version is re-read inside the

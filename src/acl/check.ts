@@ -1,5 +1,9 @@
 import { Permission, Scope } from "../auth/types";
 
+// Top-level directory holding pending proposals. Never a usable space: even wildcard
+// scopes grant nothing there, so no tool can read, list, search or write it.
+export const INBOX_SPACE = "inbox";
+
 const warned = new Set<string>();
 
 // "*" is only valid as trailing levels (*:*:*, space:*:*, space:project:*). Rows that
@@ -17,7 +21,7 @@ export function wellFormed(s: Scope): boolean {
   return ok;
 }
 
-// A scope level matches exactly or via a trailing "*". read and write are independent.
+// A scope level matches exactly or via a trailing "*". read, write and propose are independent.
 export function checkScope(
   scopes: Scope[],
   space: string,
@@ -25,6 +29,7 @@ export function checkScope(
   section: string,
   permission: Permission,
 ): boolean {
+  if (space === INBOX_SPACE) return false;
   return scopes.some(
     (s) =>
       s.permission === permission &&

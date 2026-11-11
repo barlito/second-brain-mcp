@@ -1,4 +1,4 @@
-export const PERMISSIONS = ["read", "write"] as const;
+export const PERMISSIONS = ["read", "write", "propose"] as const;
 export type Permission = (typeof PERMISSIONS)[number];
 
 // Each of space/project/section is a slug or "*". "*" is only valid as trailing

@@ -1,3 +1,4 @@
+export { INBOX_SPACE } from "../acl/check";
 import { toolError, ToolRunResult } from "./common";
 
 // Sections only a dedicated tool may write to.

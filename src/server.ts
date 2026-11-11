@@ -9,6 +9,7 @@ import { verifyToken } from "./auth/tokens";
 import { TokenContext, tokenContextStorage } from "./auth/context";
 import { db } from "./db";
 import { logAudit, logAuthFailure } from "./audit";
+import { startAdmin, withAdmin } from "./admin";
 import { createMcpServer } from "./mcp";
 import {
   abortPendingPushes,
@@ -576,13 +577,14 @@ export async function start(): Promise<{ server: Server; shutdown: (signal?: str
     process.exit(1);
   }
   console.log(`second-brain-mcp listening on port ${port}`);
+  const adminServer = await startAdmin(vaultRoot);
 
   const intervalRaw = process.env.VAULT_SYNC_INTERVAL_MS;
   const intervalMs = intervalRaw === undefined || intervalRaw === "" ? 60_000 : Number(intervalRaw);
   const stopSync = intervalMs > 0 ? startPeriodicSync(vaultRoot, intervalMs) : undefined;
 
   shutdown = createShutdown({
-    server,
+    server: withAdmin(server, adminServer),
     lifecycle,
     stopSync: () => {
       stopSync?.();
