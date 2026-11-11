@@ -30,7 +30,9 @@ import {
   syncWrite,
   syncAppend,
   syncMove,
+  MoveSourceDirtyError,
   MoveSourceMissingError,
+  NoteTooLargeError,
   MoveTargetExistsError,
   writeNoteAtomic,
 } from "./git";
@@ -658,5 +660,56 @@ test("syncMove: refuses an existing target, missing source; untracked source wor
   writeFileSync(join(repo, "u.md"), "U\n"); // never committed
   await syncMove(repo, join(repo, "u.md"), join(repo, "d", "u.md"), "mv");
   assert.equal(readFileSync(join(repo, "d", "u.md"), "utf8"), "U\n");
+  assert.equal(git(["status", "--porcelain"], repo), "");
+});
+
+test("syncAppend: text builder runs inside the lock, in file order", async () => {
+  const repo = newRepo();
+  const abs = join(repo, "j.md");
+  let n = 0;
+  await Promise.all(Array.from({ length: 8 }, () => syncAppend(repo, abs, () => `- ${n++}`, "a")));
+  assert.deepEqual(readFileSync(abs, "utf8").split("\n").filter(Boolean), Array.from({ length: 8 }, (_, i) => `- ${i}`));
+});
+
+test("syncAppend: maxChars boundary", async () => {
+  const repo = newRepo();
+  const abs = join(repo, "m.md");
+  await syncAppend(repo, abs, "x".repeat(9), "a", 10); // 9 + \n = 10, allowed
+  await assert.rejects(syncAppend(repo, abs, "y", "a", 11 + 1 - 2), NoteTooLargeError);
+  assert.equal(readFileSync(abs, "utf8"), "x".repeat(9) + "\n");
+  assert.equal(git(["status", "--porcelain"], repo), "");
+});
+
+test("syncMove: source staged but not in HEAD is moved and committed", async () => {
+  const repo = newRepo();
+  writeFileSync(join(repo, "seed.md"), "s\n");
+  git(["add", "."], repo);
+  git(["commit", "-m", "seed"], repo);
+  writeFileSync(join(repo, "new.md"), "N\n");
+  git(["add", "new.md"], repo);
+  await syncMove(repo, join(repo, "new.md"), join(repo, "arch", "new.md"), "mv");
+  assert.equal(readFileSync(join(repo, "arch", "new.md"), "utf8"), "N\n");
+  assert.equal(git(["status", "--porcelain"], repo), "");
+});
+
+test("syncMove: refuses a committed source with uncommitted edits", async () => {
+  const repo = newRepo();
+  const a = join(repo, "a.md");
+  await syncWrite(repo, a, "A\n", "a");
+  writeFileSync(a, "edited\n");
+  await assert.rejects(syncMove(repo, a, join(repo, "z", "a.md"), "mv"), MoveSourceDirtyError);
+  assert.equal(readFileSync(a, "utf8"), "edited\n");
+  assert.equal(existsSync(join(repo, "z", "a.md")), false);
+});
+
+test("syncMove: a failed commit (hook) rolls the move back", async () => {
+  const repo = newRepo();
+  const a = join(repo, "a.md");
+  await syncWrite(repo, a, "A\n", "a");
+  const hook = join(repo, ".git", "hooks", "pre-commit");
+  writeFileSync(hook, "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+  await assert.rejects(syncMove(repo, a, join(repo, "z", "a.md"), "mv"));
+  assert.equal(readFileSync(a, "utf8"), "A\n");
+  assert.equal(existsSync(join(repo, "z", "a.md")), false);
   assert.equal(git(["status", "--porcelain"], repo), "");
 });

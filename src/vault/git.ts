@@ -540,21 +540,43 @@ export function syncWrite(
   return lockedWrite(vaultRoot, absolutePath, () => content, commitMessage);
 }
 
+export class NoteTooLargeError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "NoteTooLargeError";
+  }
+}
+
 // Read-modify-write inside the write lock, so concurrent appends never lose
 // updates. Missing file counts as empty. Exactly one newline joins old and new.
+// `text` may be a function: it runs inside the lock, so anything time-dependent
+// (journal timestamps) is ordered like the file. maxChars caps the resulting note.
 export function syncAppend(
   vaultRoot: string,
   absolutePath: string,
-  text: string,
+  text: string | (() => string),
   commitMessage: string,
+  maxChars?: number,
 ): Promise<{ commitSha: string }> {
-  const addition = text.replace(/\n+$/, "") + "\n";
   return lockedWrite(
     vaultRoot,
     absolutePath,
-    (prev) => (prev === "" || prev.endsWith("\n") ? prev : prev + "\n") + addition,
+    (prev) => {
+      const t = typeof text === "function" ? text() : text;
+      const next = (prev === "" || prev.endsWith("\n") ? prev : prev + "\n") + t.replace(/\n+$/, "") + "\n";
+      if (maxChars !== undefined && next.length > maxChars) throw new NoteTooLargeError("note would exceed the size limit");
+      return next;
+    },
     commitMessage,
   );
+}
+
+// The source note has local changes that are not committed (a human is editing it).
+export class MoveSourceDirtyError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "MoveSourceDirtyError";
+  }
 }
 
 export class MoveSourceMissingError extends Error {
@@ -640,30 +662,47 @@ export function syncMove(
 
     const fromRel = path.relative(vaultRoot, fromAbs);
     const toRel = path.relative(vaultRoot, toAbs);
-    let commitSha: string;
+    const inHead = (await runGit(["ls-tree", "--name-only", "HEAD", "--", fromRel], vaultRoot).catch(() => "")).trim() !== "";
+    // A committed note with uncommitted edits: moving it would sweep a human's work into our commit.
+    if (inHead && (await runGit(["status", "--porcelain", "--", fromRel], vaultRoot)).trim() !== "") {
+      throw new MoveSourceDirtyError(`source has uncommitted changes: ${fromRel}`);
+    }
+    const headBefore = (await runGit(["rev-parse", "HEAD"], vaultRoot).catch(() => "")).trim();
+    let commitSha = "";
     try {
       mkdirSync(path.dirname(toAbs), { recursive: true });
       assertSafePath(vaultRoot, path.dirname(toAbs));
       const tracked = (await runGit(["ls-files", "--", fromRel], vaultRoot)).trim() !== "";
-      let specs = [fromRel, toRel];
       if (tracked) {
         await runGit(["mv", "--", fromRel, toRel], vaultRoot);
       } else {
-        // Untracked source (never committed): plain rename, stage only the target.
+        // Untracked source: plain rename, stage only the target.
         renameSync(fromAbs, toAbs);
         await runGit(["add", "--", toRel], vaultRoot);
-        specs = [toRel];
       }
+      // Pathspec from what HEAD really has: a source that was only staged is not in HEAD.
+      const specs = inHead ? [fromRel, toRel] : [toRel];
       await runGit(["commit", "-m", commitMessage, "--", ...specs], vaultRoot);
+    } catch (err) {
+      // Roll back only if the commit did not land (git may report an error after it did).
+      const headNow = (await runGit(["rev-parse", "HEAD"], vaultRoot).catch(() => "")).trim();
+      if (headNow !== headBefore) {
+        console.error(`git move: error after commit landed, keeping the move: ${errText(err)}`);
+      } else {
+        try {
+          if (!existsSync(fromAbs) && existsSync(toAbs)) renameSync(toAbs, fromAbs);
+        } catch {
+          /* best effort */
+        }
+        await runGit(["reset", "-q", "--", fromRel, toRel], vaultRoot).catch(() => undefined);
+        throw err;
+      }
+    }
+    try {
       commitSha = (await runGit(["rev-parse", "HEAD"], vaultRoot)).trim();
     } catch (err) {
-      try {
-        if (!existsSync(fromAbs) && existsSync(toAbs)) renameSync(toAbs, fromAbs);
-      } catch {
-        /* best effort */
-      }
-      await runGit(["reset", "-q", "--", fromRel, toRel], vaultRoot).catch(() => undefined);
-      throw err;
+      // The commit is in; never undo the move over a failed read-back.
+      console.error(`git move: rev-parse after commit failed: ${errText(err)}`);
     }
     return finishLocked(vaultRoot, remote, { commitSha, to: toAbs });
   });

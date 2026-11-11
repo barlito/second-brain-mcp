@@ -2,7 +2,8 @@ import { z } from "zod";
 import { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { resolveNotePath } from "../vault/paths";
 import { syncWrite } from "../vault/git";
-import { kbArgsShape, MAX_CONTENT_CHARS, RegisterTool, toolText, withAclAndAudit } from "./common";
+import { rejectReservedSection } from "./reserved";
+import { kbArgsShape,MAX_CONTENT_CHARS, RegisterTool, toolText, withAclAndAudit } from "./common";
 
 export const register: RegisterTool = (server, { vaultRoot }) => {
   server.registerTool(
@@ -19,6 +20,8 @@ export const register: RegisterTool = (server, { vaultRoot }) => {
     },
     async ({ space, project, section, note, content }): Promise<CallToolResult> =>
       withAclAndAudit("kb_write", { space, project, section, note }, "write", async (ctx) => {
+        const reserved = rejectReservedSection(section);
+        if (reserved) return reserved;
         const absolutePath = resolveNotePath(vaultRoot, space, project, section, note);
         const { commitSha } = await syncWrite(
           vaultRoot,
