@@ -32,7 +32,7 @@ function git(args: string[]): string {
 }
 
 let createToken: typeof import("./auth/tokens").createToken;
-let app: typeof import("./server").app;
+let createApp: typeof import("./server").createApp;
 
 let server: Server;
 let port: number;
@@ -44,13 +44,13 @@ before(async () => {
   git(["config", "user.email", "test@example.com"]);
 
   ({ createToken } = await import("./auth/tokens"));
-  ({ app } = await import("./server"));
+  ({ createApp } = await import("./server"));
 
   token = createToken("cleanup-test", [{ project: "proj", section: "sect", permission: "write" }])
     .token;
 
   await new Promise<void>((resolve) => {
-    server = app.listen(0, resolve);
+    server = createApp({ vaultRoot }).listen(0, resolve);
   });
   port = (server.address() as AddressInfo).port;
 });

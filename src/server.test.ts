@@ -23,13 +23,15 @@ function git(args: string[]): string {
 
 let createToken: typeof import("./auth/tokens").createToken;
 let db: typeof import("./db").db;
-let app: typeof import("./server").app;
+let createApp: typeof import("./server").createApp;
 let Client: typeof import("@modelcontextprotocol/sdk/client/index.js").Client;
 let StreamableHTTPClientTransport: typeof import("@modelcontextprotocol/sdk/client/streamableHttp.js").StreamableHTTPClientTransport;
 
 let server: Server;
 let baseUrl: string;
 let tokenA: string; // scoped read+write on proj-a/sect-a
+let tokenRO: string; // read-only on proj-a/sect-a
+let tokenOtherSection: string; // same project, different section
 let tokenB: string; // scoped only on proj-b/sect-b (different project+section)
 
 before(async () => {
@@ -39,7 +41,7 @@ before(async () => {
 
   ({ createToken } = await import("./auth/tokens"));
   ({ db } = await import("./db"));
-  ({ app } = await import("./server"));
+  ({ createApp } = await import("./server"));
   ({ Client } = await import("@modelcontextprotocol/sdk/client/index.js"));
   ({ StreamableHTTPClientTransport } = await import(
     "@modelcontextprotocol/sdk/client/streamableHttp.js"
@@ -50,13 +52,21 @@ before(async () => {
     { project: "proj-a", section: "sect-a", permission: "read" },
   ]).token;
 
+  tokenRO = createToken("token-ro", [
+    { project: "proj-a", section: "sect-a", permission: "read" },
+  ]).token;
+  tokenOtherSection = createToken("token-other-section", [
+    { project: "proj-a", section: "sect-z", permission: "read" },
+    { project: "proj-a", section: "sect-z", permission: "write" },
+  ]).token;
+
   tokenB = createToken("token-b", [
     { project: "proj-b", section: "sect-b", permission: "read" },
     { project: "proj-b", section: "sect-b", permission: "write" },
   ]).token;
 
   await new Promise<void>((resolve) => {
-    server = app.listen(0, resolve);
+    server = createApp({ vaultRoot }).listen(0, resolve);
   });
   const { port } = server.address() as AddressInfo;
   baseUrl = `http://127.0.0.1:${port}/mcp`;
@@ -190,16 +200,141 @@ test("a malformed note name is reported distinctly from a real internal error", 
   }
 });
 
-test("audit_log has the expected ok/denied rows", () => {
+test("read-only token cannot write; same-project other-section token is denied", async () => {
+  const ro = await connectClient(tokenRO);
+  try {
+    const read = await ro.client.callTool({
+      name: "kb_read",
+      arguments: { project: "proj-a", section: "sect-a", note: "note-1" },
+    });
+    assert.ok(!read.isError);
+    const write = await ro.client.callTool({
+      name: "kb_write",
+      arguments: { project: "proj-a", section: "sect-a", note: "note-ro", content: "x" },
+    });
+    assert.equal(write.isError, true);
+    assert.equal(textOf(write as CallToolResult), "Permission denied.");
+  } finally {
+    await ro.transport.close();
+  }
+  const other = await connectClient(tokenOtherSection);
+  try {
+    for (const name of ["kb_read", "kb_write"]) {
+      const r = await other.client.callTool({
+        name,
+        arguments: { project: "proj-a", section: "sect-a", note: "note-1", content: "x" },
+      });
+      assert.equal(r.isError, true);
+      assert.equal(textOf(r as CallToolResult), "Permission denied.");
+    }
+  } finally {
+    await other.transport.close();
+  }
+  assert.throws(() => git(["cat-file", "-e", "HEAD:proj-a/sect-a/note-ro.md"]));
+});
+
+test("audit_log has the expected ok/denied rows", async () => {
+  // Dedicated token: only rows from this test are counted.
+  const t = createToken("audit-token", [
+    { project: "proj-au", section: "sect-au", permission: "write" },
+    { project: "proj-au", section: "sect-au", permission: "read" },
+  ]).token;
+  const a = { project: "proj-au", section: "sect-au", note: "n" };
+  const { client, transport } = await connectClient(t);
+  try {
+    await client.callTool({ name: "kb_write", arguments: { ...a, content: "x\n" } });
+    await client.callTool({ name: "kb_read", arguments: a });
+    await client.callTool({ name: "kb_read", arguments: { ...a, section: "nope" } });
+    await client.callTool({ name: "kb_write", arguments: { ...a, project: "nope", content: "x" } });
+  } finally {
+    await transport.close();
+  }
   const rows = db
-    .prepare("SELECT action, result FROM audit_log ORDER BY id")
-    .all() as { action: string; result: string }[];
+    .prepare("SELECT action, result, client_ip FROM audit_log WHERE token_name = 'audit-token' ORDER BY id")
+    .all() as { action: string; result: string; client_ip: string | null }[];
+  assert.deepEqual(
+    rows.map((r) => `${r.action}:${r.result}`),
+    ["kb_write:ok", "kb_read:ok", "kb_read:denied", "kb_write:denied"],
+  );
+  assert.ok(rows.every((r) => r.client_ip), "client ip recorded on every row");
+});
 
-  const count = (action: string, result: string) =>
-    rows.filter((r) => r.action === action && r.result === result).length;
+test("401 writes an auth/denied audit row with a client IP", async () => {
+  const before = (db.prepare("SELECT COUNT(*) AS c FROM audit_log WHERE action = 'auth'").get() as { c: number }).c;
+  for (const headers of [{}, { Authorization: "Bearer nope-not-a-token" }] as Record<string, string>[]) {
+    const res = await fetch(baseUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...headers },
+      body: "{}",
+    });
+    assert.equal(res.status, 401);
+  }
+  const rows = db
+    .prepare("SELECT result, client_ip, token_id, detail FROM audit_log WHERE action = 'auth' ORDER BY id")
+    .all() as { result: string; client_ip: string; token_id: string | null; detail: string }[];
+  assert.equal(rows.length - before, 2);
+  for (const r of rows.slice(-2)) {
+    assert.equal(r.result, "denied");
+    assert.match(r.client_ip, /127\.0\.0\.1/);
+    assert.equal(r.token_id, null);
+  }
+});
 
-  assert.equal(count("kb_write", "ok"), 1);
-  assert.equal(count("kb_read", "ok"), 1);
-  assert.equal(count("kb_write", "denied"), 1);
-  assert.equal(count("kb_read", "denied"), 1);
+test("malformed JSON gets a JSON-RPC 400 without a stack trace", async () => {
+  const res = await fetch(baseUrl, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${tokenA}`, "Content-Type": "application/json" },
+    body: "{not json",
+  });
+  assert.equal(res.status, 400);
+  const text = await res.text();
+  const body = JSON.parse(text);
+  assert.equal(body.jsonrpc, "2.0");
+  assert.equal(body.error.code, -32700);
+  assert.equal(body.id, null);
+  assert.doesNotMatch(text, /\bat .*\(|node_modules|\.ts:/);
+  assert.equal(res.headers.get("x-powered-by"), null);
+});
+
+test("body over 1 MB gets a JSON-RPC 413 and leaves an audit row; unauthenticated is 401 first", async () => {
+  const big = JSON.stringify({ pad: "x".repeat(1_100_000) });
+  const res = await fetch(baseUrl, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${tokenA}`, "Content-Type": "application/json" },
+    body: big,
+  });
+  assert.equal(res.status, 413);
+  const body = (await res.json()) as { jsonrpc: string; error: { code: number; message: string } };
+  assert.equal(body.jsonrpc, "2.0");
+  assert.match(body.error.message, /Request too large \(max 1 MB\)/);
+  const row = db
+    .prepare("SELECT result, detail, token_name FROM audit_log WHERE action = 'http' ORDER BY id DESC LIMIT 1")
+    .get() as { result: string; detail: string; token_name: string };
+  assert.equal(row.result, "error");
+  assert.equal(row.token_name, "token-a");
+  assert.match(row.detail, /413/);
+
+  const unauth = await fetch(baseUrl, { method: "POST", headers: { "Content-Type": "application/json" }, body: big });
+  assert.equal(unauth.status, 401);
+});
+
+test("oversized content (under the body limit) is rejected and nothing is written", async () => {
+  const { client, transport } = await connectClient(tokenA);
+  const head = git(["rev-parse", "HEAD"]).trim();
+  try {
+    let isError = false;
+    try {
+      const r = await client.callTool({
+        name: "kb_write",
+        arguments: { project: "proj-a", section: "sect-a", note: "big", content: "x".repeat(600_000) },
+      });
+      isError = r.isError === true;
+    } catch {
+      isError = true;
+    }
+    assert.ok(isError);
+    assert.equal(git(["rev-parse", "HEAD"]).trim(), head);
+  } finally {
+    await transport.close();
+  }
 });
