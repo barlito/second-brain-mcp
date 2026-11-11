@@ -43,7 +43,10 @@ test("shutdown waits for in-flight requests before draining writes; new requests
     exit: (c) => exits.push(c),
   });
   const done = shutdown("SIGTERM");
-  await new Promise((r) => setTimeout(r, 50));
+  // Wait (bounded) until shutdown has progressed to abortPushes, then flush
+  // several macrotasks so a premature drain would have had the chance to run.
+  for (let i = 0; i < 1000 && !events.includes("abortPushes"); i++) await new Promise((r) => setImmediate(r));
+  for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r));
   assert.deepEqual(events, ["abortPushes"], "drain must wait for the in-flight request");
   assert.deepEqual(exits, []);
 
