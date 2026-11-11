@@ -25,7 +25,7 @@ export function toolText(text: string): CallToolResult {
   return { content: [{ type: "text", text }] };
 }
 
-function errorMessage(err: unknown): string {
+export function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
@@ -58,7 +58,7 @@ export interface ToolRunResult {
 
 // An audit failure must never turn into a client-visible failure (least of
 // all after a write already landed): log it and carry on.
-function safeAudit(entry: AuditEntry, tokenName: string): void {
+export function safeAudit(entry: AuditEntry, tokenName: string): void {
   try {
     logAudit(entry);
   } catch (err) {
@@ -70,7 +70,7 @@ function safeAudit(entry: AuditEntry, tokenName: string): void {
 
 // Maps an internal failure to the message the client may see. The real reason
 // only goes to the audit row and the server log.
-function clientMessage(err: unknown): string {
+export function clientMessage(err: unknown): string {
   if (err instanceof InvalidSlugError) return "Invalid space/project/section/note name.";
   if (err instanceof UnsafePathError) return "Path not allowed.";
   if (err instanceof SyncConflictError) {
