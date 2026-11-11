@@ -31,6 +31,8 @@ services:
       # Web admin UI (behind Authelia): own port, only users in this group
       - ADMIN_WEB_PORT=3002
       - ADMIN_GROUP=admins
+      # traefik-base names the local Authelia cookie differently (prod uses the default)
+      - AUTHELIA_SESSION_COOKIE=authelia_session_local
       # Shared secret Traefik injects (X-SB-Admin-Proxy) after Authelia, and the CSRF key
       - ADMIN_PROXY_SECRET=${ADMIN_PROXY_SECRET:?ADMIN_PROXY_SECRET is required (make deploy generates it)}
       - ADMIN_WEB_SECRET=${ADMIN_WEB_SECRET:?ADMIN_WEB_SECRET is required (make deploy generates it)}
