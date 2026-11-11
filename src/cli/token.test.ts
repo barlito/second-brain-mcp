@@ -12,9 +12,10 @@ const dbPath = makeTempDb();
 let parseScopes: typeof import("./token").parseScopes;
 let resolveScopes: typeof import("./token").resolveScopes;
 let wildcardWarnings: typeof import("./token").wildcardWarnings;
+let dropRedundantScopes: typeof import("./token").dropRedundantScopes;
 
 before(async () => {
-  ({ parseScopes, resolveScopes, wildcardWarnings } = await import("./token"));
+  ({ parseScopes, resolveScopes, wildcardWarnings, dropRedundantScopes } = await import("./token"));
 });
 
 after(() => {
@@ -74,38 +75,63 @@ test("wildcardWarnings flags only wildcard scopes", () => {
   assert.match(w[2], /every section of a\/b/);
 });
 
-test("CLI end-to-end: presets create tokens, warn on wildcards, and list shows 4-part scopes", () => {
+test("dropRedundantScopes drops narrower scopes of the same permission only", () => {
+  const { kept, dropped } = dropRedundantScopes(
+    parseScopes("*:*:*:read,pro:x:y:read,pro:x:y:write,pro:*:*:write,pro:x:*:write"),
+  );
+  assert.deepEqual(kept.map((s) => `${s.space}:${s.project}:${s.section}:${s.permission}`), [
+    "*:*:*:read",
+    "pro:*:*:write",
+  ]);
+  assert.equal(dropped.length, 3);
+});
+
+test("CLI end-to-end: wildcards need --allow-wildcard, warnings go to stderr before creation, list shows 4-part scopes", () => {
   const run = (...args: string[]) =>
     spawnSync(process.execPath, ["--import", "tsx", join(__dirname, "token.ts"), ...args], {
       env: { ...process.env, DB_PATH: dbPath },
       encoding: "utf8",
     });
 
-  const master = run("create", "--name", "m", "--preset", "master");
+  const refused = run("create", "--name", "nope", "--preset", "master");
+  assert.notEqual(refused.status, 0);
+  assert.match(refused.stderr, /WARNING: scope \*:\*:\*:read/);
+  assert.match(refused.stderr, /--allow-wildcard/);
+  assert.doesNotMatch(refused.stdout, /sb_/);
+  assert.doesNotMatch(run("list").stdout, /name=nope/);
+
+  const master = run("create", "--name", "m", "--preset", "master", "--allow-wildcard");
   assert.equal(master.status, 0, master.stderr);
   assert.match(master.stdout, /token: sb_/);
-  assert.match(master.stdout, /WARNING: scope \*:\*:\*:read/);
-  assert.match(master.stdout, /WARNING: scope \*:\*:\*:write/);
+  assert.doesNotMatch(master.stdout, /WARNING/);
+  assert.match(master.stderr, /WARNING: scope \*:\*:\*:read/);
+  assert.match(master.stderr, /WARNING: scope \*:\*:\*:write/);
 
-  const ro = run("create", "--name", "ro", "--preset", "master-ro");
+  const ro = run("create", "--name", "ro", "--preset", "master-ro", "--allow-wildcard");
   assert.equal(ro.status, 0, ro.stderr);
-  assert.match(ro.stdout, /WARNING: scope \*:\*:\*:read/);
-  assert.doesNotMatch(ro.stdout, /\*:\*:\*:write/);
+  assert.match(ro.stderr, /WARNING: scope \*:\*:\*:read/);
+  assert.doesNotMatch(ro.stderr, /\*:\*:\*:write/);
 
   const explicit = run("create", "--name", "ex", "--scope", "pro:x:y:read");
   assert.equal(explicit.status, 0, explicit.stderr);
-  assert.doesNotMatch(explicit.stdout, /WARNING/);
+  assert.doesNotMatch(explicit.stderr, /WARNING/);
+
+  const redundant = run("create", "--name", "red", "--scope", "*:*:*:read,pro:x:y:read", "--allow-wildcard");
+  assert.equal(redundant.status, 0, redundant.stderr);
+  assert.match(redundant.stderr, /dropped redundant scope pro:x:y:read/);
 
   const bad = run("create", "--name", "bad", "--scope", "pro:*:y:read");
   assert.notEqual(bad.status, 0);
   assert.match(bad.stderr, /trailing levels/);
 
-  const both = run("create", "--name", "b", "--preset", "master", "--scope", "a:b:c:read");
+  const both = run("create", "--name", "b", "--preset", "master", "--scope", "a:b:c:read", "--allow-wildcard");
   assert.notEqual(both.status, 0);
+  assert.match(both.stderr, /not both/);
 
   const list = run("list");
   assert.equal(list.status, 0, list.stderr);
   assert.match(list.stdout, /name=m .*scopes=\[\*:\*:\*:read, \*:\*:\*:write\]/);
   assert.match(list.stdout, /name=ro .*scopes=\[\*:\*:\*:read\]/);
   assert.match(list.stdout, /name=ex .*scopes=\[pro:x:y:read\]/);
+  assert.match(list.stdout, /name=red .*scopes=\[\*:\*:\*:read\]/);
 });

@@ -53,10 +53,26 @@ test("a token may hold scopes in several spaces; none leak into others", () => {
   assert.equal(checkScope(s, "idees", "p", "s", "read"), false);
 });
 
-test("legacy-space scopes match nothing but the literal space 'legacy'", () => {
-  const s = [sc("legacy", "p", "s", "read")];
+test("sentinel '!legacy' scopes match no valid space", () => {
+  const s = [sc("!legacy", "p", "s", "read")];
   assert.equal(checkScope(s, "perso", "p", "s", "read"), false);
-  assert.equal(checkScope(s, "pro", "p", "s", "read"), false);
+  assert.equal(checkScope(s, "legacy", "p", "s", "read"), false);
+});
+
+test("malformed stored wildcards (non-* after *) match nothing and warn once", () => {
+  const warns: string[] = [];
+  const orig = console.warn;
+  console.warn = (m: string) => void warns.push(String(m));
+  try {
+    const s = [sc("pro", "*", "secrets", "read"), sc("*", "x", "y", "read"), sc("*", "*", "y", "read")];
+    assert.equal(checkScope(s, "pro", "p", "secrets", "read"), false);
+    assert.equal(checkScope(s, "pro", "p", "secrets", "read"), false);
+    assert.equal(checkScope(s, "any", "x", "y", "read"), false);
+    assert.equal(warns.filter((w) => /pro:\*:secrets:read/.test(w)).length, 1);
+    assert.equal(warns.length, 3);
+  } finally {
+    console.warn = orig;
+  }
 });
 
 test("no scopes denies", () => {

@@ -65,8 +65,8 @@ Tokens are managed with `make` targets that run a CLI inside the running service
 
 ```bash
 make token-create name=claude-code scope=pro:myproj:notes:read,pro:myproj:notes:write
-make token-create name=me preset=master        # read+write on *:*:*
-make token-create name=viewer preset=master-ro # read on *:*:*
+make token-create name=me preset=master allow_wildcard=1        # read+write on *:*:*
+make token-create name=viewer preset=master-ro allow_wildcard=1 # read on *:*:*
 make token-list
 make token-revoke id=<token id>
 ```
@@ -74,11 +74,24 @@ make token-revoke id=<token id>
 - Scope format: `space:project:section:permission`, comma-separated. `permission` is `read` or `write`. `space`, `project` and `section` follow the slug rules.
 - Wildcards: `*` is allowed only as trailing levels: `*:*:*`, `<space>:*:*`, `<space>:<project>:*`, or fully explicit. Patterns like `*:proj:sec` or `space:*:sec` are rejected. A token may hold scopes in several spaces.
 - `read` and `write` are separate: `write` does not imply `read`. Grant both if you want both.
-- Presets: `preset=master` (read+write on `*:*:*`) and `preset=master-ro` (read on `*:*:*`). Use either `preset=` or `scope=`, not both.
-- The CLI prints a warning when a token has any wildcard scope, stating what the token can read/write (including content created later). Prefer explicit scopes unless you need a master token.
-- Upgrade note: scopes created before spaces existed are migrated to the space `legacy`, which matches no real space, so those tokens grant nothing until re-issued with 4-part scopes.
+- Presets: `preset=master` (read+write on `*:*:*`) and `preset=master-ro` (read on `*:*:*`). Use either `preset=` or `scope=`, not both (the CLI rejects the combination).
+- Wildcard scopes and presets are refused unless `allow_wildcard=1` (CLI: `--allow-wildcard`). Before creating the token the CLI prints to stderr what it can read/write (including content created later). Prefer explicit scopes unless you need a master token.
+- Scopes already covered by a wildcard scope of the same permission (e.g. `pro:x:y:read` next to `*:*:*:read`) are dropped at creation; the CLI says which on stderr.
+- Wildcards are also enforced at match time: a stored scope with a non-`*` level after a `*` (e.g. inserted by hand) matches nothing and logs a warning.
+- Upgrade note: scopes created before spaces existed are migrated to the sentinel space `!legacy`. `!` is not valid in a slug, so no token scope, tool argument or vault path can ever equal it: those tokens grant nothing until re-issued with 4-part scopes. (An earlier build used `legacy`, a valid slug; migration 4 renames such rows to `!legacy`.)
 - The plaintext token (`sb_...`) is printed once at creation and cannot be recovered. Only its hash is stored. If lost, revoke and create a new one.
 - `token-list` shows id, name, created/revoked/last-used timestamps and scopes (4-part format).
+
+## Upgrading from the 3-level layout
+
+Before spaces, notes lived at `<project>/<section>/<note>.md`; they are now `<space>/<project>/<section>/<note>.md`, so old notes are unreachable until moved. In the vault repo, for each project:
+
+```bash
+mkdir -p <space> && git mv <project> <space>/<project>
+git commit -m "Move <project> under space <space>" && git push
+```
+
+Then re-issue tokens with 4-part scopes (old tokens were migrated to the unmatchable space `!legacy` and grant nothing) and revoke the old ones.
 
 ## Configuring a Claude Code client
 
@@ -202,7 +215,7 @@ Hardened:
 
 Deliberate limits:
 
-- Scopes are exact-match only: no wildcards, and `write` does not imply `read`.
+- Wildcards are trailing-only (`*:*:*`, `space:*:*`, `space:project:*`) and `write` does not imply `read`.
 - Names are strict slugs (no uppercase, dots, spaces or nested folders).
 - Single replica: one git working tree and one SQLite file, so tasks must never overlap (`stop-first` updates).
 - The auth-failure limiter state is in memory (reset on restart).

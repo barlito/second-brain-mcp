@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { parseArgs as nodeParseArgs } from "node:util";
-import { createToken, listTokens, revokeToken } from "../auth/tokens";
+import { createToken, listTokens, revokeToken, validateTokenInput } from "../auth/tokens";
 import { Permission, Scope } from "../auth/types";
 
 // Shape only (space:project:section:permission); createToken validates the values.
@@ -54,6 +54,27 @@ export function wildcardWarnings(scopes: Scope[]): string[] {
     });
 }
 
+const covers = (a: string, b: string) => a === "*" || a === b;
+
+// Drops scopes strictly narrower than another scope of the same permission
+// (e.g. *:*:*:read makes pro:x:y:read redundant). Input must be de-duplicated.
+export function dropRedundantScopes(scopes: Scope[]): { kept: Scope[]; dropped: Scope[] } {
+  const kept: Scope[] = [];
+  const dropped: Scope[] = [];
+  for (const s of scopes) {
+    const redundant = scopes.some(
+      (o) =>
+        o !== s &&
+        o.permission === s.permission &&
+        covers(o.space, s.space) &&
+        covers(o.project, s.project) &&
+        covers(o.section, s.section),
+    );
+    (redundant ? dropped : kept).push(s);
+  }
+  return { kept, dropped };
+}
+
 function fail(message: string): never {
   console.error(`Error: ${message}`);
   process.exit(1);
@@ -66,6 +87,7 @@ function cmdCreate(argv: string[]): void {
       name: { type: "string" },
       scope: { type: "string" },
       preset: { type: "string" },
+      "allow-wildcard": { type: "boolean" },
     },
   });
   const { name, scope, preset } = values;
@@ -79,10 +101,21 @@ function cmdCreate(argv: string[]): void {
   }
 
   // TokenValidationError messages are printed cleanly by main()'s catch.
+  const validated = validateTokenInput(name, scopes);
+  const { kept, dropped } = dropRedundantScopes(validated.scopes);
+  scopes = kept;
+
+  const warnings = wildcardWarnings(scopes);
+  if (warnings.length > 0) {
+    for (const w of warnings) console.error(w);
+    if (!values["allow-wildcard"]) {
+      fail("wildcard scopes and presets grant broad access; re-run with --allow-wildcard to confirm. No token created.");
+    }
+  }
+  for (const s of dropped) console.error(`note: dropped redundant scope ${formatScope(s)} (already covered by a wildcard scope)`);
+
   const created = createToken(name, scopes);
   console.log("Token created. The plaintext token is shown ONLY ONCE below — store it now:");
-  console.log("");
-  for (const w of wildcardWarnings(scopes)) console.log(w);
   console.log("");
   console.log(`  id:    ${created.id}`);
   console.log(`  token: ${created.token}`);

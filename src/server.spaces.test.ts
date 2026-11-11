@@ -80,12 +80,44 @@ test("a master token writes anywhere; commit message and audit row carry the spa
 
 test("a legacy-scoped token (post-migration) cannot access any real space", async () => {
   const t = createToken("legacy-t", [{ space: "pro", project: "x", section: "y", permission: "read" }]).token;
-  db.prepare("UPDATE scopes SET space = 'legacy' WHERE token_id = (SELECT id FROM tokens WHERE name = 'legacy-t')").run();
-  for (const space of ["pro", "perso", "legacy"]) {
+  db.prepare("UPDATE scopes SET space = '!legacy' WHERE token_id = (SELECT id FROM tokens WHERE name = 'legacy-t')").run();
+  for (const space of ["pro", "perso", "legacy", "!legacy"]) {
     const r = await callTool(app.baseUrl, t, "kb_read", { space, project: "x", section: "y", note: "n" });
-    // 'legacy' itself is a slug but the vault has no such directory: must not read anything.
     assert.notEqual(r.text, `${space} note\n`);
   }
+  const bad = await callTool(app.baseUrl, t, "kb_read", { space: "!legacy", project: "x", section: "y", note: "n" });
+  assert.deepEqual(bad, { isError: true, text: "Invalid space/project/section/note name." });
+  const r = await callTool(app.baseUrl, t, "kb_read", { space: "pro", project: "x", section: "y", note: "n" });
+  assert.deepEqual(r, { isError: true, text: "Permission denied." });
+});
+
+test("literal '*', empty and traversal values are rejected by slug validation before the ACL check", async () => {
+  const master = createToken("master-slug", [
+    { space: "*", project: "*", section: "*", permission: "read" },
+  ]).token;
+  const cases: Array<Record<string, string>> = [
+    { space: "*", project: "x", section: "y", note: "n" },
+    { space: "pro", project: "*", section: "y", note: "n" },
+    { space: "pro", project: "x", section: "*", note: "n" },
+    { space: "pro", project: "x", section: "y", note: "*" },
+    { space: "", project: "x", section: "y", note: "n" },
+    { space: "pro", project: "..", section: "y", note: "n" },
+    { space: "Pro", project: "x", section: "y", note: "n" },
+  ];
+  for (const args of cases) {
+    const r = await callTool(app.baseUrl, master, "kb_read", args);
+    assert.deepEqual(r, { isError: true, text: "Invalid space/project/section/note name." }, JSON.stringify(args));
+    const a = lastAudit(db, "token_name = 'master-slug'");
+    assert.equal(a.result, "error");
+    assert.match(a.detail ?? "", /^invalid \w+ slug$/);
+  }
+});
+
+test("a raw-inserted mid-level wildcard row grants nothing end to end", async () => {
+  const t = createToken("raw-wild", [{ space: "pro", project: "x", section: "y", permission: "write" }]).token;
+  db.prepare(
+    "INSERT INTO scopes (token_id, space, project, section, permission) VALUES ((SELECT id FROM tokens WHERE name='raw-wild'),'pro','*','y','read')",
+  ).run();
   const r = await callTool(app.baseUrl, t, "kb_read", { space: "pro", project: "x", section: "y", note: "n" });
   assert.deepEqual(r, { isError: true, text: "Permission denied." });
 });

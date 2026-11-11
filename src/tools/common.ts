@@ -5,7 +5,7 @@ import { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { getTokenContext, TokenContext } from "../auth/context";
 import { checkScope } from "../acl/check";
 import { AuditEntry, logAudit } from "../audit";
-import { InvalidSlugError, UnsafePathError } from "../vault/paths";
+import { InvalidSlugError, isValidSlug, UnsafePathError } from "../vault/paths";
 import { redact, SyncConflictError, VaultBusyError } from "../vault/git";
 
 export const MAX_CONTENT_CHARS = 512 * 1024;
@@ -89,7 +89,7 @@ export interface Target {
 
 // Shared ACL-check + audit-log + error-handling wrapper for kb_* tools.
 // Every call gets exactly one audit row, whether it's denied, ok, a handled
-// tool-level error, or an unexpected exception. ACL runs before any filesystem access.
+// tool-level error, or an unexpected exception. Slug validation, then ACL, run before any filesystem access.
 export async function withAclAndAudit(
   action: string,
   target: Target,
@@ -109,6 +109,15 @@ export async function withAclAndAudit(
       note: target.note,
       clientIp: ctx.clientIp,
     };
+
+    // Slug syntax first: a literal "*", empty or garbage value must never reach checkScope
+    // or the filesystem. Syntax reveals nothing about the vault, so this leaks nothing.
+    for (const field of ["space", "project", "section", "note"] as const) {
+      if (!isValidSlug(target[field])) {
+        safeAudit({ ...base, result: "error", detail: `invalid ${field} slug` }, ctx.name);
+        return toolError("Invalid space/project/section/note name.");
+      }
+    }
 
     if (!checkScope(ctx.scopes, target.space, target.project, target.section, permission)) {
       safeAudit({ ...base, result: "denied" }, ctx.name);
