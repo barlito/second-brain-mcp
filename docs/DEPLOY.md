@@ -64,13 +64,14 @@ Known gaps (not built yet): there is no publish/deploy GitHub workflow (CI only 
 
 - [ ] Create it and store the printed `sb_...` token in a password manager (it is shown once):
   ```bash
-  make token-create name=claude-code scope=<project>:<section>:read,<project>:<section>:write
+  make token-create name=claude-code 'scope=meta:smoke:notes:read,meta:smoke:notes:write'
   ```
+  (This narrow scope covers the smoke-test note below; issue your real working tokens afterwards.)
 
 ### 7. Smoke test
 
-- [ ] Add the MCP server in Claude Code (see the README), then `kb_write` a note, e.g. project `smoke`, section `test`, note `hello`. It returns a commit SHA.
-- [ ] Within a few seconds the commit `kb_write: smoke/test/hello via claude-code` appears on `barlito/second-brain-vault` on GitHub (the push is asynchronous, with retries).
+- [ ] Add the MCP server in Claude Code (see the README), then `kb_write` a note, e.g. space `meta`, project `smoke`, section `notes`, note `hello`. It returns a commit SHA.
+- [ ] Within a few seconds the commit `kb_write: meta/smoke/notes/hello via claude-code` appears on `barlito/second-brain-vault` on GitHub (the push is asynchronous, with retries).
 - [ ] `kb_read` the same note and compare the content.
 - [ ] `curl -H "Authorization: Bearer $TOKEN" https://second-brain.barlito.fr/health/details` shows `"status":"ok"`, `lastPushOk` not `false`, `conflicts` `0`.
 
@@ -103,7 +104,7 @@ The SQLite database and the vault live on named volumes and survive redeploys. R
 | `401` `missing or malformed Authorization header` | The header must be `Authorization: Bearer <token>`. |
 | `401` `invalid or revoked token` | Wrong, revoked or truncated token. `make token-list`; create a new one if needed. |
 | `429 Too many failed authentications` | 10 failures from that IP within 60 s. Wait a minute (the limiter is in memory; a restart clears it). If the audit log always shows Traefik's address as client IP, `TRUSTED_PROXY` is not resolving. |
-| Tool returns `Permission denied.` | The scope does not match exactly (project, section, and read vs write). `make token-list`. |
+| Tool returns `Permission denied.` | The scope does not match exactly (space, project, section, and read vs write). `make token-list`. |
 | Tool returns `Vault is busy, retry in a moment.` | Someone is using the vault repo directly (rebase in progress, or a git `index.lock` younger than 10 minutes). Finish or abort that operation, then retry. |
 | Tool returns `Conflict: ... saved on branch conflict/<ts>` | The remote changed the same note. Re-read and retry the write. Inspect/merge the `conflict/<ts>` branch in the vault repo, then delete it. |
 | `/health/details` is `degraded`, `lastPushOk: false` or `unpushed: true` | Push failing: check the logs for `git push` / `periodic sync` errors, that the deploy key has write access, and that GitHub is reachable. Local commits are kept and retried every sync interval. |
