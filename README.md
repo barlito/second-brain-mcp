@@ -3,7 +3,7 @@
 An MCP server that exposes a git-backed, Obsidian-compatible knowledge-base vault to Claude and other agents. Access is gated by Bearer tokens with hierarchical space/project/section read and write scopes (stored in SQLite), and every call is audit-logged.
 
 - Transport: stateless Streamable HTTP at `POST /mcp` (TypeScript, Express 5, MCP SDK).
-- Two tools: `kb_read` and `kb_write`.
+- Seven tools: `kb_read`, `kb_write`, `kb_append`, `kb_archive`, `kb_list`, `kb_search`, `kb_init_project`.
 - Deployed with Docker Swarm (`docker stack deploy`, driven by the Makefile) behind the [traefik-base](https://github.com/barlito/traefik-base) stack (network `traefik_traefik_proxy`).
 - Local: `https://second-brain.local.barlito.fr`. Prod: `https://second-brain.barlito.fr` (not deployed yet, see [docs/DEPLOY.md](docs/DEPLOY.md)).
 
@@ -35,21 +35,105 @@ Traefik -> bearer auth (+ per-IP failure limiter) -> /mcp -> ACL check -> vault 
 
 `space`, `project`, `section` and `note` must each match `^[a-z0-9][a-z0-9-]{0,63}$` (lowercase letters, digits and hyphens; max 64 chars; no leading hyphen; no dots, slashes or spaces). The `.md` extension is added by the server. Anything else is rejected.
 
+Spaces are top-level areas (e.g. `perso`, `pro`, `idees`). A `meta` space is a suggested home for short notes on how the user works (preferences, conventions); the server does not treat it specially, the agent instructions just suggest reading it if the token allows.
+
+### Reserved sections
+
+Every project uses the same section names:
+
+| Section | Purpose |
+|---------|---------|
+| `overview` | Entry note `index`: what the project is plus a map of its docs. Hard cap of 3 KB (3072 bytes, UTF-8) on `overview/index`, enforced for `kb_write`, `kb_append` and `kb_init_project`. |
+| `decisions` | Why X was chosen: short ADR-style notes. |
+| `conventions` | How things are done in this project. |
+| `notes` | Everything else. |
+| `journal` | Monthly notes named `YYYY-MM`, short entries, written with `kb_append`. |
+| `archive` | Where `kb_archive` moves notes. Only `kb_archive` writes there: `kb_write` and `kb_append` on it fail with ``Section `archive` is managed by kb_archive and cannot be written directly.`` |
+
+Only `archive` is enforced beyond the `overview/index` size cap; the other names are conventions (the server accepts any valid section slug).
+
+### Server instructions
+
+On connection the server sends MCP `instructions` describing this layout, the reserved sections, the session-start routine and the working rules (short notes, find notes with `kb_search`, update the Docs map, archive instead of delete, re-read before overwriting). MCP clients that surface server instructions therefore get the conventions automatically; nothing needs to be configured per client.
+
 ## Tools
 
-Both tools take `space`, `project`, `section`, `note` (strings, max 64 chars each, all required).
+All note-addressed tools take `space`, `project`, `section`, `note` (strings, max 64 chars each, slug rules above). Each call needs the permission listed on the matching scope (see [Token management](#token-management)); `read` and `write` are separate.
 
-| Tool | Extra argument | Result |
-|------|----------------|--------|
-| `kb_read` | none | The note content as text. |
-| `kb_write` | `content` (string, max 512 x 1024 characters, not bytes), written verbatim | The git commit SHA. Creates or overwrites the note. |
+### `kb_read`
 
-Errors returned to the client (`isError: true`):
+- Args: `space`, `project`, `section`, `note`; optional `tail` (integer 1-500).
+- Permission: `read` on the section.
+- Returns the note as text. With `tail`, only the last N lines (a trailing newline is not counted as a line). Use it for recent journal history.
+- Errors: `Note not found.`
+
+### `kb_write`
+
+- Args: the four names plus `content` (string, max 512 x 1024 = 524288 characters, not bytes; the schema rejects more with `content too large (max 512 KB)`). Written verbatim.
+- Permission: `write` on the section.
+- Creates or overwrites the note and returns the git commit SHA. Commit message: `kb_write: <space>/<project>/<section>/<note> via <token name>`.
+- Errors: ``Section `archive` is managed by kb_archive and cannot be written directly.``; for `overview/index` over 3 KB: `overview/index is too large (<n> bytes, max 3072). The entry note must stay small: move detail into other sections (decisions, conventions, notes) and link to those notes from the Docs map.`
+- Writes are direct and overwrite without merging: re-read before overwriting a note you did not just read.
+
+### `kb_append`
+
+- Args: the four names plus `entry` (string, 1-1000 characters).
+- Permission: `write` on the section.
+- Appends one line to the note (created if missing) and returns the commit SHA. The server formats the line, the client cannot: `- <YYYY-MM-DD HH:MM UTC> [<token name>] <entry>`. Line breaks and other control characters in `entry` are collapsed to single spaces, so an entry is always one line. The timestamp is taken inside the vault lock, so file order equals time order.
+- Convention: section `journal`, note = current month `YYYY-MM` (e.g. `2026-11`), entries of 1-3 sentences (what was done and why); details belong in `notes`/`decisions`.
+- Limits: the resulting note may not exceed 512 KB (524288 characters) and the `overview/index` 3 KB cap also applies.
+- Errors: `Entry is empty.` (only whitespace/control characters); `Note is too large to append to (max 512 KB). Start a new note; for journals use one note per month (journal/YYYY-MM).`; the `archive` and entry-note-size errors above.
+
+### `kb_archive`
+
+- Args: `space`, `project`, `section`, `note` (the note to archive).
+- Permission: `write` on the source section AND `write` on `<space>:<project>:archive`. A token scoped to a single section therefore cannot archive; a project-wide scope such as `space:project:*` can. If the archive write is missing the client gets `Permission denied.`. Reading an archived note afterwards needs `read` on `archive`.
+- Moves `<space>/<project>/<section>/<note>` to `<space>/<project>/archive/<section>-<note>` (a `-2`, `-3`, ... suffix is appended if the name is taken, up to 50 tries; long names are truncated to stay a valid slug) and returns the new location, e.g. `pro/myproj/archive/notes-old-idea`. The move is a git commit, so history is kept.
+- There is no delete tool: archive instead.
+- Errors: `Note is already archived.` (section is `archive`); `The project entry note (overview/index) cannot be archived.`; `Note not found.`; `Note has uncommitted changes in the vault; commit or discard them first.`; `Too many archived notes with this name.`
+
+### `kb_list`
+
+- Args (all optional): `space`, `project`, `section`, `include_archived` (boolean, default false). A level requires the one above it, otherwise `Invalid arguments: project requires space, section requires project.`
+- Permission: `read`; the deepest level you pass must be readable (else `Permission denied.`), and results are filtered to what the token can read.
+- One level at a time: no args lists spaces; `space` lists projects; `space`+`project` lists sections; adding `section` lists notes as `name<TAB><n> bytes<TAB><ISO mtime>`. The `archive` section is hidden unless `include_archived` is true. Empty results print `(empty)`. Dotfiles, symlinks and non-slug names are skipped.
+- Cap: 500 entries, then `(truncated: showing the first 500 entries)`.
+
+### `kb_search`
+
+- Args: `query` (string, 2-200 characters after trimming; shorter gives `Query must be at least 2 characters.`), optional `space`, `project`, `section` (same hierarchy rule as `kb_list`), `include_archived` (default false).
+- Permission: `read`. Only sections the token can read are opened: the ACL is applied before any directory or file is read.
+- Case-insensitive plain substring match (not regex, no ranking) per line. Output lines are `<space>/<project>/<section>/<note>: <snippet>`; up to 50 notes and 3 lines per note, each snippet at most 200 characters around the match. No hits prints `No matches.`
+- Limits: files over 1 MB are skipped; stops after 3 s, 20 MB read or 5000 notes scanned. When it stops early the output ends with `(truncated: <reason>; results may be incomplete, narrow the search)`, where reason is `time limit reached`, `read limit reached`, `too many notes` or `more notes match` (more than 50 notes hit). Unreadable entries are counted in `(skipped <n> unreadable entries)`. Narrow with `space`/`project`/`section` when truncated.
+
+### `kb_init_project`
+
+- Args: `space`, `project`, `summary` (string, trimmed, 1-500 characters).
+- Permission: `write` on `<space>:<project>:overview`.
+- Creates `<space>/<project>/overview/index` from a template (title, summary, a `Docs map` listing the other reserved sections) and returns the commit SHA.
+- Refuses if the entry note already exists: `Entry note already exists — edit it with kb_write.`
+
+### Typical agent session
+
+```
+kb_read   pro/myproj/overview/index                       # what is this project, docs map
+kb_list   pro/myproj/journal                              # find the latest month note
+kb_read   pro/myproj/journal/2026-11  tail=30             # recent history
+...work, using kb_search / kb_read as needed...
+kb_append pro/myproj/journal/2026-11  entry="Switched the queue to X because Y."
+kb_write  pro/myproj/decisions/queue-choice  content=...  # durable "why" as its own note
+```
+
+(Written as `space/project/section/note` for brevity; the tools take them as separate arguments.)
+
+### Client-facing errors
+
+Returned with `isError: true`:
 
 | Message | Cause |
 |---------|-------|
 | `Permission denied.` | Token has no scope covering that space/project/section/permission. Deliberately does not reveal whether the project exists. |
-| `Note not found.` | `kb_read` on a missing note. |
+| `Note not found.` | `kb_read` or `kb_archive` on a missing note. |
 | `Invalid space/project/section/note name.` | A name does not match the slug rules. |
 | `Path not allowed.` | Path-safety check failed (escape from the vault root, symlink, not a regular file). |
 | `Vault is busy, retry in a moment.` | A human (or other git process) is using the vault repo: a rebase in progress or a recent `index.lock`. Retry. |
@@ -57,7 +141,7 @@ Errors returned to the client (`isError: true`):
 | `Conflict: ... Your version was saved on branch (none). ...` | Uncommitted human changes in the vault conflicted with the remote and were put in `git stash`. See [Git sync](#git-sync). |
 | `Internal error.` | Anything else. Details are in the server log and the audit row only. |
 
-HTTP-level: `401` (missing/invalid/revoked token), `429` (too many failed auths), `503` (shutting down), `405` for `GET /mcp` and `DELETE /mcp`, `413` (request body over 1 MB) and `400` (malformed JSON). The `405`, `413` and `400` responses are JSON-RPC errors.
+Tool-specific messages are listed under each tool. HTTP-level: `401` (missing/invalid/revoked token), `429` (too many failed auths), `503` (shutting down), `405` for `GET /mcp` and `DELETE /mcp`, `413` (request body over 1 MB) and `400` (malformed JSON). The `405`, `413` and `400` responses are JSON-RPC errors.
 
 ## Token management
 
@@ -71,7 +155,7 @@ make token-list
 make token-revoke id=<token id>
 ```
 
-- Scope format: `space:project:section:permission`, comma-separated. `permission` is `read` or `write`. `space`, `project` and `section` follow the slug rules.
+- Scope format (4 parts): `space:project:section:permission`, comma-separated. `permission` is `read` or `write`. `space`, `project` and `section` follow the slug rules.
 - Wildcards: `*` is allowed only as trailing levels: `*:*:*`, `<space>:*:*`, `<space>:<project>:*`, or fully explicit. Patterns like `*:proj:sec` or `space:*:sec` are rejected. A token may hold scopes in several spaces.
 - `read` and `write` are separate: `write` does not imply `read`. Grant both if you want both.
 - Presets: `preset=master` (read+write on `*:*:*`) and `preset=master-ro` (read on `*:*:*`). Use either `preset=` or `scope=`, not both (the CLI rejects the combination).
