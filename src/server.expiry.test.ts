@@ -68,7 +68,7 @@ test("expired token: 401 'token expired', audited, not counted by the auth limit
       assert.deepEqual(await r.json(), { error: "token expired" });
     }
     const rows = { length: audited().n - was };
-    assert.equal(rows.length, 6, "each expired attempt is audited with its reason");
+    assert.equal(rows.length, 1, "expired attempts are audit-coalesced per IP/minute");
     // Unknown tokens still feed the limiter.
     for (let i = 0; i < 3; i++) assert.equal((await hit("sb_nope")).status, 401);
     assert.equal((await hit("sb_nope")).status, 429);

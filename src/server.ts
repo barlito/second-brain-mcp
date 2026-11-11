@@ -195,6 +195,8 @@ export interface AppOptions {
 
 // Bearer-token auth, mounted before the MCP route. No MCP involved on failure.
 function makeBearerAuth(limiter: AuthFailureLimiter) {
+  // Expired tokens never count toward the 429, but their audit rows are still coalesced per IP/minute.
+  const expiredAudit = new AuthFailureLimiter(Infinity);
   return (req: Request, res: Response, next: NextFunction): void => {
     const ip = req.ip ?? "unknown";
     if (limiter.blocked(ip)) {
@@ -202,9 +204,9 @@ function makeBearerAuth(limiter: AuthFailureLimiter) {
       return;
     }
 
-    // countable=false: not a guessing attempt (expired token), so it skips the limiter.
+    // countable=false: not a guessing attempt (expired token), so it skips the brute-force count.
     const fail = (reason: string, countable = true): void => {
-      const { audit, previous } = countable ? limiter.record(ip) : { audit: true, previous: 0 };
+      const { audit, previous } = countable ? limiter.record(ip) : expiredAudit.record(ip);
       if (audit) {
         // A DB failure here must still yield a 401.
         try {

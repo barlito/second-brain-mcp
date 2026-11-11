@@ -1158,10 +1158,14 @@ export async function noteHistory(
   );
   const entries: NoteHistoryEntry[] = [];
   let restricted = false;
+  let current = rel; // path at the commit being walked (newest to oldest)
   for (const block of out.split("\x01").slice(1)) {
     const [header, ...statusLines] = block.split("\n");
     const status = statusLines.find((l) => l.includes("\t"));
-    const atCommit = status ? status.split("\t").pop()! : rel;
+    const parts = status?.split("\t");
+    const atCommit = parts ? parts[parts.length - 1] : current;
+    // After a rename/copy line, older commits know the file by its old path.
+    if (parts && /^[RC]/.test(parts[0]) && parts.length >= 3) current = parts[1];
     if (!canRead(atCommit)) {
       restricted = true;
       break;
