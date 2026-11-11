@@ -531,13 +531,28 @@ export async function drainWrites(): Promise<void> {
   } while (q !== queue);
 }
 
+// A create-only write found the note already there.
+export class NoteExistsError extends Error {
+  constructor() {
+    super("note already exists");
+    this.name = "NoteExistsError";
+  }
+}
+
+export interface WriteOptions {
+  // Create-only: refuse if the path exists (any type), checked inside the lock
+  // after the pull and the path-safety check.
+  mustNotExist?: boolean;
+}
+
 export function syncWrite(
   vaultRoot: string,
   absolutePath: string,
   content: string,
   commitMessage: string,
+  opts: WriteOptions = {},
 ): Promise<{ commitSha: string }> {
-  return lockedWrite(vaultRoot, absolutePath, () => content, commitMessage);
+  return lockedWrite(vaultRoot, absolutePath, () => content, commitMessage, opts);
 }
 
 export class NoteTooLargeError extends Error {
@@ -557,6 +572,8 @@ export function syncAppend(
   text: string | (() => string),
   commitMessage: string,
   maxChars?: number,
+  // Validates the resulting content inside the lock; throws to refuse.
+  check?: (next: string) => void,
 ): Promise<{ commitSha: string }> {
   return lockedWrite(
     vaultRoot,
@@ -565,6 +582,7 @@ export function syncAppend(
       const t = typeof text === "function" ? text() : text;
       const next = (prev === "" || prev.endsWith("\n") ? prev : prev + "\n") + t.replace(/\n+$/, "") + "\n";
       if (maxChars !== undefined && next.length > maxChars) throw new NoteTooLargeError("note would exceed the size limit");
+      check?.(next);
       return next;
     },
     commitMessage,
@@ -625,10 +643,12 @@ function lockedWrite(
   absolutePath: string,
   build: (previous: string) => string,
   commitMessage: string,
+  opts: WriteOptions = {},
 ): Promise<{ commitSha: string }> {
   return withLock(vaultRoot, async () => {
     assertSafePath(vaultRoot, absolutePath);
     const remote = await prepareLocked(vaultRoot);
+    if (opts.mustNotExist && lstatOrNull(absolutePath)) throw new NoteExistsError();
 
     const relativePath = path.relative(vaultRoot, absolutePath);
     const previous = existsSync(absolutePath) ? readFileSync(absolutePath) : null;

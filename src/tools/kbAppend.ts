@@ -2,6 +2,7 @@ import { z } from "zod";
 import { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { resolveNotePath } from "../vault/paths";
 import { NoteTooLargeError, syncAppend } from "../vault/git";
+import { NoteRuleError, validateNoteContent } from "./conventions";
 import { kbArgsShape, MAX_CONTENT_CHARS, RegisterTool, toolError, toolText, withAclAndAudit } from "./common";
 import { rejectReservedSection } from "./reserved";
 
@@ -49,9 +50,13 @@ export const register: RegisterTool = (server, { vaultRoot }) => {
             () => `- ${utcStamp(new Date())} [${ctx.name}] ${oneLine}`,
             `kb_append: ${space}/${project}/${section}/${note} via ${ctx.name}`,
             MAX_CONTENT_CHARS,
+            (next) => validateNoteContent({ section, note }, next),
           );
           return { toolResult: toolText(commitSha), audit: { gitCommit: commitSha } };
         } catch (err) {
+          if (err instanceof NoteRuleError) {
+            return { toolResult: toolError(err.message), audit: { detail: err.detail } };
+          }
           if (err instanceof NoteTooLargeError) {
             return {
               toolResult: toolError(
