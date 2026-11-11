@@ -62,7 +62,7 @@ services:
         - traefik.http.routers.second-brain-mcp-secure.rule=Host(`second-brain.local.barlito.fr`)
         - traefik.http.routers.second-brain-mcp-secure.entrypoints=https
         - traefik.http.routers.second-brain-mcp-secure.tls=true
-        # Own Bearer-token ACL (PR2/PR4) -> no Authelia, just security headers
+        # Own Bearer-token ACL -> no Authelia, just security headers
         - traefik.http.routers.second-brain-mcp-secure.middlewares=security-headers@file
 
 networks:

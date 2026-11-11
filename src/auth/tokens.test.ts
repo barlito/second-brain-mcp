@@ -1,15 +1,12 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { cleanup, makeTempDb } from "../test-support/fixtures";
 
 // DB_PATH must be set before db.ts is loaded (it reads the env var at import time),
 // so delay the import to a `before` hook (top-level await isn't available under
 // the project's CJS module target) and point at a throwaway temp file instead
 // of the real /data/acl.db.
-const tmpDir = mkdtempSync(join(tmpdir(), "second-brain-test-"));
-process.env.DB_PATH = join(tmpDir, "test.db");
+makeTempDb();
 
 let createToken: typeof import("./tokens").createToken;
 let verifyToken: typeof import("./tokens").verifyToken;
@@ -76,6 +73,4 @@ test("listTokens never exposes token_hash or plaintext", () => {
   }
 });
 
-after(() => {
-  rmSync(tmpDir, { recursive: true, force: true });
-});
+after(cleanup);

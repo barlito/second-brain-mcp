@@ -1,14 +1,13 @@
-import { test, before } from "node:test";
+import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { cleanup, makeTempDb } from "./test-support/fixtures";
 
-const tmpDir = mkdtempSync(join(tmpdir(), "second-brain-audit-test-"));
-process.env.DB_PATH = join(tmpDir, "test.db");
+makeTempDb();
 
 let audit: typeof import("./audit");
 let db: typeof import("./db").db;
+
+after(cleanup);
 
 before(async () => {
   audit = await import("./audit");
@@ -46,13 +45,16 @@ test("free-text fields are truncated", () => {
 });
 
 test("pruneAudit deletes only old rows and returns the count", () => {
-  db.prepare("DELETE FROM audit_log").run();
+  // Only rows with this test's own action are asserted on; rows from other tests are all recent.
   const old = new Date(Date.now() - 40 * 86_400_000).toISOString();
-  db.prepare("INSERT INTO audit_log (ts, action, result) VALUES (?, 'a', 'ok')").run(old);
-  db.prepare("INSERT INTO audit_log (ts, action, result) VALUES (?, 'a', 'ok')").run(old);
-  audit.logAudit({ action: "a", result: "ok" });
+  db.prepare("INSERT INTO audit_log (ts, action, result) VALUES (?, 'prune-test', 'ok')").run(old);
+  db.prepare("INSERT INTO audit_log (ts, action, result) VALUES (?, 'prune-test', 'ok')").run(old);
+  audit.logAudit({ action: "prune-test", result: "ok" });
   assert.equal(audit.pruneAudit(30), 2);
-  assert.equal((db.prepare("SELECT COUNT(*) c FROM audit_log").get() as { c: number }).c, 1);
+  assert.equal(
+    (db.prepare("SELECT COUNT(*) c FROM audit_log WHERE action = 'prune-test'").get() as { c: number }).c,
+    1,
+  );
   assert.throws(() => audit.pruneAudit(-1));
 });
 

@@ -1,9 +1,6 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { cleanup, git, makeTempDb, makeTempVault } from "./test-support/fixtures";
 import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
@@ -11,15 +8,9 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 // DB_PATH/VAULT_PATH must be set before db.ts/server.ts are loaded (both read
 // the env var at import time), so delay those imports to `before` and point
 // at throwaway temp dirs instead of the real /data/acl.db and /vault.
-const dbDir = mkdtempSync(join(tmpdir(), "second-brain-server-test-db-"));
-process.env.DB_PATH = join(dbDir, "test.db");
-
-const vaultRoot = mkdtempSync(join(tmpdir(), "second-brain-server-test-vault-"));
+makeTempDb();
+const { vault: vaultRoot } = makeTempVault();
 process.env.VAULT_PATH = vaultRoot;
-
-function git(args: string[]): string {
-  return execFileSync("git", args, { cwd: vaultRoot, encoding: "utf8" });
-}
 
 let createToken: typeof import("./auth/tokens").createToken;
 let db: typeof import("./db").db;
@@ -35,10 +26,6 @@ let tokenOtherSection: string; // same project, different section
 let tokenB: string; // scoped only on proj-b/sect-b (different project+section)
 
 before(async () => {
-  git(["init", "-b", "main"]);
-  git(["config", "user.name", "Test User"]);
-  git(["config", "user.email", "test@example.com"]);
-
   ({ createToken } = await import("./auth/tokens"));
   ({ db } = await import("./db"));
   ({ createApp } = await import("./server"));
@@ -76,8 +63,7 @@ after(async () => {
   await new Promise<void>((resolve, reject) => {
     server.close((err) => (err ? reject(err) : resolve()));
   });
-  rmSync(vaultRoot, { recursive: true, force: true });
-  rmSync(dbDir, { recursive: true, force: true });
+  cleanup();
 });
 
 function textOf(result: CallToolResult): string {
@@ -104,17 +90,17 @@ test("kb_write then kb_read with correctly-scoped token succeeds end-to-end", as
         project: "proj-a",
         section: "sect-a",
         note: "note-1",
-        content: "hello from pr4\n",
+        content: "hello\n",
       },
     });
     assert.ok(!writeResult.isError, "write should not be a tool error");
     const commitSha = textOf(writeResult as CallToolResult);
     assert.match(commitSha, /^[0-9a-f]{40}$/);
 
-    const headSha = git(["rev-parse", "HEAD"]).trim();
+    const headSha = git(["rev-parse", "HEAD"], vaultRoot).trim();
     assert.equal(commitSha, headSha);
 
-    const log = git(["log", "--oneline", "-1"]);
+    const log = git(["log", "--oneline", "-1"], vaultRoot);
     assert.match(log, /kb_write: proj-a\/sect-a\/note-1 via token-a/);
 
     const readResult = await client.callTool({
@@ -122,7 +108,7 @@ test("kb_write then kb_read with correctly-scoped token succeeds end-to-end", as
       arguments: { project: "proj-a", section: "sect-a", note: "note-1" },
     });
     assert.ok(!readResult.isError, "read should not be a tool error");
-    assert.equal(textOf(readResult as CallToolResult), "hello from pr4\n");
+    assert.equal(textOf(readResult as CallToolResult), "hello\n");
   } finally {
     await transport.close();
   }
@@ -191,7 +177,7 @@ test("a malformed note name is reported distinctly from a real internal error", 
     assert.equal(textOf(result as CallToolResult), "Invalid project/section/note name.");
 
     const row = db
-      .prepare("SELECT result, detail FROM audit_log WHERE action = 'kb_read' ORDER BY id DESC LIMIT 1")
+      .prepare("SELECT result, detail FROM audit_log WHERE action = 'kb_read' AND token_name = 'token-a' ORDER BY id DESC LIMIT 1")
       .get() as { result: string; detail: string };
     assert.equal(row.result, "error");
     assert.match(row.detail, /invalid note slug/);
@@ -201,11 +187,22 @@ test("a malformed note name is reported distinctly from a real internal error", 
 });
 
 test("read-only token cannot write; same-project other-section token is denied", async () => {
+  // Seed its own note instead of relying on an earlier test's write.
+  const seeder = await connectClient(tokenA);
+  try {
+    const seeded = await seeder.client.callTool({
+      name: "kb_write",
+      arguments: { project: "proj-a", section: "sect-a", note: "note-ro-read", content: "seed\n" },
+    });
+    assert.ok(!seeded.isError);
+  } finally {
+    await seeder.transport.close();
+  }
   const ro = await connectClient(tokenRO);
   try {
     const read = await ro.client.callTool({
       name: "kb_read",
-      arguments: { project: "proj-a", section: "sect-a", note: "note-1" },
+      arguments: { project: "proj-a", section: "sect-a", note: "note-ro-read" },
     });
     assert.ok(!read.isError);
     const write = await ro.client.callTool({
@@ -230,7 +227,7 @@ test("read-only token cannot write; same-project other-section token is denied",
   } finally {
     await other.transport.close();
   }
-  assert.throws(() => git(["cat-file", "-e", "HEAD:proj-a/sect-a/note-ro.md"]));
+  assert.throws(() => git(["cat-file", "-e", "HEAD:proj-a/sect-a/note-ro.md"], vaultRoot));
 });
 
 test("audit_log has the expected ok/denied rows", async () => {
@@ -321,7 +318,7 @@ test("body over 1 MB gets a JSON-RPC 413 and leaves an audit row; unauthenticate
 
 test("oversized content (under the body limit) is rejected and nothing is written", async () => {
   const { client, transport } = await connectClient(tokenA);
-  const head = git(["rev-parse", "HEAD"]).trim();
+  const head = git(["rev-parse", "HEAD"], vaultRoot).trim();
   try {
     let isError = false;
     try {
@@ -334,7 +331,7 @@ test("oversized content (under the body limit) is rejected and nothing is writte
       isError = true;
     }
     assert.ok(isError);
-    assert.equal(git(["rev-parse", "HEAD"]).trim(), head);
+    assert.equal(git(["rev-parse", "HEAD"], vaultRoot).trim(), head);
   } finally {
     await transport.close();
   }

@@ -1,12 +1,10 @@
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
 import {
   chmodSync,
   existsSync,
   lstatSync,
   mkdirSync,
-  mkdtempSync,
   readFileSync,
   readdirSync,
   rmSync,
@@ -14,7 +12,6 @@ import {
   utimesSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
@@ -33,58 +30,15 @@ import {
   syncWrite,
   writeNoteAtomic,
 } from "./git";
+import { cleanup, cloneRepo, git, makeBareRemote, makeTempVault, newRepo, sleep, tmp } from "../test-support/fixtures";
 
-const cleanup: string[] = [];
-after(() => {
-  for (const d of cleanup) rmSync(d, { recursive: true, force: true });
-});
-
-function tmp(prefix: string): string {
-  const d = mkdtempSync(join(tmpdir(), `sb-git-${prefix}-`));
-  cleanup.push(d);
-  return d;
-}
-
-function git(args: string[], cwd: string): string {
-  return execFileSync("git", args, { cwd, encoding: "utf8" });
-}
-
-function configure(dir: string): void {
-  git(["config", "user.name", "Test User"], dir);
-  git(["config", "user.email", "test@example.com"], dir);
-}
-
-function newRepo(): string {
-  const dir = tmp("repo");
-  git(["init", "-b", "main"], dir);
-  configure(dir);
-  return dir;
-}
+after(cleanup);
 
 // A vault clone with a seeded bare remote.
-function newVaultWithRemote(): { vault: string; remote: string } {
-  const remote = tmp("remote");
-  git(["init", "--bare", "-b", "main"], remote);
-  const vault = tmp("vault");
-  git(["clone", remote, "."], vault);
-  git(["checkout", "-B", "main"], vault);
-  configure(vault);
-  writeFileSync(join(vault, "seed.md"), "seed\n");
-  git(["add", "."], vault);
-  git(["commit", "-m", "seed"], vault);
-  git(["push", "-u", "origin", "main"], vault);
-  return { vault, remote };
-}
+const newVaultWithRemote = () => makeTempVault({ remote: true }) as { vault: string; remote: string };
 
 function otherClone(remote: string): string {
-  const dir = tmp("other");
-  git(["clone", remote, "."], dir);
-  configure(dir);
-  return dir;
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((r) => setTimeout(r, ms));
+  return cloneRepo(remote, "other");
 }
 
 test("hasRemote false without a remote; pullRebase is a no-op", async () => {
@@ -317,12 +271,8 @@ test("autostash re-apply conflict is treated as a conflict; human change kept in
 });
 
 test("pull works when the remote was added without upstream tracking", async () => {
-  const remote = tmp("remote");
-  git(["init", "--bare", "-b", "main"], remote);
-  const seed = tmp("seed");
-  git(["clone", remote, "."], seed);
-  git(["checkout", "-B", "main"], seed);
-  configure(seed);
+  const remote = makeBareRemote();
+  const seed = cloneRepo(remote, "seed");
   writeFileSync(join(seed, "a.md"), "a\n");
   git(["add", "."], seed);
   git(["commit", "-m", "a"], seed);

@@ -8,8 +8,8 @@
 # the prod domain/TLS.
 #
 # Deployable once an image tagged IMAGE_TAG is published to
-# `ghcr.io/barlito/second-brain-mcp` (CI only builds for now; publishing comes
-# with the deploy phase) and the `vault_deploy_key` secret exists.
+# `ghcr.io/barlito/second-brain-mcp` (CI only builds it; publishing is part of
+# the deploy flow) and the `vault_deploy_key` secret exists.
 # Images are referenced by immutable tag: `IMAGE_TAG=<tag> make deploy.prod`.
 #
 # Prerequisite (once): docker secret create vault_deploy_key <private key file>
@@ -69,7 +69,7 @@ services:
         # Rate limit sized for a few agents (per source IP)
         - traefik.http.middlewares.second-brain-mcp-ratelimit.ratelimit.average=20
         - traefik.http.middlewares.second-brain-mcp-ratelimit.ratelimit.burst=40
-        # Own Bearer-token ACL (PR2/PR4) -> no Authelia, just rate limit + security headers
+        # Own Bearer-token ACL -> no Authelia, just rate limit + security headers
         - traefik.http.routers.second-brain-mcp-secure.middlewares=second-brain-mcp-ratelimit,security-headers@file
 
 networks:

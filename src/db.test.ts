@@ -1,12 +1,12 @@
-import { test } from "node:test";
+import { test, after } from "node:test";
 import assert from "node:assert/strict";
-import { chmodSync, mkdtempSync, statSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { chmodSync, statSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import Database from "better-sqlite3";
+import { cleanup, makeTempDb } from "./test-support/fixtures";
 
-const tmpDir = mkdtempSync(join(tmpdir(), "second-brain-db-test-"));
-process.env.DB_PATH = join(tmpDir, "main.db");
+const tmpDir = dirname(makeTempDb("main.db"));
+after(cleanup);
 
 const OLD_SCHEMA = `
   CREATE TABLE tokens (

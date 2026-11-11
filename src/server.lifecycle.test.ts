@@ -1,9 +1,11 @@
-import "./server.helpers.test";
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { cleanupDirs, git, listen, newRepo, tmp } from "./server.helpers.test";
+import { cleanup, git, makeBareRemote, makeTempDb, newRepo, tmp } from "./test-support/fixtures";
+import { listen } from "./test-support/server";
+
+makeTempDb();
 
 let server: typeof import("./server");
 let gitMod: typeof import("./vault/git");
@@ -12,7 +14,7 @@ before(async () => {
   server = await import("./server");
   gitMod = await import("./vault/git");
 });
-after(cleanupDirs);
+after(cleanup);
 
 test("initVault initialises an empty dir without a remote and describes it", async () => {
   const dir = tmp("empty");
@@ -23,8 +25,7 @@ test("initVault initialises an empty dir without a remote and describes it", asy
 });
 
 test("initVault clones from a remote and never logs credentials", async () => {
-  const remote = tmp("remote");
-  git(["init", "--bare", "-b", "main"], remote);
+  const remote = makeBareRemote();
   const dir = tmp("clone");
   const line = await server.initVault(dir, { VAULT_REMOTE_URL: remote, VAULT_BRANCH: "main" });
   assert.match(line, /remote=yes branch=main/);
