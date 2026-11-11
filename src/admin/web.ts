@@ -6,7 +6,7 @@ import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypt
 import type { Server } from "node:http";
 import express, { Express, NextFunction, Request, Response } from "express";
 import { db } from "../db";
-import { createToken, listTokens, revokeToken, TokenValidationError, validateTokenInput } from "../auth/tokens";
+import { countActiveTokens, createToken, listTokens, revokeToken, TokenValidationError, validateTokenInput } from "../auth/tokens";
 import { dropRedundantScopes, formatScope, parseScopes, PRESETS, wildcardWarnings } from "../cli/token";
 import type { Scope } from "../auth/types";
 import { dbOk, getBootInfo, vaultOk } from "../health";
@@ -108,7 +108,7 @@ const FLASH_RE = /^[0-9a-f]{32}$/;
 
 type Flash =
   | { kind: "banner"; banner: Banner }
-  | { kind: "token"; created: { id: string; name: string; token: string }; notes: string[] };
+  | { kind: "token"; created: { id: string; name: string; token: string; expires_at: string | null }; notes: string[] };
 
 async function dashboardData(vaultRoot: string): Promise<DashboardData> {
   const vault = vaultOk(vaultRoot);
@@ -117,6 +117,13 @@ async function dashboardData(vaultRoot: string): Promise<DashboardData> {
   const sync = getSyncStatus(vaultRoot);
   const since = new Date(Date.now() - DAY_MS).toISOString();
   // A broken DB must not take the dashboard down: failed counts show as n/a.
+  const safeCount = (fn: () => number): number | null => {
+    try {
+      return fn();
+    } catch {
+      return null;
+    }
+  };
   const count = (sql: string, ...args: unknown[]): number | null => {
     try {
       return (db.prepare(sql).get(...args) as { n: number }).n;
@@ -140,7 +147,7 @@ async function dashboardData(vaultRoot: string): Promise<DashboardData> {
     lastPushAt: sync.lastPushAt,
     lastError: sync.lastError ? `${sync.lastError.kind} at ${sync.lastError.at}` : null,
     conflictBranches: sync.conflictBranches,
-    activeTokens: count("SELECT COUNT(*) AS n FROM tokens WHERE revoked_at IS NULL"),
+    activeTokens: safeCount(countActiveTokens),
     pendingProposals: pending,
     audit24h: count("SELECT COUNT(*) AS n FROM audit_log WHERE ts >= ?", since),
   };
@@ -303,6 +310,7 @@ export function createWebAdminApp(opts: WebAdminOptions): Express {
       scopes: str(body.scopes),
       preset: str(body.preset),
       allowWildcard: body.allow_wildcard === "1",
+      expiresInDays: str(body.expires_in_days).trim(),
     };
     const fail = (title: string, lines: string[] = []): void =>
       send(res, tokensView(ctxOf(res), listTokens(), { kind: "err", title, lines }, form), 422);
@@ -322,13 +330,18 @@ export function createWebAdminApp(opts: WebAdminOptions): Express {
       if (warnings.length > 0 && !form.allowWildcard) {
         return fail("Wildcard scopes and presets grant broad access. Tick \"Allow wildcard\" to confirm. No token created.", warnings);
       }
-      const created = createToken(validated.name, kept);
+      let expiresInDays: number | undefined;
+      if (form.expiresInDays) {
+        if (!/^\d{1,4}$/.test(form.expiresInDays)) return fail("Expires in (days) must be an integer between 1 and 3650.");
+        expiresInDays = Number(form.expiresInDays);
+      }
+      const created = createToken(validated.name, kept, { expiresInDays });
       const notes = [
         ...warnings,
         ...dropped.map((s) => `Dropped redundant scope ${formatScope(s)} (already covered by a wildcard scope).`),
       ];
       // Flash first: nothing after the token exists may lose the one chance to show it.
-      const to = `/tokens/created/${flash.put({ kind: "token", created: { id: created.id, name: created.name, token: created.token }, notes }, userOf(res))}`;
+      const to = `/tokens/created/${flash.put({ kind: "token", created: { id: created.id, name: created.name, token: created.token, expires_at: created.expires_at ?? null }, notes }, userOf(res))}`;
       auditAdmin(res, "admin_token_create", "ok", `${created.id} ${created.name} [${kept.map(formatScope).join(",")}]`);
       res.redirect(303, to);
     } catch (err) {

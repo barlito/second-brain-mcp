@@ -536,3 +536,30 @@ test("dashboard survives a broken database: unhealthy badge and n/a counts, no 5
   // Healthy again afterwards
   assert.match((await get("/")).body, /Database: <span class="badge ok">/);
 });
+
+test("tokens: expiry field on create, expiry/expired in the table, dashboard counts only live tokens", async () => {
+  const stat = async (): Promise<number> => Number(/<div class="n">(\d+)<\/div><div class="l">active tokens/.exec((await get("/")).body)![1]);
+  const before = await stat();
+
+  const bad = await post("/tokens", { name: "exp-bad", scopes: "sp:pj:notes:read", expires_in_days: "0" });
+  assert.equal(bad.status, 422);
+  assert.equal((await post("/tokens", { name: "exp-bad2", scopes: "sp:pj:notes:read", expires_in_days: "abc" })).status, 422);
+  assert.equal(tokens.listTokens().filter((t) => t.name.startsWith("exp-bad")).length, 0);
+
+  const res = await post("/tokens", { name: "exp-ok", scopes: "sp:pj:notes:read", expires_in_days: "7" });
+  assert.equal(res.status, 303);
+  const page = await get(String(res.headers.location));
+  const row = tokens.listTokens().find((t) => t.name === "exp-ok")!;
+  assert.ok(row.expires_at);
+  assert.ok(page.body.includes(row.expires_at!), "created page shows expiry");
+  assert.equal(await stat(), before + 1);
+
+  const list = await get("/tokens");
+  assert.ok(list.body.includes(row.expires_at!), "table shows expiry");
+
+  db.prepare("UPDATE tokens SET expires_at = ? WHERE id = ?").run(new Date(Date.now() - 1000).toISOString(), row.id);
+  const expired = await get("/tokens");
+  assert.match(expired.body, /<span class="badge err">expired<\/span>/);
+  assert.equal(await stat(), before, "expired token not counted as active");
+  assert.match(expired.body, new RegExp(`/tokens/${row.id}/revoke`), "revoke still offered");
+});

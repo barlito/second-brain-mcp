@@ -112,6 +112,10 @@ docker service rollback second-brain-mcp_second-brain-mcp
 IMAGE_TAG=<previous-tag> make deploy.prod
 ```
 
+**Schema migrations are one-way.** The app upgrades `acl.db` on boot (e.g. migration 6 adds `tokens.expires_at`) and an older image refuses a database whose schema is newer than it knows. Rolling back to an image older than the current DB schema therefore requires restoring the pre-deploy backup (stop the stack, replace `acl.db` in the `acl-data` volume with the copy taken before the upgrade). Tokens created or revoked after that backup are lost with it.
+
+**Before every deploy (`make deploy` or `make deploy.prod`) run `make backup-db`.** Neither target takes a backup itself, so this step is manual and is what makes a rollback past a migration possible.
+
 The SQLite database and the vault live on named volumes and survive redeploys. Restoring a database backup means stopping the stack and replacing `acl.db` in the `acl-data` volume (not scripted).
 
 ## Troubleshooting

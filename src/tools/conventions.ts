@@ -67,6 +67,7 @@ Starting a session on a project:
 
 Working rules:
 - Find notes with kb_search (or kb_list to browse).
+- kb_history shows a note's git history (who changed what, when), following archive moves.
 - Keep notes short and focused: one topic per note, link to related notes.
 - Add journal entries with kb_append (journal/YYYY-MM); it writes one timestamped line.
 - When you add an important note, update the Docs map in overview/index. Keep that note small; move detail elsewhere.

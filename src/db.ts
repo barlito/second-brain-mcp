@@ -135,6 +135,10 @@ export const MIGRATIONS: ReadonlyArray<Migration> = [
       ALTER TABLE scopes_new RENAME TO scopes;
     `);
   } },
+  // 6: optional token expiry (ISO UTC string; NULL = never expires)
+  { tables: [], up: (d) => {
+    d.exec("ALTER TABLE tokens ADD COLUMN expires_at TEXT");
+  } },
 ];
 
 // Applies migration index `v` under BEGIN IMMEDIATE. user_version is re-read inside the

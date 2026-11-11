@@ -5,6 +5,7 @@ import { RegisterTool } from "./tools/common";
 import { SERVER_INSTRUCTIONS } from "./tools/conventions";
 import { register as registerKbAppend } from "./tools/kbAppend";
 import { register as registerKbArchive } from "./tools/kbArchive";
+import { register as registerKbHistory } from "./tools/kbHistory";
 import { register as registerKbInitProject } from "./tools/kbInitProject";
 import { register as registerKbPropose } from "./tools/kbPropose";
 import { register as registerKbRead } from "./tools/kbRead";
@@ -25,6 +26,7 @@ const TOOLS: RegisterTool[] = [
   registerKbArchive,
   registerKbList,
   registerKbSearch,
+  registerKbHistory,
   registerKbInitProject,
   registerKbPropose,
 ];
