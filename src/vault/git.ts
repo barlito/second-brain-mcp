@@ -1128,6 +1128,7 @@ export function syncInboxResolve(
 export interface NoteHistoryEntry {
   sha: string;
   date: string;
+  author: string;
   subject: string;
 }
 
@@ -1153,7 +1154,7 @@ export async function noteHistory(
   // Per commit: a header line starting with \x01, then "M\tpath" or "R100\told\tnew" for the
   // followed file. A path git had to quote is not a valid slug path, so canRead refuses it.
   const out = await runGit(
-    ["log", "--follow", "--name-status", "--format=%x01%h%x09%aI%x09%s", "--", rel],
+    ["log", "--follow", "--name-status", "--format=%x01%h%x09%aI%x09%an%x09%s", "--", rel],
     vaultRoot,
   );
   const entries: NoteHistoryEntry[] = [];
@@ -1170,8 +1171,8 @@ export async function noteHistory(
       restricted = true;
       break;
     }
-    const [sha, date, ...rest] = header.split("\t");
-    entries.push({ sha, date, subject: rest.join("\t") });
+    const [sha, date, author, ...rest] = header.split("\t");
+    entries.push({ sha, date, author, subject: rest.join("\t") });
     if (entries.length >= limit) break;
   }
   return { path: rel, entries, restricted };

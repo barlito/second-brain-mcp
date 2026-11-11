@@ -9,6 +9,9 @@ import { html, raw, SafeHtml } from "./html";
 // javascript:/vbscript:/data: URLs.
 const md = new MarkdownIt({ html: false, linkify: false });
 
+// The one safe renderer (inbox + vault).
+export const renderMd = (s: string): SafeHtml => raw(md.render(s));
+
 export interface Ctx {
   user: string;
   csrf: string;
@@ -33,6 +36,8 @@ const NAV: Array<[string, string]> = [
   ["/", "Dashboard"],
   ["/tokens", "Tokens"],
   ["/inbox", "Inbox"],
+  ["/vault", "Vault"],
+  ["/audit", "Audit"],
 ];
 
 export function layout(ctx: Ctx, active: string, title: string, body: SafeHtml): SafeHtml {
@@ -59,10 +64,10 @@ ${body}
 </html>`;
 }
 
-const csrfField = (ctx: Ctx): SafeHtml =>
+export const csrfField = (ctx: Ctx): SafeHtml =>
   html`<input type="hidden" name="csrf" value="${ctx.csrf}"><input type="hidden" name="nonce" value="${ctx.nonce()}">`;
 
-const fmtSize = (n: number): string => (n < 1024 ? `${n} B` : `${(n / 1024).toFixed(1)} KiB`);
+export const fmtSize = (n: number): string => (n < 1024 ? `${n} B` : `${(n / 1024).toFixed(1)} KiB`);
 
 // ---- dashboard -------------------------------------------------------------
 

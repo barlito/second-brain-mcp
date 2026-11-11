@@ -1,22 +1,12 @@
-import { existsSync } from "node:fs";
 import { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { getTokenContext } from "../auth/context";
 import { checkScope } from "../acl/check";
 import { logAudit } from "../audit";
-import { isValidSlug, resolveNotePath } from "../vault/paths";
-import { MoveSourceDirtyError, MoveSourceMissingError, MoveTargetExistsError, redact, syncMove } from "../vault/git";
+import { isValidSlug } from "../vault/paths";
+import { redact } from "../vault/git";
 import { kbArgsShape, RegisterTool, toolError, toolText, withAclAndAudit } from "./common";
+import { archiveNote } from "./archiveNote";
 import { ARCHIVE_SECTION } from "./reserved";
-
-const MAX_SLUG = 64;
-const MAX_ATTEMPTS = 50;
-
-// n=1 -> "<stem>", n>=2 -> "<stem>-<n>"; the stem is truncated to stay a valid slug.
-export function archiveName(section: string, note: string, n: number): string {
-  const suffix = n === 1 ? "" : `-${n}`;
-  const stem = `${section}-${note}`.slice(0, MAX_SLUG - suffix.length).replace(/-+$/, "");
-  return stem + suffix;
-}
 
 // Archiving also writes into <space>:<project>:archive, so it needs write there too.
 // Checked (and a denial audited) before any filesystem access. The source-section
@@ -66,43 +56,16 @@ export const register: RegisterTool = (server, { vaultRoot }) => {
     async ({ space, project, section, note }): Promise<CallToolResult> => {
       if (archiveWriteDenied(space, project, section, note)) return toolError("Permission denied.");
       return withAclAndAudit("kb_archive", { space, project, section, note }, "write", async (ctx) => {
-        if (section === ARCHIVE_SECTION) {
-          return { toolResult: toolError("Note is already archived."), audit: { detail: "already in archive" } };
-        }
-        if (section === "overview" && note === "index") {
-          return { toolResult: toolError("The project entry note (overview/index) cannot be archived."), audit: { detail: "entry note" } };
-        }
-        const from = resolveNotePath(vaultRoot, space, project, section, note);
-        if (!existsSync(from)) {
-          return { toolResult: toolError("Note not found."), audit: { detail: "note not found" } };
-        }
-
-        const msg = `kb_archive: ${space}/${project}/${section}/${note} via ${ctx.name}`;
-        for (let n = 1; n <= MAX_ATTEMPTS; n++) {
-          const name = archiveName(section, note, n);
-          const to = resolveNotePath(vaultRoot, space, project, ARCHIVE_SECTION, name);
-          if (existsSync(to)) continue;
-          try {
-            const { commitSha } = await syncMove(vaultRoot, from, to, msg);
-            return {
-              toolResult: toolText(`${space}/${project}/archive/${name}`),
-              audit: { gitCommit: commitSha || undefined, detail: `-> archive/${name}` },
-            };
-          } catch (err) {
-            if (err instanceof MoveTargetExistsError) continue; // lost a race: next name
-            if (err instanceof MoveSourceMissingError) {
-              return { toolResult: toolError("Note not found."), audit: { detail: "note not found" } };
-            }
-            if (err instanceof MoveSourceDirtyError) {
-              return {
-                toolResult: toolError("Note has uncommitted changes in the vault; commit or discard them first."),
-                audit: { detail: "uncommitted changes" },
-              };
-            }
-            throw err;
-          }
-        }
-        return { toolResult: toolError("Too many archived notes with this name."), audit: { detail: "no free archive name" } };
+        const r = await archiveNote(
+          vaultRoot,
+          { space, project, section, note },
+          `kb_archive: ${space}/${project}/${section}/${note} via ${ctx.name}`,
+        );
+        if (!r.ok) return { toolResult: toolError(r.message), audit: { detail: r.detail } };
+        return {
+          toolResult: toolText(`${space}/${project}/archive/${r.name}`),
+          audit: { gitCommit: r.commitSha || undefined, detail: `-> archive/${r.name}` },
+        };
       });
     },
   );

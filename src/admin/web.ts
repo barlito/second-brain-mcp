@@ -32,6 +32,9 @@ import {
 } from "../web/views";
 import { OneTimeStore } from "./onetime";
 import { acceptProposal, AdminError, listInbox, rejectProposal, showProposal } from "./service";
+import { vaultRouter } from "./vaultRoutes";
+import { queryAudit } from "../audit";
+import { auditView } from "../web/auditView";
 
 export const DEFAULT_WEB_PORT = 3002;
 export const DEFAULT_ADMIN_GROUP = "admins";
@@ -254,7 +257,10 @@ export function createWebAdminApp(opts: WebAdminOptions): Express {
 
   // State-changing requests: same-host Origin/Referer, session-bound CSRF token, then a
   // one-time form nonce (a replayed or duplicate POST is refused).
-  app.use(express.urlencoded({ extended: false, limit: "32kb" }));
+  // /vault carries whole notes (cap 512K chars, up to 3 bytes/char once percent-encoded).
+  const smallForm = express.urlencoded({ extended: false, limit: "32kb" });
+  const noteForm = express.urlencoded({ extended: false, limit: "8mb" });
+  app.use((req, res, next) => (req.path.startsWith("/vault/") ? noteForm : smallForm)(req, res, next));
   app.use((req, res, next) => {
     if (req.method === "GET" || req.method === "HEAD") return next();
     if (req.method !== "POST") return void res.status(405).type("text/plain").send("method not allowed");
@@ -425,6 +431,39 @@ export function createWebAdminApp(opts: WebAdminOptions): Express {
   inboxRouter.post("/:id/accept", resolveWith((id, body, actor) => acceptProposal(vaultRoot, id, body.overwrite === "1", actor), "Accepted"));
   inboxRouter.post("/:id/reject", resolveWith((id, _body, actor) => rejectProposal(vaultRoot, id, actor), "Rejected"));
   app.use("/inbox", inboxRouter);
+
+  // ---- vault browser / editor ----
+
+  app.use(
+    "/vault",
+    vaultRouter({
+      vaultRoot,
+      ctxOf,
+      send,
+      takeBanner,
+      redirectBanner: (res, to, banner) => redirectWithFlash(res, to, { kind: "banner", banner }),
+    }),
+  );
+
+  // ---- audit log (read-only) ----
+
+  const AUDIT_ACTION_RE = /^[a-z0-9_]{1,64}$/;
+  const AUDIT_ID_RE = /^[1-9]\d{0,14}$/;
+  app.get("/audit", (req, res) => {
+    const bad = (m: string): void => send(res, errorView(ctxOf(res), 400, m), 400);
+    // Empty form fields mean "no filter"; anything else must validate.
+    const opt = (v: unknown): string | undefined => (typeof v === "string" && v !== "" ? v : undefined);
+    const before = opt(req.query.before);
+    const token = opt(req.query.token);
+    const action = opt(req.query.action);
+    if (req.query.before !== undefined && typeof req.query.before !== "string") return bad("invalid filter");
+    if (before !== undefined && !AUDIT_ID_RE.test(before)) return bad("invalid before id");
+    if (action !== undefined && !AUDIT_ACTION_RE.test(action)) return bad("invalid action filter");
+    if (token !== undefined && (token.length > 256 || /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(token))) return bad("invalid token filter");
+    if (["token", "action"].some((k) => req.query[k] !== undefined && typeof req.query[k] !== "string")) return bad("invalid filter");
+    const { rows, nextBefore } = queryAudit({ before: before === undefined ? undefined : Number(before), tokenName: token, action });
+    send(res, auditView(ctxOf(res), rows, nextBefore, { token, action }));
+  });
 
   app.use((_req, res) => void send(res, errorView(ctxOf(res), 404, "Page not found."), 404));
   // Never leak internals; the real reason goes to the log only.
