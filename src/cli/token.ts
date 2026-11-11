@@ -88,6 +88,7 @@ function cmdCreate(argv: string[]): void {
       scope: { type: "string" },
       preset: { type: "string" },
       "allow-wildcard": { type: "boolean" },
+      "expires-in-days": { type: "string" },
     },
   });
   const { name, scope, preset } = values;
@@ -114,11 +115,19 @@ function cmdCreate(argv: string[]): void {
   }
   for (const s of dropped) console.error(`note: dropped redundant scope ${formatScope(s)} (already covered by a wildcard scope)`);
 
-  const created = createToken(name, scopes);
+  let expiresInDays: number | undefined;
+  const rawDays = values["expires-in-days"];
+  if (rawDays !== undefined) {
+    if (!/^\d+$/.test(rawDays)) fail("--expires-in-days must be an integer between 1 and 3650");
+    expiresInDays = Number(rawDays);
+  }
+
+  const created = createToken(name, scopes, { expiresInDays });
   console.log("Token created. The plaintext token is shown ONLY ONCE below — store it now:");
   console.log("");
   console.log(`  id:    ${created.id}`);
   console.log(`  token: ${created.token}`);
+  if (created.expires_at) console.log(`  expires_at: ${created.expires_at}`);
   console.log("");
 }
 
@@ -139,6 +148,7 @@ function cmdList(): void {
         `created_at=${t.created_at}`,
         `revoked_at=${t.revoked_at ?? "-"}`,
         `last_used_at=${t.last_used_at ?? "never"}`,
+        `expires_at=${t.expires_at ? t.expires_at + (t.expired ? " (EXPIRED)" : "") : "-"}`,
         `scopes=[${scopesStr}]`,
       ].join("  "),
     );

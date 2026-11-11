@@ -135,3 +135,22 @@ test("CLI end-to-end: wildcards need --allow-wildcard, warnings go to stderr bef
   assert.match(list.stdout, /name=ex .*scopes=\[pro:x:y:read\]/);
   assert.match(list.stdout, /name=red .*scopes=\[\*:\*:\*:read\]/);
 });
+
+test("CLI: --expires-in-days is stored, shown by list, and validated", () => {
+  const run = (...args: string[]) =>
+    spawnSync(process.execPath, ["--import", "tsx", join(__dirname, "token.ts"), ...args], {
+      env: { ...process.env, DB_PATH: dbPath },
+      encoding: "utf8",
+    });
+  const ok = run("create", "--name", "exp", "--scope", "pro:x:y:read", "--expires-in-days", "7");
+  assert.equal(ok.status, 0, ok.stderr);
+  assert.match(ok.stdout, /expires_at: \d{4}-/);
+  const list = run("list").stdout;
+  assert.match(list, /name=exp .*expires_at=\d{4}-\d\d-\d\dT\S+  scopes=/);
+  assert.match(list, /name=ex .*expires_at=-  scopes=/);
+  for (const bad of ["0", "3651", "abc", "1.5"]) {
+    const r = run("create", "--name", "badexp", "--scope", "pro:x:y:read", "--expires-in-days", bad);
+    assert.notEqual(r.status, 0, bad);
+    assert.match(r.stderr, /1 and 3650/);
+  }
+});

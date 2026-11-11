@@ -73,4 +73,39 @@ test("listTokens never exposes token_hash or plaintext", () => {
   }
 });
 
+const sc = [{ space: "sp", project: "proj", section: "sect", permission: "read" as const }];
+
+test("expiry: not-yet-expired accepted, expired rejected like revoked, list shows both", async () => {
+  const { db } = await import("../db");
+  const never = createToken("never", sc);
+  const soon = createToken("soon", sc, { expiresInDays: 30 });
+  const abs = createToken("abs", sc, { expiresAt: new Date(Date.now() + 3600_000).toISOString() });
+  assert.equal(never.expires_at, null);
+  assert.ok(Date.parse(soon.expires_at!) > Date.now() + 29 * 86_400_000);
+  assert.ok(verifyToken(never.token));
+  assert.ok(verifyToken(soon.token));
+  assert.ok(verifyToken(abs.token));
+
+  db.prepare("UPDATE tokens SET expires_at = ? WHERE id = ?").run(new Date(Date.now() - 1000).toISOString(), soon.id);
+  assert.equal(verifyToken(soon.token), null);
+  assert.ok(verifyToken(abs.token));
+
+  const list = listTokens();
+  const byId = (id: string) => list.find((t) => t.id === id)!;
+  assert.equal(byId(never.id).expires_at, null);
+  assert.equal(byId(never.id).expired, false);
+  assert.equal(byId(soon.id).expired, true);
+  assert.equal(byId(abs.id).expired, false);
+  assert.equal(byId(abs.id).expires_at, abs.expires_at);
+});
+
+test("expiry: invalid options are rejected", () => {
+  assert.throws(() => createToken("x", sc, { expiresInDays: 0 }), /between 1 and 3650/);
+  assert.throws(() => createToken("x", sc, { expiresInDays: 3651 }), /between 1 and 3650/);
+  assert.throws(() => createToken("x", sc, { expiresInDays: 1.5 }), /between 1 and 3650/);
+  assert.throws(() => createToken("x", sc, { expiresAt: "nonsense" }), /valid ISO/);
+  assert.throws(() => createToken("x", sc, { expiresAt: "2000-01-01T00:00:00Z" }), /in the future/);
+  assert.throws(() => createToken("x", sc, { expiresAt: "2999-01-01T00:00:00Z", expiresInDays: 1 }), /not both/);
+});
+
 after(cleanup);

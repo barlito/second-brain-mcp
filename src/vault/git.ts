@@ -1124,3 +1124,41 @@ export function syncInboxResolve(
     return finishLocked(vaultRoot, remote, { commitSha });
   });
 }
+
+export interface NoteHistoryEntry {
+  sha: string;
+  date: string;
+  subject: string;
+}
+
+// Read-only: git log of one note, following renames. No vault lock needed.
+// `path` is the vault-relative path (forward slashes) git was asked about.
+export async function noteHistory(
+  vaultRoot: string,
+  absolutePath: string,
+  limit: number,
+): Promise<{ path: string; entries: NoteHistoryEntry[] }> {
+  assertSafePath(vaultRoot, absolutePath);
+  const rel = path.relative(path.resolve(vaultRoot), path.resolve(absolutePath)).split(path.sep).join("/");
+  let out: string;
+  try {
+    out = await runGit(
+      ["log", "--follow", "-n", String(limit), "--format=%h%x09%aI%x09%s", "--", rel],
+      vaultRoot,
+    );
+  } catch (err) {
+    // Fresh repo without any commit: no history, not a failure.
+    if (/does not have any commits yet/.test(String((err as { stderr?: string }).stderr ?? ""))) {
+      return { path: rel, entries: [] };
+    }
+    throw err;
+  }
+  const entries = out
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => {
+      const [sha, date, ...rest] = line.split("\t");
+      return { sha, date, subject: rest.join("\t") };
+    });
+  return { path: rel, entries };
+}
