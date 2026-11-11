@@ -9,6 +9,8 @@ import { verifyToken } from "./auth/tokens";
 import { TokenContext, tokenContextStorage } from "./auth/context";
 import { db } from "./db";
 import { logAudit, logAuthFailure, MAX_FIELD_LEN } from "./audit";
+import { startAdmin, withAdmin } from "./admin";
+import { listen } from "./listen";
 import { createMcpServer } from "./mcp";
 import {
   abortPendingPushes,
@@ -570,13 +572,7 @@ export function createShutdown(deps: ShutdownDeps): (signal?: string) => Promise
   };
 }
 
-// Rejects on listen errors (EADDRINUSE, EACCES, ...): Express 5 hands them to
-// the callback.
-export function listen(app: Express, port: number): Promise<Server> {
-  return new Promise<Server>((resolve, reject) => {
-    const s = app.listen(port, (err?: Error) => (err ? reject(err) : resolve(s)));
-  });
-}
+export { listen };
 
 export async function start(): Promise<{ server: Server; shutdown: (signal?: string) => Promise<void> }> {
   const vaultRoot = process.env.VAULT_PATH;
@@ -633,6 +629,7 @@ export async function start(): Promise<{ server: Server; shutdown: (signal?: str
     process.exit(1);
   }
   console.log(`second-brain-mcp listening on port ${port}`);
+  const adminServer = await startAdmin(vaultRoot, lifecycle);
 
   setSyncEventHandler(auditSyncConflict);
   const intervalRaw = process.env.VAULT_SYNC_INTERVAL_MS;
@@ -640,7 +637,7 @@ export async function start(): Promise<{ server: Server; shutdown: (signal?: str
   const stopSync = intervalMs > 0 ? startPeriodicSync(vaultRoot, intervalMs) : undefined;
 
   shutdown = createShutdown({
-    server,
+    server: withAdmin(server, adminServer),
     lifecycle,
     stopSync: () => {
       stopSync?.();

@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := help
-.PHONY: help deploy deploy.prod prune-local-images undeploy restart logs token-create token-list token-revoke backup-db prune-audit
+.PHONY: help deploy deploy.prod prune-local-images undeploy restart logs token-create token-list token-revoke backup-db prune-audit inbox-list inbox-show inbox-accept inbox-reject
 
 stack_name=second-brain-mcp
 service=second-brain-mcp
@@ -68,7 +68,7 @@ restart: ## Restart (undeploy then deploy)
 logs: ## Follow logs (make logs service=second-brain-mcp)
 	docker service logs -f "$(stack_name)_$(service)"
 
-token-create: ## Create a token (name=X preset=master|master-ro OR scope=sp:proj:sect:perm,...; wildcards/presets need allow_wildcard=1)
+token-create: ## Create a token (name=X preset=master|master-ro OR scope=sp:proj:sect:read|write|propose,...; wildcards/presets need allow_wildcard=1)
 	@$(call exec_in_service,node dist/cli/token.js create --name "$(name)" $(if $(preset),--preset "$(preset)") $(if $(scope),--scope "$(scope)") $(if $(allow_wildcard),--allow-wildcard))
 
 token-list: ## List tokens
@@ -83,3 +83,18 @@ backup-db: ## Consistent SQLite backup to /data/backups/acl-<UTC timestamp>.db
 prune-audit: ## Delete audit rows older than N days (make prune-audit days=90)
 	@test -n "$(days)" || { echo "days is required (make prune-audit days=90)" >&2; exit 1; }
 	@$(call exec_in_service,node dist/cli/maintenance.js prune-audit --days "$(days)")
+
+inbox-list: ## List pending doc proposals
+	@$(call exec_in_service,node dist/cli/inbox.js list)
+
+inbox-show: ## Show a proposal (make inbox-show id=<id>)
+	@test -n "$(id)" || { echo "id is required (make inbox-show id=<id>)" >&2; exit 1; }
+	@$(call exec_in_service,node dist/cli/inbox.js show "$(id)")
+
+inbox-accept: ## Accept a proposal into its target (make inbox-accept id=<id> [overwrite=1])
+	@test -n "$(id)" || { echo "id is required (make inbox-accept id=<id>)" >&2; exit 1; }
+	@$(call exec_in_service,node dist/cli/inbox.js accept "$(id)" $(if $(overwrite),--overwrite))
+
+inbox-reject: ## Reject a proposal (make inbox-reject id=<id>)
+	@test -n "$(id)" || { echo "id is required (make inbox-reject id=<id>)" >&2; exit 1; }
+	@$(call exec_in_service,node dist/cli/inbox.js reject "$(id)")

@@ -651,6 +651,8 @@ export interface WriteOptions {
   // Create-only: refuse if the path exists (any type), checked inside the lock
   // after the pull and the path-safety check.
   mustNotExist?: boolean;
+  // Runs inside the lock after the pull; throwing aborts the write (e.g. inbox quota).
+  precheck?: () => void | Promise<void>;
 }
 
 export function syncWrite(
@@ -757,6 +759,7 @@ function lockedWrite(
     assertSafePath(vaultRoot, absolutePath);
     const remote = await prepareLocked(vaultRoot);
     if (opts.mustNotExist && lstatOrNull(absolutePath)) throw new NoteExistsError();
+    await opts.precheck?.();
 
     const relativePath = path.relative(vaultRoot, absolutePath);
     const previous = existsSync(absolutePath) ? readFileSync(absolutePath) : null;
@@ -1020,4 +1023,104 @@ export async function ensureVaultRepo(
       /* remote has no such branch yet; first push sets upstream */
     }
   }
+}
+
+// ---- inbox review (accept / reject) ---------------------------------------
+
+// The proposal file vanished before the locked step (already accepted/rejected).
+export class InboxMissingError extends Error {
+  constructor() {
+    super("inbox proposal not found");
+    this.name = "InboxMissingError";
+  }
+}
+
+// The proposal cannot be accepted as it stands (malformed, invalid target/content, too large).
+export class InboxInvalidError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "InboxInvalidError";
+  }
+}
+
+// What to do with a proposal: always remove it; on accept also write `content` to targetAbs.
+export interface InboxResolution {
+  message: string;
+  accept?: {
+    targetAbs: string;
+    content: string;
+    // Default false: refuse when the target exists.
+    overwrite?: boolean;
+  };
+}
+
+// Removes an inbox proposal and, on accept, writes its content to the target, in ONE
+// commit under the write lock. `decide` runs INSIDE the lock, after the pull, on the
+// bytes that are about to be committed, so what it validates is exactly what lands.
+// It may throw (InboxInvalidError, NoteRuleError, ...) to abort before any change.
+// commitSha is null when nothing needed committing (untracked proposal, identical target).
+export function syncInboxResolve(
+  vaultRoot: string,
+  inboxAbs: string,
+  decide: (raw: Buffer) => InboxResolution | Promise<InboxResolution>,
+): Promise<{ commitSha: string | null }> {
+  return withLock(vaultRoot, async () => {
+    assertSafePath(vaultRoot, inboxAbs);
+    const remote = await prepareLocked(vaultRoot);
+
+    let st: ReturnType<typeof lstatSync>;
+    try {
+      st = lstatSync(inboxAbs);
+    } catch {
+      throw new InboxMissingError();
+    }
+    if (!st.isFile()) throw new InboxInvalidError("proposal is not a regular file");
+    const inboxPrev = readFileSync(inboxAbs);
+    const { message, accept } = await decide(inboxPrev);
+    if (accept) {
+      assertSafePath(vaultRoot, accept.targetAbs);
+      if (!accept.overwrite && lstatOrNull(accept.targetAbs)) throw new NoteExistsError();
+    }
+
+    const inboxRel = path.relative(vaultRoot, inboxAbs);
+    const targetRel = accept ? path.relative(vaultRoot, accept.targetAbs) : undefined;
+    const targetPrev = accept && existsSync(accept.targetAbs) ? readFileSync(accept.targetAbs) : null;
+    const inHead = (await runGit(["ls-tree", "--name-only", "HEAD", "--", inboxRel], vaultRoot).catch(() => "")).trim() !== "";
+    const headBefore = (await runGit(["rev-parse", "HEAD"], vaultRoot).catch(() => "")).trim();
+
+    let commitSha: string | null = null;
+    try {
+      if (accept && targetRel) {
+        writeNoteAtomic(vaultRoot, accept.targetAbs, accept.content);
+        await runGit(["add", "--", targetRel], vaultRoot);
+      }
+      unlinkSync(inboxAbs);
+      await runGit(["rm", "-q", "--cached", "--ignore-unmatch", "--", inboxRel], vaultRoot);
+      const specs = [...(targetRel ? [targetRel] : []), ...(inHead ? [inboxRel] : [])];
+      if (specs.length > 0) {
+        let staged = true;
+        try {
+          // Exit 0 = nothing staged (identical overwrite): skip the commit, like commitFile.
+          await runGit(["diff", "--cached", "--quiet", "--", ...specs], vaultRoot);
+          staged = false;
+        } catch (err) {
+          if ((err as { code?: unknown }).code !== 1) throw err;
+        }
+        if (staged) {
+          await runGit(["commit", "-m", message, "--", ...specs], vaultRoot);
+          commitSha = (await runGit(["rev-parse", "HEAD"], vaultRoot)).trim();
+        }
+      }
+    } catch (err) {
+      const headNow = (await runGit(["rev-parse", "HEAD"], vaultRoot).catch(() => "")).trim();
+      if (headNow !== headBefore) {
+        console.error(`inbox resolve: error after commit landed, keeping it: ${errText(err)}`);
+        return finishLocked(vaultRoot, remote, { commitSha: headNow });
+      }
+      await restoreNote(vaultRoot, inboxAbs, inboxRel, inboxPrev);
+      if (accept && targetRel) await restoreNote(vaultRoot, accept.targetAbs, targetRel, targetPrev);
+      throw err;
+    }
+    return finishLocked(vaultRoot, remote, { commitSha });
+  });
 }

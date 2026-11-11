@@ -3,6 +3,7 @@ import { z } from "zod";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { getTokenContext, TokenContext } from "../auth/context";
+import { Permission } from "../auth/types";
 import { checkScope } from "../acl/check";
 import { AuditEntry, logAudit } from "../audit";
 import { InvalidSlugError, isValidSlug, UnsafePathError } from "../vault/paths";
@@ -93,7 +94,7 @@ export interface Target {
 export async function withAclAndAudit(
   action: string,
   target: Target,
-  permission: "read" | "write",
+  permission: Permission | Permission[], // an array means any of them suffices
   run: (ctx: TokenContext) => Promise<ToolRunResult>,
 ): Promise<CallToolResult> {
   let ctx: TokenContext | undefined;
@@ -119,7 +120,8 @@ export async function withAclAndAudit(
       }
     }
 
-    if (!checkScope(ctx.scopes, target.space, target.project, target.section, permission)) {
+    const anyOf = Array.isArray(permission) ? permission : [permission];
+    if (!anyOf.some((p) => checkScope(ctx!.scopes, target.space, target.project, target.section, p))) {
       safeAudit({ ...base, result: "denied" }, ctx.name);
       // Generic message: don't reveal whether the space/project/section exists.
       return toolError("Permission denied.");

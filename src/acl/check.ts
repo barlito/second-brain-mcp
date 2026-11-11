@@ -17,7 +17,7 @@ export function wellFormed(s: Scope): boolean {
   return ok;
 }
 
-// A scope level matches exactly or via a trailing "*". read and write are independent.
+// A scope level matches exactly or via a trailing "*". read, write and propose are independent.
 export function checkScope(
   scopes: Scope[],
   space: string,

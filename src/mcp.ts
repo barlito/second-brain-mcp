@@ -6,6 +6,7 @@ import { SERVER_INSTRUCTIONS } from "./tools/conventions";
 import { register as registerKbAppend } from "./tools/kbAppend";
 import { register as registerKbArchive } from "./tools/kbArchive";
 import { register as registerKbInitProject } from "./tools/kbInitProject";
+import { register as registerKbPropose } from "./tools/kbPropose";
 import { register as registerKbRead } from "./tools/kbRead";
 import { register as registerKbWrite } from "./tools/kbWrite";
 import { register as registerKbList } from "./tools/kbList";
@@ -25,6 +26,7 @@ const TOOLS: RegisterTool[] = [
   registerKbList,
   registerKbSearch,
   registerKbInitProject,
+  registerKbPropose,
 ];
 
 export function createMcpServer(vaultRoot: string): McpServer {
