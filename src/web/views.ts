@@ -12,6 +12,8 @@ const md = new MarkdownIt({ html: false, linkify: false });
 export interface Ctx {
   user: string;
   csrf: string;
+  // Fresh one-time form nonce (consumed on POST).
+  nonce: () => string;
 }
 
 export interface Banner {
@@ -57,7 +59,8 @@ ${body}
 </html>`;
 }
 
-const csrfField = (ctx: Ctx): SafeHtml => html`<input type="hidden" name="csrf" value="${ctx.csrf}">`;
+const csrfField = (ctx: Ctx): SafeHtml =>
+  html`<input type="hidden" name="csrf" value="${ctx.csrf}"><input type="hidden" name="nonce" value="${ctx.nonce()}">`;
 
 const fmtSize = (n: number): string => (n < 1024 ? `${n} B` : `${(n / 1024).toFixed(1)} KiB`);
 
@@ -73,9 +76,10 @@ export interface DashboardData {
   lastPushAt: string | null;
   lastError: string | null;
   conflictBranches: string[];
-  activeTokens: number;
-  pendingProposals: number;
-  audit24h: number;
+  // null: the query failed (shown as n/a)
+  activeTokens: number | null;
+  pendingProposals: number | null;
+  audit24h: number | null;
 }
 
 const status = (ok: boolean, yes = "ok", no = "error"): SafeHtml => html`<span class="badge ${ok ? "ok" : "err"}">${ok ? yes : no}</span>`;
@@ -89,20 +93,20 @@ export function dashboardView(ctx: Ctx, d: DashboardData): SafeHtml {
     "Dashboard",
     html`<h1>Dashboard</h1>
 <div class="grid">
-<div class="stat"><div class="n">${d.activeTokens}</div><div class="l">active tokens</div></div>
-<div class="stat"><div class="n">${d.pendingProposals}</div><div class="l">pending proposals</div></div>
-<div class="stat"><div class="n">${d.audit24h}</div><div class="l">audit rows, last 24 h</div></div>
+<div class="stat"><div class="n">${d.activeTokens ?? "n/a"}</div><div class="l">active tokens</div></div>
+<div class="stat"><div class="n">${d.pendingProposals ?? "n/a"}</div><div class="l">pending proposals</div></div>
+<div class="stat"><div class="n">${d.audit24h ?? "n/a"}</div><div class="l">audit rows, last 24 h</div></div>
 </div>
-<div class="card"><h2 style="margin-top:0">Health</h2>
+<div class="card"><h2 class="flush">Health</h2>
 <p>Database: ${status(d.dbOk)} &nbsp; Vault: ${status(d.vaultOk)}</p></div>
-<div class="card"><h2 style="margin-top:0">Sync</h2>
+<div class="card"><h2 class="flush">Sync</h2>
 <p>Remote: ${d.hasRemote ? html`<span class="badge ok">configured</span>` : html`<span class="badge">none (local repo)</span>`}
 &nbsp; Branch: <code>${d.branch ?? "unknown"}</code>
 &nbsp; Unpushed commits: ${d.unpushed ? html`<span class="badge warn">yes</span>` : html`<span class="badge ok">no</span>`}</p>
 <p>Last push: ${push} ${d.lastPushAt ? html`<span class="muted">${d.lastPushAt}</span>` : ""}</p>
 ${d.lastError ? html`<p class="muted">Last sync error: ${d.lastError}</p>` : ""}
 </div>
-<div class="card"><h2 style="margin-top:0">Conflict branches</h2>
+<div class="card"><h2 class="flush">Conflict branches</h2>
 ${
   d.conflictBranches.length === 0
     ? html`<p><span class="badge ok">none</span></p>`
@@ -177,7 +181,7 @@ export function tokenCreatedView(ctx: Ctx, created: { id: string; name: string; 
     "/tokens",
     "Token created",
     html`<h1>Token created</h1>
-<div class="banner warn" role="alert"><strong>Copy this token now.</strong> It is shown only once, is not stored in plaintext and cannot be retrieved later. Reloading this page will not show it again.</div>
+<div class="banner warn" role="alert"><strong>Copy this token now.</strong> It is shown only once, is not stored in plaintext and cannot be retrieved later. Reloading or leaving this page will not show it again.</div>
 ${notes.length ? html`<div class="banner"><ul>${notes.map((n) => html`<li>${n}</li>`)}</ul></div>` : ""}
 <div class="card">
 <p>Name: <strong>${created.name}</strong> <span class="muted mono">(${created.id})</span></p>

@@ -1,19 +1,19 @@
 // Web admin UI listener. Reachable only through Traefik + Authelia: identity headers are
-// trusted solely from a peer in TRUSTED_PROXY, the user must be in ADMIN_GROUP, and every
-// POST needs a same-host Origin/Referer plus an HMAC CSRF token.
-import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
-import { existsSync } from "node:fs";
+// trusted solely from a peer in TRUSTED_PROXY that also presents the Traefik-injected
+// X-SB-Admin-Proxy secret, the user must be in ADMIN_GROUP, and every POST needs a
+// same-host Origin/Referer, a session-bound HMAC CSRF token and a one-time form nonce.
+import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import type { Server } from "node:http";
-import path from "node:path";
 import express, { Express, NextFunction, Request, Response } from "express";
 import { db } from "../db";
 import { createToken, listTokens, revokeToken, TokenValidationError, validateTokenInput } from "../auth/tokens";
 import { dropRedundantScopes, formatScope, parseScopes, PRESETS, wildcardWarnings } from "../cli/token";
 import type { Scope } from "../auth/types";
+import { dbOk, getBootInfo, vaultOk } from "../health";
 import { isValidInboxId, listInboxIds } from "../inbox";
 import { errorMessage, safeAudit } from "../tools/common";
 import { UnsafePathError } from "../vault/paths";
-import { getSyncStatus, hasRemote, redact, refreshConflictBranches, runGit } from "../vault/git";
+import { getSyncStatus, redact, refreshConflictBranches } from "../vault/git";
 import { listen } from "../listen";
 import type { Lifecycle, TrustedProxy } from "../server";
 import type { SafeHtml } from "../web/html";
@@ -21,6 +21,7 @@ import { CSS, JS } from "../web/assets";
 import {
   Banner,
   Ctx,
+  DashboardData,
   dashboardView,
   errorView,
   inboxView,
@@ -29,6 +30,7 @@ import {
   tokensView,
   TokenForm,
 } from "../web/views";
+import { OneTimeStore } from "./onetime";
 import { acceptProposal, AdminError, listInbox, rejectProposal, showProposal } from "./service";
 
 export const DEFAULT_WEB_PORT = 3002;
@@ -45,24 +47,46 @@ export interface WebAdminOptions {
   lifecycle?: Lifecycle;
   adminGroup?: string;
   secret?: string;
+  // Shared secret Traefik injects (X-SB-Admin-Proxy) after Authelia; required, >= 32 chars.
+  proxySecret: string;
+  sessionCookie?: string;
 }
 
+export const MIN_PROXY_SECRET = 32;
+export const PROXY_HEADER = "x-sb-admin-proxy";
+export const DEFAULT_SESSION_COOKIE = "authelia_session";
+
+const BUCKET_MS = 4 * 3_600_000;
 const DAY_MS = 86_400_000;
+const FLASH_TTL_MS = 5 * 60_000;
+const NONCE_TTL_MS = 30 * 60_000;
+
+const sha256 = (v: string): Buffer => createHash("sha256").update(v).digest();
+
+// Constant-time string compare (digests first, so lengths do not leak).
+export const safeEqual = (a: string, b: string): boolean => timingSafeEqual(sha256(a), sha256(b));
 
 // ---- CSRF ------------------------------------------------------------------
 
-export function csrfToken(secret: string, user: string, now = Date.now()): string {
-  return createHmac("sha256", secret).update(`${user}\0${Math.floor(now / DAY_MS)}`).digest("hex");
+// Bound to the user and to the Authelia session cookie: a new login invalidates old tokens.
+export function csrfToken(secret: string, user: string, session: string, now = Date.now()): string {
+  return createHmac("sha256", secret)
+    .update(`${user}\0${sha256(session).toString("hex")}\0${Math.floor(now / BUCKET_MS)}`)
+    .digest("hex");
 }
 
-// Accepts the current and the previous day bucket (a form opened just before midnight).
-export function csrfValid(secret: string, user: string, given: unknown, now = Date.now()): boolean {
-  if (typeof given !== "string" || given.length !== 64) return false;
-  return [now, now - DAY_MS].some((t) => {
-    const want = Buffer.from(csrfToken(secret, user, t));
-    const got = Buffer.from(given);
-    return want.length === got.length && timingSafeEqual(want, got);
-  });
+// Accepts the current and the previous 4-hour bucket.
+export function csrfValid(secret: string, user: string, session: string, given: unknown, now = Date.now()): boolean {
+  if (!session || typeof given !== "string" || given.length !== 64) return false;
+  return [now, now - BUCKET_MS].some((t) => safeEqual(csrfToken(secret, user, session, t), given));
+}
+
+function cookieValue(req: Request, name: string): string {
+  for (const part of (req.headers.cookie ?? "").split(";")) {
+    const i = part.indexOf("=");
+    if (i > 0 && part.slice(0, i).trim() === name) return part.slice(i + 1).trim();
+  }
+  return "";
 }
 
 function sameOrigin(req: Request): boolean {
@@ -80,47 +104,37 @@ function sameOrigin(req: Request): boolean {
 // ---- helpers ---------------------------------------------------------------
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const FLASH_RE = /^[0-9a-f]{32}$/;
 
-function dbOk(): boolean {
-  try {
-    db.prepare("SELECT 1").get();
-    return true;
-  } catch {
-    return false;
-  }
-}
+type Flash =
+  | { kind: "banner"; banner: Banner }
+  | { kind: "token"; created: { id: string; name: string; token: string }; notes: string[] };
 
-async function dashboardData(vaultRoot: string): Promise<import("../web/views").DashboardData> {
-  const vaultOk = existsSync(path.join(vaultRoot, ".git"));
-  let remote = false;
-  let branch: string | null = null;
-  if (vaultOk) {
-    try {
-      remote = await hasRemote(vaultRoot);
-    } catch {
-      /* reported as none */
-    }
-    try {
-      branch = (await runGit(["rev-parse", "--abbrev-ref", "HEAD"], vaultRoot)).trim() || null;
-    } catch {
-      /* no commits yet */
-    }
-    await refreshConflictBranches(vaultRoot);
-  }
+async function dashboardData(vaultRoot: string): Promise<DashboardData> {
+  const vault = vaultOk(vaultRoot);
+  const info = await getBootInfo(vaultRoot);
+  if (vault) await refreshConflictBranches(vaultRoot);
   const sync = getSyncStatus(vaultRoot);
   const since = new Date(Date.now() - DAY_MS).toISOString();
-  const count = (sql: string, ...args: unknown[]): number => (db.prepare(sql).get(...args) as { n: number }).n;
-  let pending = 0;
+  // A broken DB must not take the dashboard down: failed counts show as n/a.
+  const count = (sql: string, ...args: unknown[]): number | null => {
+    try {
+      return (db.prepare(sql).get(...args) as { n: number }).n;
+    } catch {
+      return null;
+    }
+  };
+  let pending: number | null = null;
   try {
     pending = (await listInboxIds(vaultRoot)).length;
   } catch {
-    /* unsafe or unreadable inbox dir: shown as 0 */
+    /* unsafe or unreadable inbox dir: n/a */
   }
   return {
     dbOk: dbOk(),
-    vaultOk,
-    hasRemote: remote,
-    branch,
+    vaultOk: vault,
+    hasRemote: info?.hasRemote ?? false,
+    branch: info?.branch || null,
     unpushed: sync.unpushed,
     lastPushOk: sync.lastPushOk,
     lastPushAt: sync.lastPushAt,
@@ -146,10 +160,16 @@ const str = (v: unknown): string => (typeof v === "string" ? v : "");
 // ---- app -------------------------------------------------------------------
 
 export function createWebAdminApp(opts: WebAdminOptions): Express {
-  const { vaultRoot, trustedProxy, lifecycle } = opts;
+  const { vaultRoot, trustedProxy, lifecycle, proxySecret } = opts;
+  if (typeof proxySecret !== "string" || proxySecret.length < MIN_PROXY_SECRET) {
+    throw new Error(`ADMIN_PROXY_SECRET must be at least ${MIN_PROXY_SECRET} characters`);
+  }
   const adminGroup = opts.adminGroup || DEFAULT_ADMIN_GROUP;
+  const sessionCookie = opts.sessionCookie || DEFAULT_SESSION_COOKIE;
   // Without ADMIN_WEB_SECRET the tokens reset on restart (forms must be reloaded).
   const secret = opts.secret || randomBytes(32).toString("hex");
+  const flash = new OneTimeStore<Flash>(FLASH_TTL_MS, 200);
+  const nonces = new OneTimeStore<true>(NONCE_TTL_MS, 5000);
 
   const app = express();
   app.disable("x-powered-by");
@@ -179,10 +199,12 @@ export function createWebAdminApp(opts: WebAdminOptions): Express {
     next();
   });
 
-  // Identity: headers count only when the direct TCP peer is a trusted proxy.
+  // Identity: the direct peer must be a trusted proxy AND carry the secret Traefik injects
+  // after Authelia; only then are the Remote-* headers believed.
   app.use((req, res, next) => {
     const peer = req.socket.remoteAddress;
-    if (!peer || !trustedProxy.trust(peer)) {
+    const proxyHeader = req.headers[PROXY_HEADER];
+    if (!peer || !trustedProxy.trust(peer) || typeof proxyHeader !== "string" || !safeEqual(proxyHeader, proxySecret)) {
       res.status(401).type("text/plain").send("unauthorized");
       return;
     }
@@ -200,32 +222,43 @@ export function createWebAdminApp(opts: WebAdminOptions): Express {
     }
     res.locals.user = user;
     res.locals.actor = `admin:${user}`;
+    res.locals.session = cookieValue(req, sessionCookie);
     next();
   });
 
+  const userOf = (res: Response): string => res.locals.user as string;
   const ctxOf = (res: Response): Ctx => {
-    const user = res.locals.user as string;
-    return { user, csrf: csrfToken(secret, user) };
+    const user = userOf(res);
+    return { user, csrf: csrfToken(secret, user, res.locals.session as string), nonce: () => nonces.put(true, user) };
   };
   const send = (res: Response, view: SafeHtml, status = 200): void => void res.status(status).type("html").send(view.value);
+
+  // Post-Redirect-Get: the outcome lives in a one-time flash shown once on the target page.
+  const redirectWithFlash = (res: Response, to: string, value: Flash): void => {
+    res.redirect(303, `${to}${to.includes("?") ? "&" : "?"}flash=${flash.put(value, userOf(res))}`);
+  };
+  const takeBanner = (req: Request, res: Response): Banner | undefined => {
+    const f = FLASH_RE.test(str(req.query.flash)) ? flash.take(req.query.flash, userOf(res)) : undefined;
+    return f?.kind === "banner" ? f.banner : undefined;
+  };
 
   app.get("/static/style.css", (_req, res) => void res.type("text/css").send(CSS));
   app.get("/static/app.js", (_req, res) => void res.type("application/javascript").send(JS));
 
-  // State-changing requests: same-host Origin/Referer, then the HMAC token.
+  // State-changing requests: same-host Origin/Referer, session-bound CSRF token, then a
+  // one-time form nonce (a replayed or duplicate POST is refused).
   app.use(express.urlencoded({ extended: false, limit: "32kb" }));
   app.use((req, res, next) => {
     if (req.method === "GET" || req.method === "HEAD") return next();
     if (req.method !== "POST") return void res.status(405).type("text/plain").send("method not allowed");
     if (!sameOrigin(req)) return void res.status(403).type("text/plain").send("forbidden: cross-origin request");
-    if (!csrfValid(secret, res.locals.user as string, (req.body as Record<string, unknown> | undefined)?.csrf)) {
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    if (!csrfValid(secret, userOf(res), res.locals.session as string, body.csrf)) {
       return void res.status(403).type("text/plain").send("forbidden: invalid or missing CSRF token (reload the page)");
     }
-    next();
-  });
-
-  app.param("id", (_req, res, next, id: string) => {
-    if (!isValidInboxId(id) && !UUID_RE.test(id)) return void send(res, errorView(ctxOf(res), 400, "invalid id"), 400);
+    if (!nonces.take(body.nonce, userOf(res))) {
+      return void send(res, errorView(ctxOf(res), 409, "This form was already submitted (or has expired). Reload the page and try again."), 409);
+    }
     next();
   });
 
@@ -237,16 +270,33 @@ export function createWebAdminApp(opts: WebAdminOptions): Express {
     }
   });
 
-  // ---- tokens ----
-
   const auditAdmin = (res: Response, action: string, result: "ok" | "error", detail: string): void => {
     const actor = res.locals.actor as string;
     safeAudit({ tokenId: actor, tokenName: actor, action, result, detail }, actor);
   };
 
-  app.get("/tokens", (_req, res) => send(res, tokensView(ctxOf(res), listTokens())));
+  // ---- tokens ----
 
-  app.post("/tokens", (req, res) => {
+  const tokensRouter = express.Router();
+  tokensRouter.param("id", (_req, res, next, id: string) => {
+    if (!UUID_RE.test(id)) return void send(res, errorView(ctxOf(res), 400, "invalid token id"), 400);
+    next();
+  });
+
+  tokensRouter.get("/", (req, res) => send(res, tokensView(ctxOf(res), listTokens(), takeBanner(req, res))));
+
+  // The plaintext is reachable only through this one-time flash, never rendered by the POST.
+  tokensRouter.get("/created/:flashId", (req, res) => {
+    const fid = req.params.flashId as string;
+    const f = FLASH_RE.test(fid) ? flash.take(fid, userOf(res)) : undefined;
+    if (f?.kind !== "token") {
+      const msg = "This page was already shown or has expired. A token cannot be retrieved again; revoke it and create a new one if it was lost.";
+      return void send(res, errorView(ctxOf(res), 404, msg), 404);
+    }
+    send(res, tokenCreatedView(ctxOf(res), f.created, f.notes));
+  });
+
+  tokensRouter.post("/", (req, res) => {
     const body = req.body as Record<string, unknown>;
     const form: TokenForm = {
       name: str(body.name),
@@ -260,9 +310,8 @@ export function createWebAdminApp(opts: WebAdminOptions): Express {
       let scopes: Scope[];
       if (form.preset && form.scopes.trim()) return fail("Use either a preset or explicit scopes, not both.");
       if (form.preset) {
-        const p = PRESETS[form.preset];
-        if (!p) return fail(`Unknown preset "${form.preset}".`);
-        scopes = p.map((s) => ({ ...s }));
+        if (!Object.hasOwn(PRESETS, form.preset)) return fail(`Unknown preset "${form.preset}".`);
+        scopes = PRESETS[form.preset].map((s) => ({ ...s }));
       } else {
         if (!form.scopes.trim()) return fail("Choose a preset or enter at least one scope.");
         scopes = scopesFromText(form.scopes);
@@ -274,12 +323,14 @@ export function createWebAdminApp(opts: WebAdminOptions): Express {
         return fail("Wildcard scopes and presets grant broad access. Tick \"Allow wildcard\" to confirm. No token created.", warnings);
       }
       const created = createToken(validated.name, kept);
-      auditAdmin(res, "admin_token_create", "ok", `${created.id} ${created.name} [${kept.map(formatScope).join(",")}]`);
       const notes = [
         ...warnings,
         ...dropped.map((s) => `Dropped redundant scope ${formatScope(s)} (already covered by a wildcard scope).`),
       ];
-      send(res, tokenCreatedView(ctxOf(res), created, notes));
+      // Flash first: nothing after the token exists may lose the one chance to show it.
+      const to = `/tokens/created/${flash.put({ kind: "token", created: { id: created.id, name: created.name, token: created.token }, notes }, userOf(res))}`;
+      auditAdmin(res, "admin_token_create", "ok", `${created.id} ${created.name} [${kept.map(formatScope).join(",")}]`);
+      res.redirect(303, to);
     } catch (err) {
       if (err instanceof TokenValidationError || (err instanceof Error && /^invalid scope/.test(err.message))) {
         return fail(err.message);
@@ -288,41 +339,43 @@ export function createWebAdminApp(opts: WebAdminOptions): Express {
     }
   });
 
-  app.post("/tokens/:id/revoke", (req, res) => {
+  tokensRouter.post("/:id/revoke", (req, res) => {
     const id = req.params.id as string;
     let banner: Banner;
-    if (!UUID_RE.test(id)) {
-      banner = { kind: "err", title: "Invalid token id." };
-    } else if (revokeToken(id)) {
+    if (revokeToken(id)) {
       auditAdmin(res, "admin_token_revoke", "ok", id);
       banner = { kind: "ok", title: `Token ${id} revoked.` };
     } else {
       auditAdmin(res, "admin_token_revoke", "error", `${id} not found or already revoked`);
       banner = { kind: "err", title: "Token not found or already revoked." };
     }
-    send(res, tokensView(ctxOf(res), listTokens(), banner), banner.kind === "ok" ? 200 : 404);
+    redirectWithFlash(res, "/tokens", { kind: "banner", banner });
   });
+  app.use("/tokens", tokensRouter);
 
   // ---- inbox ----
 
-  app.get("/inbox", async (_req, res, next) => {
+  const inboxRouter = express.Router();
+  inboxRouter.param("id", (_req, res, next, id: string) => {
+    if (!isValidInboxId(id)) return void send(res, errorView(ctxOf(res), 400, "invalid proposal id"), 400);
+    next();
+  });
+
+  inboxRouter.get("/", async (req, res, next) => {
     try {
-      send(res, inboxView(ctxOf(res), await listInbox(vaultRoot)));
+      const banner = takeBanner(req, res);
+      send(res, inboxView(ctxOf(res), await listInbox(vaultRoot), banner));
     } catch (err) {
       next(err);
     }
   });
 
-  const listWith = async (res: Response, banner: Banner, status: number): Promise<void> =>
-    send(res, inboxView(ctxOf(res), await listInbox(vaultRoot), banner), status);
-
-  app.get("/inbox/:id", async (req, res, next) => {
+  inboxRouter.get("/:id", async (req, res, next) => {
     try {
-      const id = req.params.id as string;
-      if (!isValidInboxId(id)) return void send(res, errorView(ctxOf(res), 400, "invalid proposal id"), 400);
+      const banner = takeBanner(req, res);
       try {
-        const p = await showProposal(vaultRoot, id);
-        send(res, proposalView(ctxOf(res), p, req.query.view === "raw" ? "raw" : "rendered"));
+        const p = await showProposal(vaultRoot, req.params.id as string);
+        send(res, proposalView(ctxOf(res), p, req.query.view === "raw" ? "raw" : "rendered", banner));
       } catch (err) {
         if (!(err instanceof AdminError)) throw err;
         send(res, errorView(ctxOf(res), err.status, err.message), err.status);
@@ -332,44 +385,33 @@ export function createWebAdminApp(opts: WebAdminOptions): Express {
     }
   });
 
-  app.post("/inbox/:id/accept", async (req, res, next) => {
-    try {
+  // Runs the operation, then redirects with the outcome flash. The flash is set right after
+  // the operation returns, before anything else that could fail.
+  type Op = (id: string, body: Record<string, unknown>, actor: string) => Promise<{ target: string; commit: string | null }>;
+  const resolveWith =
+    (op: Op, verb: string) =>
+    async (req: Request, res: Response, next: NextFunction): Promise<void> => {
       const id = req.params.id as string;
-      if (!isValidInboxId(id)) return void send(res, errorView(ctxOf(res), 400, "invalid proposal id"), 400);
-      const overwrite = (req.body as Record<string, unknown>).overwrite === "1";
       try {
-        const r = await acceptProposal(vaultRoot, id, overwrite, res.locals.actor as string);
-        await listWith(res, { kind: "ok", title: `Accepted ${r.target}.`, lines: r.commit ? [`Commit ${r.commit}`] : [] }, 200);
-      } catch (err) {
-        if (!(err instanceof AdminError)) throw err;
-        if (err.status === 404) return void (await listWith(res, { kind: "err", title: err.message }, 404));
         try {
-          const p = await showProposal(vaultRoot, id);
-          send(res, proposalView(ctxOf(res), p, "rendered", { kind: "err", title: err.message }), err.status);
-        } catch {
-          await listWith(res, { kind: "err", title: err.message }, err.status);
+          const r = await op(id, req.body as Record<string, unknown>, res.locals.actor as string);
+          redirectWithFlash(res, "/inbox", {
+            kind: "banner",
+            banner: { kind: "ok", title: `${verb} ${r.target}.`, lines: r.commit ? [`Commit ${r.commit}`] : [] },
+          });
+        } catch (err) {
+          if (!(err instanceof AdminError)) throw err;
+          const to = err.status === 404 ? "/inbox" : `/inbox/${id}`;
+          redirectWithFlash(res, to, { kind: "banner", banner: { kind: "err", title: err.message } });
         }
-      }
-    } catch (err) {
-      next(err);
-    }
-  });
-
-  app.post("/inbox/:id/reject", async (req, res, next) => {
-    try {
-      const id = req.params.id as string;
-      if (!isValidInboxId(id)) return void send(res, errorView(ctxOf(res), 400, "invalid proposal id"), 400);
-      try {
-        const r = await rejectProposal(vaultRoot, id, res.locals.actor as string);
-        await listWith(res, { kind: "ok", title: `Rejected ${r.target}.` }, 200);
       } catch (err) {
-        if (!(err instanceof AdminError)) throw err;
-        await listWith(res, { kind: "err", title: err.message }, err.status);
+        next(err);
       }
-    } catch (err) {
-      next(err);
-    }
-  });
+    };
+
+  inboxRouter.post("/:id/accept", resolveWith((id, body, actor) => acceptProposal(vaultRoot, id, body.overwrite === "1", actor), "Accepted"));
+  inboxRouter.post("/:id/reject", resolveWith((id, _body, actor) => rejectProposal(vaultRoot, id, actor), "Rejected"));
+  app.use("/inbox", inboxRouter);
 
   app.use((_req, res) => void send(res, errorView(ctxOf(res), 404, "Page not found."), 404));
   // Never leak internals; the real reason goes to the log only.
@@ -383,8 +425,9 @@ export function createWebAdminApp(opts: WebAdminOptions): Express {
   return app;
 }
 
-// Binds all interfaces (Traefik reaches it over the overlay network); the peer check and
-// the group check above are what protect it. Refuses to start without TRUSTED_PROXY.
+// Binds all interfaces (Traefik reaches it over the overlay network); the peer check, the
+// proxy secret and the group check above are what protect it. Refuses to start without
+// TRUSTED_PROXY or a strong ADMIN_PROXY_SECRET.
 export async function startWebAdmin(
   vaultRoot: string,
   lifecycle: Lifecycle | undefined,
@@ -396,6 +439,11 @@ export async function startWebAdmin(
     console.error("web admin disabled: TRUSTED_PROXY is not set (identity headers cannot be trusted without it)");
     return undefined;
   }
+  const proxySecret = env.ADMIN_PROXY_SECRET ?? "";
+  if (proxySecret.length < MIN_PROXY_SECRET) {
+    console.error(`web admin disabled: ADMIN_PROXY_SECRET must be set (at least ${MIN_PROXY_SECRET} characters)`);
+    return undefined;
+  }
   try {
     const app = createWebAdminApp({
       vaultRoot,
@@ -403,6 +451,8 @@ export async function startWebAdmin(
       lifecycle,
       adminGroup: env.ADMIN_GROUP || DEFAULT_ADMIN_GROUP,
       secret: env.ADMIN_WEB_SECRET || undefined,
+      proxySecret,
+      sessionCookie: env.AUTHELIA_SESSION_COOKIE || undefined,
     });
     const s = await listen(app, port);
     console.log(`web admin listening on port ${port} (behind Traefik + Authelia only)`);

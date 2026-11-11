@@ -31,6 +31,9 @@ services:
       # Web admin UI (behind Authelia): own port, only users in this group
       - ADMIN_WEB_PORT=3002
       - ADMIN_GROUP=admins
+      # Shared secret Traefik injects (X-SB-Admin-Proxy) after Authelia, and the CSRF key
+      - ADMIN_PROXY_SECRET=${ADMIN_PROXY_SECRET:?ADMIN_PROXY_SECRET is required (make deploy generates it)}
+      - ADMIN_WEB_SECRET=${ADMIN_WEB_SECRET:?ADMIN_WEB_SECRET is required (make deploy generates it)}
       # git refuses to commit without an identity
       - GIT_AUTHOR_NAME=second-brain-mcp
       - GIT_AUTHOR_EMAIL=second-brain-mcp@noreply.local
@@ -81,7 +84,9 @@ services:
         - traefik.http.routers.second-brain-admin-secure.service=second-brain-admin
         - traefik.http.routers.second-brain-admin-secure.entrypoints=https
         - traefik.http.routers.second-brain-admin-secure.tls=true
-        - traefik.http.routers.second-brain-admin-secure.middlewares=authelia-auth@file,security-headers@file
+        # Injected after Authelia (overwrites any client value): proves the request went through Traefik
+        - traefik.http.middlewares.second-brain-admin-proxy.headers.customrequestheaders.X-SB-Admin-Proxy=${ADMIN_PROXY_SECRET:?ADMIN_PROXY_SECRET is required (make deploy generates it)}
+        - traefik.http.routers.second-brain-admin-secure.middlewares=authelia-auth@file,second-brain-admin-proxy,security-headers@file
 
 networks:
   traefik_traefik_proxy:

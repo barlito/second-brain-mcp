@@ -58,6 +58,7 @@ button.primary { background: var(--accent); color: var(--accent-text); border-co
 button.danger { color: var(--danger); border-color: var(--danger); }
 .actions { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-top: 12px; }
 .inline { display: inline; }
+.flush { margin-top: 0; }
 .token { word-break: break-all; font-size: 14px; padding: 12px; background: var(--code-bg); border-radius: 6px; user-select: all; }
 .md { overflow-wrap: anywhere; }
 .md img { max-width: 100%; }
