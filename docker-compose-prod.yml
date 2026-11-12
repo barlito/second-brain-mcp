@@ -27,6 +27,8 @@ services:
       - VAULT_SYNC_INTERVAL_MS=60000
       # Per-agent working memory stays small (see README "Space limits")
       - SPACE_LIMITS=agents:maxNotes=30,maxNoteBytes=4096,maxProjectBytes=102400,archiveAfterDays=60
+      # Shown in the ready-to-paste `claude mcp add` command after token creation
+      - PUBLIC_MCP_URL=https://second-brain.barlito.fr/mcp
       # Swarm DNS for the Traefik tasks: only they may set X-Forwarded-For.
       - TRUSTED_PROXY=tasks.traefik_traefik
       # Web admin UI (behind Authelia): own port, only users in this group

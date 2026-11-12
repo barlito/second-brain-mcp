@@ -4,6 +4,7 @@ import { createToken, listTokens, revokeToken, TokenValidationError, validateTok
 import { Permission, Scope } from "../auth/types";
 import { safeAudit } from "../tools/common";
 import { AGENTS_SPACE } from "../tools/conventions";
+import { claudeAddCommand, dirProblem, mcpUrl } from "../mcpCommand";
 import { isValidSlug } from "../vault/paths";
 
 // Audit identity for token changes made from the command line (the web admin uses admin:<user>).
@@ -42,24 +43,55 @@ export function agentScopes(name: string): Scope[] {
   return (["read", "write"] as const).map((permission) => ({ space: AGENTS_SPACE, project: name, section: "*", permission }));
 }
 
-// Resolves --preset / --scope into scopes. `name` is the token name (used by the agent preset).
-export function resolveScopes(preset: string | undefined, scope: string | undefined, name?: string): Scope[] {
-  if (preset === AGENT_PRESET) return [...agentScopes(name ?? ""), ...(scope ? parseScopes(scope) : [])];
+// Per-project preset for a Claude Code instance: read the shared `meta` space and its own
+// project, write only its own project. Bounded, so no wildcard confirmation (extras still need it).
+export const PROJECT_PRESET = "project";
+export const SHARED_SPACE = "meta";
+
+export function projectScopes(project: string | undefined): Scope[] {
+  const parts = (project ?? "").split("/");
+  if (parts.length !== 2 || !parts.every(isValidSlug)) {
+    throw new TokenValidationError(
+      `preset "${PROJECT_PRESET}" needs project=<space>/<project>, two slugs (a-z, 0-9, hyphen), e.g. pro/second-brain${project ? `; got "${project}"` : ""}`,
+    );
+  }
+  const [space, name] = parts;
+  return [
+    { space: SHARED_SPACE, project: "*", section: "*", permission: "read" },
+    { space, project: name, section: "*", permission: "read" },
+    { space, project: name, section: "*", permission: "write" },
+  ];
+}
+
+// The scopes a bounded preset grants by itself (undefined for other presets).
+function ownScopes(preset: string | undefined, name: string, project?: string): Scope[] | undefined {
+  if (preset === AGENT_PRESET) return agentScopes(name);
+  if (preset === PROJECT_PRESET) return projectScopes(project);
+  return undefined;
+}
+
+// True for presets that accept extra scopes on top of their own.
+export const isBoundedPreset = (preset: string | undefined): boolean => preset === AGENT_PRESET || preset === PROJECT_PRESET;
+
+// Resolves --preset / --scope into scopes. `name` is the token name (agent preset), `project` is
+// <space>/<project> (project preset).
+export function resolveScopes(preset: string | undefined, scope: string | undefined, name?: string, project?: string): Scope[] {
+  if (project !== undefined && preset !== PROJECT_PRESET) throw new Error(`--project is only valid with --preset ${PROJECT_PRESET}`);
+  if (isBoundedPreset(preset)) return [...ownScopes(preset, name ?? "", project)!, ...(scope ? parseScopes(scope) : [])];
   if (preset && scope) throw new Error("use either --preset or --scope, not both");
   if (preset) {
     const p = Object.hasOwn(PRESETS, preset) ? PRESETS[preset] : undefined;
-    if (!p) throw new Error(`unknown preset "${preset}", expected one of: ${[...Object.keys(PRESETS), AGENT_PRESET].join(", ")}`);
+    if (!p) throw new Error(`unknown preset "${preset}", expected one of: ${[...Object.keys(PRESETS), AGENT_PRESET, PROJECT_PRESET].join(", ")}`);
     return p.map((s) => ({ ...s }));
   }
   if (!scope) throw new Error("--preset or --scope is required");
   return parseScopes(scope);
 }
 
-// Scopes that need the wildcard confirmation: the agent preset's own scopes do not.
-export function confirmableWildcards(scopes: Scope[], preset: string | undefined, name: string): Scope[] {
-  if (preset !== AGENT_PRESET) return scopes;
-  const own = agentScopes(name).map(formatScope);
-  return scopes.filter((s) => !own.includes(formatScope(s)));
+// Scopes that need the wildcard confirmation: a bounded preset's own scopes do not.
+export function confirmableWildcards(scopes: Scope[], preset: string | undefined, name: string, project?: string): Scope[] {
+  const own = ownScopes(preset, name, project)?.map(formatScope);
+  return own ? scopes.filter((s) => !own.includes(formatScope(s))) : scopes;
 }
 
 export function formatScope(s: Scope): string {
@@ -116,14 +148,18 @@ function cmdCreate(argv: string[]): void {
       preset: { type: "string" },
       "allow-wildcard": { type: "boolean" },
       "expires-in-days": { type: "string" },
+      project: { type: "string" },
+      dir: { type: "string" },
     },
   });
-  const { name, scope, preset } = values;
+  const { name, scope, preset, project, dir } = values;
   if (!name) fail("--name is required");
+  const dirErr = dir ? dirProblem(dir.trim()) : undefined;
+  if (dirErr) fail(dirErr);
 
   let scopes: Scope[];
   try {
-    scopes = resolveScopes(preset, scope, name);
+    scopes = resolveScopes(preset, scope, name, project);
   } catch (err) {
     fail((err as Error).message);
   }
@@ -133,7 +169,7 @@ function cmdCreate(argv: string[]): void {
   const { kept, dropped } = dropRedundantScopes(validated.scopes);
   scopes = kept;
 
-  const warnings = wildcardWarnings(confirmableWildcards(scopes, preset, name));
+  const warnings = wildcardWarnings(confirmableWildcards(scopes, preset, name, project));
   if (warnings.length > 0) {
     for (const w of warnings) console.error(w);
     if (!values["allow-wildcard"]) {
@@ -156,6 +192,11 @@ function cmdCreate(argv: string[]): void {
   console.log(`  id:    ${created.id}`);
   console.log(`  token: ${created.token}`);
   if (created.expires_at) console.log(`  expires_at: ${created.expires_at}`);
+  console.log("");
+  // Printed to stdout only (never audited or logged): it embeds the token.
+  console.log("Register it in Claude Code: run this in a terminal inside the project directory, never paste it into a chat:");
+  console.log("");
+  console.log(claudeAddCommand({ url: mcpUrl(), token: created.token, dir }));
   console.log("");
 }
 
@@ -217,7 +258,13 @@ function main(): void {
         cmdRevoke(rest);
         break;
       default:
-        fail(`unknown command "${command}". Usage: token.js <create|list|revoke> [options]`);
+        fail(
+          `unknown command "${command}". Usage: token.js <create|list|revoke> [options]\n` +
+            "  create --name N (--preset master|master-ro|agent|project | --scope space:project:section:perm,...)\n" +
+            "         [--project <space>/<project>]  (preset project: read meta + own project, write own project)\n" +
+            "         [--dir <local directory>]      (prefix the claude mcp add command with cd <dir> &&)\n" +
+            "         [--allow-wildcard] [--expires-in-days N]",
+        );
     }
   } catch (err) {
     fail((err as Error).message);

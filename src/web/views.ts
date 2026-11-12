@@ -130,10 +130,12 @@ export interface TokenForm {
   preset: string;
   allowWildcard: boolean;
   expiresInDays: string;
+  project: string;
+  dir: string;
 }
 
-export function tokensView(ctx: Ctx, tokens: TokenListEntry[], banner?: Banner, form?: TokenForm): SafeHtml {
-  const f = form ?? { name: "", scopes: "", preset: "", allowWildcard: false, expiresInDays: "" };
+export function tokensView(ctx: Ctx, tokens: TokenListEntry[], banner?: Banner, form?: TokenForm, projects: string[] = []): SafeHtml {
+  const f = form ?? { name: "", scopes: "", preset: "", allowWildcard: false, expiresInDays: "", project: "", dir: "" };
   return layout(
     ctx,
     "/tokens",
@@ -174,18 +176,24 @@ ${csrfField(ctx)}
 <option value="master"${f.preset === "master" ? raw(" selected") : ""}>master: read + write everywhere (wildcard)</option>
 <option value="master-ro"${f.preset === "master-ro" ? raw(" selected") : ""}>master-ro: read everywhere (wildcard)</option>
 <option value="agent"${f.preset === "agent" ? raw(" selected") : ""}>agent: read + write on agents:&lt;name&gt;:* (scopes below are added)</option>
+<option value="project"${f.preset === "project" ? raw(" selected") : ""}>project: read meta + one project, write that project (scopes below are added)</option>
 </select>
+<label for="project">Project <span class="hint">(preset project only: <code>space/project</code>, pick an existing one or type a new one)</span></label>
+<input type="text" id="project" name="project" list="projects" maxlength="129" autocomplete="off" spellcheck="false" placeholder="pro/second-brain" value="${f.project}">
+<datalist id="projects">${projects.map((p) => html`<option value="${p}"></option>`)}</datalist>
 <label for="scopes">Scopes <span class="hint">(one per line: <code>space:project:section:permission</code>; permission is read, write or propose; <code>*</code> only as trailing levels)</span></label>
 <textarea id="scopes" name="scopes" spellcheck="false" placeholder="pro:second-brain:*:write">${f.scopes}</textarea>
 <label for="expires_in_days">Expires in (days) <span class="hint">(optional, 1-3650; empty = never expires)</span></label>
 <input type="text" id="expires_in_days" name="expires_in_days" inputmode="numeric" maxlength="4" value="${f.expiresInDays}">
+<label for="dir">Local directory <span class="hint">(optional: the generated Claude Code command starts with <code>cd &lt;dir&gt; &amp;&amp;</code>)</span></label>
+<input type="text" id="dir" name="dir" maxlength="512" spellcheck="false" placeholder="~/Project/second-brain-mcp" value="${f.dir}">
 <label class="check"><input type="checkbox" name="allow_wildcard" value="1"${f.allowWildcard ? raw(" checked") : ""}> Allow wildcard (required for any <code>*</code> scope or preset; wildcards also cover spaces/projects created later)</label>
 <div class="actions"><button class="primary" type="submit">Create token</button></div>
 </form>`,
   );
 }
 
-export function tokenCreatedView(ctx: Ctx, created: { id: string; name: string; token: string; expires_at?: string | null }, notes: string[]): SafeHtml {
+export function tokenCreatedView(ctx: Ctx, created: { id: string; name: string; token: string; expires_at?: string | null }, notes: string[], command: string): SafeHtml {
   return layout(
     ctx,
     "/tokens",
@@ -197,6 +205,12 @@ ${notes.length ? html`<div class="banner"><ul>${notes.map((n) => html`<li>${n}</
 <p>Name: <strong>${created.name}</strong> <span class="muted mono">(${created.id})</span></p>
 <p>Expires: <span class="mono">${created.expires_at ?? "never"}</span></p>
 <div class="token mono">${created.token}</div>
+</div>
+<div class="card">
+<h2 class="flush">Claude Code</h2>
+<p>Run this in a terminal <strong>inside the project directory</strong> (it registers the server for that directory only). Never paste the token into a chat.</p>
+<textarea id="claude-cmd" class="cmd" readonly rows="4" spellcheck="false">${command}</textarea>
+<div class="actions"><button type="button" class="primary" data-copy="claude-cmd">Copy</button><span class="muted" id="claude-cmd-status" role="status"></span></div>
 </div>
 <p><a href="/tokens">Back to tokens</a></p>`,
   );

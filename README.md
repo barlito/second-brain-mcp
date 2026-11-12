@@ -225,6 +225,7 @@ make token-create name=claude-code scope=pro:myproj:notes:read,pro:myproj:notes:
 make token-create name=me preset=master allow_wildcard=1        # read+write on *:*:*
 make token-create name=viewer preset=master-ro allow_wildcard=1 # read on *:*:*
 make token-create name=ci scope=pro:myproj:notes:read expires_in_days=30
+make token-create name=myproj-claude preset=project project=pro/myproj dir=~/Project/myproj   # one token per project
 make token-list
 make token-revoke id=<token id>
 ```
@@ -234,6 +235,8 @@ make token-revoke id=<token id>
 - `read`, `write` and `propose` are separate: `write` does not imply `read`. Grant both if you want both. `propose` only allows `kb_propose` (which `write` also allows); a propose-only token cannot change notes.
 - Presets: `preset=master` (read+write on `*:*:*`) and `preset=master-ro` (read on `*:*:*`). Use either `preset=` or `scope=`, not both (the CLI rejects the combination).
 - Preset `agent`: `make token-create name=<agent-name> preset=agent` grants read+write on `agents:<agent-name>:*` (the name must be a slug). It is bounded to one project, so it needs no `allow_wildcard`; unlike the master presets it may be combined with `scope=` to add extra scopes. The web admin offers it in the preset list.
+- Preset `project` (one token per project, for a Claude Code instance working on it): `make token-create name=<n> preset=project project=<space>/<project>` grants `meta:*:*:read` (the shared memory), `<space>:<project>:*:read` and `<space>:<project>:*:write`. `project` must be exactly two slugs (`pro/second-brain`), otherwise the CLI/web refuses with an explicit message. Bounded, so no `allow_wildcard` for the preset's own scopes (including its `meta:*:*:read`); like `agent` it accepts extra `scope=` entries, and extra wildcards still need `allow_wildcard=1`. The web admin offers it with a project field (suggestions from the existing projects, free text allowed).
+- After creating any token the CLI and the web one-time page show a ready-to-paste Claude Code command (see [Configuring a Claude Code client](#configuring-a-claude-code-client)). `dir=<local directory>` (CLI `--dir`, web "Local directory") prefixes it with `cd <dir> &&` (shell-quoted). The command contains the token, so it is shown once like the token and is never logged, audited or stored.
 - Wildcard scopes and presets are refused unless `allow_wildcard=1` (CLI: `--allow-wildcard`). Before creating the token the CLI prints to stderr what it can read/write (including content created later). Prefer explicit scopes unless you need a master token.
 - Scopes already covered by a wildcard scope of the same permission (e.g. `pro:x:y:read` next to `*:*:*:read`) are dropped at creation; the CLI says which on stderr.
 - Wildcards are also enforced at match time: a stored scope with a non-`*` level after a `*` (e.g. inserted by hand) matches nothing and logs a warning.
@@ -289,10 +292,22 @@ Then re-issue tokens with 4-part scopes (old tokens were migrated to the unmatch
 
 ## Configuring a Claude Code client
 
-Add an HTTP MCP server with the token in an `Authorization` header:
+Recommended flow, one token per project:
+
+1. Create a token with preset `project` (CLI `make token-create name=<n> preset=project project=<space>/<project> dir=<project directory>` or the web admin Tokens page).
+2. Copy the printed command (the web page has a Copy button) and run it in a terminal inside the project directory. It registers the server with `--scope local`, so the token stays out of the repo.
+3. Never paste the command or the token into a chat: it is a credential. If it leaks, revoke the token and create a new one.
+
+The command has this shape (`<MCP_URL>` comes from `PUBLIC_MCP_URL`):
 
 ```bash
-claude mcp add --transport http second-brain https://second-brain.barlito.fr/mcp \
+cd <dir> && claude mcp add --scope local --transport http second-brain <MCP_URL> --header "Authorization: Bearer <token>"
+```
+
+Manual form: add an HTTP MCP server with the token in an `Authorization` header:
+
+```bash
+claude mcp add --scope local --transport http second-brain https://second-brain.barlito.fr/mcp \
   --header "Authorization: Bearer sb_xxxxxxxx"
 ```
 
@@ -401,6 +416,7 @@ Compose sets these; no `.env` file is needed, except that both compose files req
 | `AUTHELIA_SESSION_COOKIE` | Authelia session cookie name the CSRF token is bound to. | `authelia_session` | `authelia_session_local` | unset |
 | `INBOX_MAX_PER_TOKEN`, `INBOX_MAX_TOTAL` | `kb_propose` quotas: pending proposals per token name / in total. | `20` / `200` | unset | unset |
 | `SPACE_LIMITS` | Per-space limits and auto-archive age, see [Agents space and space limits](#agents-space-and-space-limits). Validated at startup. | unset (no limits) | `agents:maxNotes=30,maxNoteBytes=4096,maxProjectBytes=102400,archiveAfterDays=60` | same |
+| `PUBLIC_MCP_URL` | Public MCP endpoint used in the `claude mcp add` command shown after creating a token (CLI and web admin). Must be an http(s) URL, else the default is used with a warning. | `https://second-brain.barlito.fr/mcp` | `https://second-brain.local.barlito.fr/mcp` | `https://second-brain.barlito.fr/mcp` |
 | `AUTO_ARCHIVE_INTERVAL_MS` | Auto-archive run interval (also runs once after startup); `0` disables. | `86400000` | unset | unset |
 | `GIT_SSH_COMMAND` | SSH command for git; points at the deploy key secret. | unset | unset | `ssh -i /run/secrets/vault_deploy_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=10` |
 | `GIT_AUTHOR_NAME`, `GIT_AUTHOR_EMAIL`, `GIT_COMMITTER_NAME`, `GIT_COMMITTER_EMAIL` | Git identity (git refuses to commit without one). | none | `second-brain-mcp` / `second-brain-mcp@noreply.local` | same |

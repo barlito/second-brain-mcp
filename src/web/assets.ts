@@ -62,6 +62,7 @@ button.danger { color: var(--danger); border-color: var(--danger); }
 .token { word-break: break-all; font-size: 14px; padding: 12px; background: var(--code-bg); border-radius: 6px; user-select: all; }
 .md { overflow-wrap: anywhere; }
 .md img { max-width: 100%; }
+textarea.cmd { max-width: 100%; min-height: 0; }
 textarea.wide { max-width: 100%; min-height: 380px; }
 .crumbs { color: var(--muted); margin: -8px 0 16px; }
 .tabs { display: flex; gap: 8px; margin: 12px 0 8px; }
@@ -73,5 +74,27 @@ textarea.wide { max-width: 100%; min-height: 380px; }
 export const JS = `document.addEventListener("submit", function (e) {
   var m = e.target && e.target.getAttribute && e.target.getAttribute("data-confirm");
   if (m && !window.confirm(m)) e.preventDefault();
+});
+
+// Copy button: Clipboard API, falling back to select-all + execCommand for non-secure contexts.
+document.addEventListener("click", function (e) {
+  var b = e.target && e.target.closest ? e.target.closest("[data-copy]") : null;
+  if (!b) return;
+  var el = document.getElementById(b.getAttribute("data-copy"));
+  var st = document.getElementById(b.getAttribute("data-copy") + "-status");
+  if (!el) return;
+  function say(t) { if (st) st.textContent = t; }
+  function fallback() {
+    el.focus();
+    el.select();
+    var ok = false;
+    try { ok = document.execCommand("copy"); } catch (err) { ok = false; }
+    say(ok ? "Copied." : "Selected: press Ctrl+C (Cmd+C) to copy.");
+  }
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(el.value).then(function () { say("Copied."); }, fallback);
+  } else {
+    fallback();
+  }
 });
 `;

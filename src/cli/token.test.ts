@@ -194,3 +194,60 @@ test("CLI: create and revoke are audited as cli; revoking an unknown id exits 1"
   assert.equal(err.token_name, "cli");
   assert.match(err.detail, /not found or already revoked/);
 });
+
+test("projectScopes / resolveScopes: preset project", async () => {
+  const { projectScopes, confirmableWildcards } = await import("./token");
+  assert.deepEqual(projectScopes("pro/second-brain"), [
+    { space: "meta", project: "*", section: "*", permission: "read" },
+    { space: "pro", project: "second-brain", section: "*", permission: "read" },
+    { space: "pro", project: "second-brain", section: "*", permission: "write" },
+  ]);
+  for (const bad of ["", "pro", "pro/", "/p", "pro/a/b", "Pro/x", "pro/x y", "../x", "pro/..", "*/x", "pro/*"]) {
+    assert.throws(() => projectScopes(bad), /needs project=<space>\/<project>/, JSON.stringify(bad));
+  }
+  assert.throws(() => projectScopes(undefined), /needs project=<space>\/<project>/);
+  // Extra scopes combine; --project is refused without the preset.
+  assert.equal(resolveScopes("project", "a:b:c:read", "n", "pro/x").length, 4);
+  assert.throws(() => resolveScopes("master", undefined, "n", "pro/x"), /--project is only valid/);
+  assert.throws(() => resolveScopes(undefined, "a:b:c:read", "n", "pro/x"), /--project is only valid/);
+  // Only the preset's own scopes skip the wildcard confirmation.
+  const scopes = resolveScopes("project", "pro:*:*:read", "n", "pro/x");
+  assert.deepEqual(confirmableWildcards(scopes, "project", "n", "pro/x").map((s) => `${s.space}:${s.project}`), ["pro:*"]);
+});
+
+test("CLI end-to-end: preset project without wildcard flag, and the claude command printed after every creation", () => {
+  const run = (env: Record<string, string>, ...args: string[]) =>
+    spawnSync(process.execPath, ["--import", "tsx", join(__dirname, "token.ts"), ...args], {
+      env: { ...process.env, DB_PATH: dbPath, ...env },
+      encoding: "utf8",
+    });
+  const p = run({}, "create", "--name", "pj1", "--preset", "project", "--project", "pro/my-proj");
+  assert.equal(p.status, 0, p.stderr);
+  const tok = /token: (sb_\S+)/.exec(p.stdout)![1];
+  assert.doesNotMatch(p.stderr, /WARNING/);
+  assert.ok(p.stdout.includes(`\nclaude mcp add --scope local --transport http second-brain https://second-brain.barlito.fr/mcp --header "Authorization: Bearer ${tok}"\n`));
+  assert.match(run({}, "list").stdout, /name=pj1 .*scopes=\[meta:\*:\*:read, pro:my-proj:\*:read, pro:my-proj:\*:write\]/);
+
+  const withDir = run({ PUBLIC_MCP_URL: "https://second-brain.local.barlito.fr/mcp" }, "create", "--name", "pj2", "--scope", "pro:x:y:read", "--dir", "/tmp/it's here");
+  assert.equal(withDir.status, 0, withDir.stderr);
+  assert.match(withDir.stdout, /^cd '\/tmp\/it'\\''s here' && claude mcp add --scope local --transport http second-brain https:\/\/second-brain\.local\.barlito\.fr\/mcp --header "Authorization: Bearer sb_\S+"$/m);
+
+  for (const args of [
+    ["--preset", "project"],
+    ["--preset", "project", "--project", "pro"],
+    ["--preset", "project", "--project", "pro/a b"],
+  ]) {
+    const r = run({}, "create", "--name", "pjbad", ...args);
+    assert.notEqual(r.status, 0, args.join(" "));
+    assert.match(r.stderr, /needs project=<space>\/<project>/);
+  }
+  const wild = run({}, "create", "--name", "pjw", "--preset", "project", "--project", "pro/x", "--scope", "pro:*:*:read");
+  assert.notEqual(wild.status, 0);
+  assert.match(wild.stderr, /--allow-wildcard/);
+  assert.doesNotMatch(wild.stderr, /meta:\*:\*:read/, "the preset's own wildcard is not warned about");
+  const nl = run({}, "create", "--name", "pjnl", "--scope", "pro:x:y:read", "--dir", "a\nb");
+  assert.notEqual(nl.status, 0);
+  assert.match(nl.stderr, /control characters/);
+  assert.doesNotMatch(run({}, "list").stdout, /name=pjnl|name=pjbad/);
+  assert.doesNotMatch(run({}, "list").stdout, /claude mcp add/);
+});

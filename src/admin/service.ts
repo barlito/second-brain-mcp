@@ -1,7 +1,7 @@
 // Inbox operations shared by the loopback listener (CLI) and the web admin UI.
 // Pure functions of (vaultRoot, actor): no HTTP concerns. Failures that map to a client
 // status are thrown as AdminError; anything else propagates (callers log it generically).
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync } from "node:fs";
 import {
   assertInboxDirSafe,
   HEAD_BYTES,
@@ -116,6 +116,8 @@ export async function acceptProposal(vaultRoot: string, id: string, overwrite: b
       const { p, t } = validateAccept(raw, id);
       seen = p;
       const targetAbs = resolveNotePath(vaultRoot, t.space, t.project, t.section, t.note);
+      // "exists" (409) must win over a limit error (422): the limit check below is moot when it will be refused.
+      if (!overwrite && lstatSync(targetAbs, { throwIfNoEntry: false })) throw new NoteExistsError();
       // Frontmatter is normalized here (not at propose time); author = the reviewer's audit actor.
       const existing = existsSync(targetAbs) ? readFileSync(targetAbs, "utf8") : null;
       const content = normalizeNote(p.content, { section: t.section, author: actor, today: utcToday(), existing });

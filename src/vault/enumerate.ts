@@ -94,3 +94,16 @@ export async function readFileNoFollow(
     await fh.close();
   }
 }
+
+// "<space>/<project>" for every project in the vault, sorted, capped. For admin UI suggestions only:
+// it does not apply the ACL, so never expose it through a token-facing tool.
+export async function listAllProjects(vaultRoot: string, cap = 500): Promise<string[]> {
+  const out: string[] = [];
+  for (const space of await listSubdirs(vaultRoot, [])) {
+    for (const project of await listSubdirs(vaultRoot, [space])) {
+      if (out.length >= cap) return out;
+      out.push(`${space}/${project}`);
+    }
+  }
+  return out;
+}

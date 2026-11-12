@@ -563,3 +563,56 @@ test("tokens: expiry field on create, expiry/expired in the table, dashboard cou
   assert.equal(await stat(), before, "expired token not counted as active");
   assert.match(expired.body, new RegExp(`/tokens/${row.id}/revoke`), "revoke still offered");
 });
+
+test("tokens: preset project grants meta read + own project, needs no wildcard checkbox, shows the claude command", async () => {
+  const ok = await follow(await post("/tokens", { name: "proj-tok", preset: "project", project: "pro/my-proj", dir: "/home/me/my proj" }));
+  assert.equal(ok.status, 200);
+  const t = tokens.listTokens().find((x) => x.name === "proj-tok")!;
+  assert.deepEqual(
+    t.scopes.map((s) => `${s.space}:${s.project}:${s.section}:${s.permission}`),
+    ["meta:*:*:read", "pro:my-proj:*:read", "pro:my-proj:*:write"],
+  );
+  assert.doesNotMatch(ok.body, /WARNING|Allow wildcard/);
+  const plaintext = /(sb_[A-Za-z0-9_-]{43})/.exec(ok.body)![1];
+  // The textarea holds the command; quotes are HTML-escaped but a browser reads them back.
+  assert.ok(
+    ok.body.includes(`cd &#39;/home/me/my proj&#39; &amp;&amp; claude mcp add --scope local --transport http second-brain https://second-brain.barlito.fr/mcp --header &quot;Authorization: Bearer ${plaintext}&quot;`),
+    "command with quoted dir",
+  );
+  assert.match(ok.body, /data-copy="claude-cmd"/);
+  assert.match(ok.body, /inside the project directory/);
+  // Not persisted: neither audit nor the tokens page carries it.
+  assert.ok(!JSON.stringify(db.prepare("SELECT * FROM audit_log").all()).includes("claude mcp add"));
+  assert.doesNotMatch((await get("/tokens")).body, /claude mcp add/);
+});
+
+test("tokens: any token page shows the command without cd when no directory is given", async () => {
+  const r = await follow(await post("/tokens", { name: "nodir-tok", scopes: "sp:pj:notes:read" }));
+  assert.match(r.body, />claude mcp add --scope local --transport http second-brain /);
+  assert.doesNotMatch(r.body, /&amp;&amp; claude/);
+});
+
+test("tokens: preset project validation, extras and the dir field", async () => {
+  const before = tokens.listTokens().length;
+  const bad: Array<[Record<string, string>, RegExp]> = [
+    [{ name: "x", preset: "project" }, /needs project=&lt;space&gt;\/&lt;project&gt;/],
+    [{ name: "x", preset: "project", project: "pro" }, /two slugs/],
+    [{ name: "x", preset: "project", project: "pro/a/b" }, /two slugs/],
+    [{ name: "x", preset: "project", project: "pro/My Proj" }, /two slugs/],
+    [{ name: "x", preset: "project", project: "../x" }, /two slugs/],
+    [{ name: "x", preset: "project", project: "pro/p", dir: "a\nb" }, /control characters/],
+    [{ name: "x", preset: "project", project: "pro/p", scopes: "sp:*:*:read" }, /Allow wildcard/],
+  ];
+  for (const [f, re] of bad) {
+    const r = await post("/tokens", f);
+    assert.equal(r.status, 422, JSON.stringify(f));
+    assert.match(r.body, re);
+  }
+  assert.equal(tokens.listTokens().length, before);
+  assert.match((await get("/tokens")).body, /<datalist id="projects">/);
+  // Extras combine; confirmed wildcard extras are allowed.
+  const ok = await post("/tokens", { name: "proj-extra", preset: "project", project: "pro/p", scopes: "sp:pj:notes:read\nsp:*:*:read", allow_wildcard: "1" });
+  assert.equal(ok.status, 303);
+  const scopes = tokens.listTokens().find((x) => x.name === "proj-extra")!.scopes.map((s) => `${s.space}:${s.project}:${s.section}:${s.permission}`);
+  assert.ok(scopes.includes("pro:p:*:write") && scopes.includes("sp:*:*:read") && !scopes.includes("sp:pj:notes:read"));
+});
