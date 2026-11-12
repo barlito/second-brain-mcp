@@ -57,9 +57,18 @@ deploy: ## Build the image and deploy the stack locally (Swarm)
 	  docker compose build && $(call stack_deploy,,)
 	$(MAKE) prune-local-images
 
-# $(1): file to write. "none" when the service does not exist yet.
+# $(1): file to write. "none" only when the service does not exist yet; any other inspect error
+# is retried, then aborts the recipe before anything is changed (a bogus "none" would let
+# assert-deployed.sh trust a stale UpdateStatus).
 define mark_service
-docker service inspect $(svc_full) --format '{{.Version.Index}}|{{if .UpdateStatus}}{{.UpdateStatus.StartedAt}}{{end}}' > $(1) 2>/dev/null || echo none > $(1)
+for i in 1 2 3; do \
+  if out=$$(docker service inspect $(svc_full) --format '{{.Version.Index}}|{{if .UpdateStatus}}{{.UpdateStatus.StartedAt}}{{end}}' 2>&1); then \
+    printf '%s\n' "$$out" > $(1); exit 0; \
+  fi; \
+  case "$$out" in *"o such service"*) echo none > $(1); exit 0;; esac; \
+  sleep 2; \
+done; \
+echo "cannot inspect $(svc_full) to mark it: $$out" >&2; exit 1
 endef
 
 # Rolling stack deploy (never `stack rm`: a recreated service has nothing to roll back to).
