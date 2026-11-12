@@ -1,0 +1,73 @@
+name: Rollback
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Image tag to rollback to (e.g. v1.2.0)"
+        required: true
+        type: string
+      restore-db:
+        description: "Optional: backup filename under /data/backups (e.g. acl-20260101T120000Z.db) to restore before switching the image. Needed when the target image is older than the DB schema (migrations are forward-only)."
+        required: false
+        type: string
+        default: ""
+
+jobs:
+  rollback:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    env:
+      DOCKER_HOST: ssh://${{ vars.SERVER_USERNAME }}@${{ vars.SERVER_HOST }}:${{ vars.SERVER_PORT }}
+      SERVICE: second-brain-mcp_second-brain-mcp
+      TAG: ${{ inputs.tag }}
+      RESTORE_DB: ${{ inputs.restore-db }}
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Validate inputs
+        run: |
+          [[ "$TAG" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]] || { echo "::error::invalid tag"; exit 1; }
+          [ -z "$RESTORE_DB" ] || [[ "$RESTORE_DB" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]*\.db$ ]] || { echo "::error::invalid restore-db filename"; exit 1; }
+
+      - name: Set up SSH
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SERVER_HOST_KEY: ${{ vars.SERVER_HOST_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          if [ -n "$SERVER_HOST_KEY" ]; then
+            # Pinned host key (full known_hosts line, e.g. "[1.2.3.4]:3333 ssh-ed25519 AAAA...")
+            printf '%s\n' "$SERVER_HOST_KEY" >> ~/.ssh/known_hosts
+          else
+            echo "::warning::SERVER_HOST_KEY is not set: host key not pinned (trust on first use via ssh-keyscan)."
+            ssh-keyscan -p "${{ vars.SERVER_PORT }}" "${{ vars.SERVER_HOST }}" >> ~/.ssh/known_hosts
+          fi
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKER_HUB_USERNAME }}
+          password: ${{ secrets.DOCKER_HUB_READ_WRITE_DELETE_ACCESS_TOKEN }}
+
+      # Safety copy of the current DB (also kept when restoring an older one)
+      - name: Backup database before rollback
+        run: make db.backup
+
+      - name: Restore database backup
+        if: ${{ inputs.restore-db != '' }}
+        run: |
+          docker service scale "$SERVICE=0"
+          make db.restore TAG="$TAG" file="$RESTORE_DB"
+
+      - name: Rollback main service
+        run: |
+          make docker.service.update args="--replicas 1 --image barlito/second-brain-mcp:$TAG $SERVICE"
+          make deploy.assert_image
+
+      - name: Smoke test
+        run: make smoke.test

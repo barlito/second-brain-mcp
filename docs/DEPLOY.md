@@ -2,25 +2,26 @@
 
 Target: a Docker Swarm manager running the [traefik-base](https://github.com/barlito/traefik-base) stack (network `traefik_traefik_proxy`), serving `https://second-brain.barlito.fr`.
 
-Deploys can run via the GitHub Actions workflow (see "Deploy via GitHub Actions" below) or manually with the checklist. Known gap: no off-host backup automation.
+Releases are cut with GitHub Releases and deployed with GitHub Actions (same flow as the other barlito projects). Known gap: no off-host backup automation.
 
-## Deploy via GitHub Actions
+## Release, deploy, rollback (GitHub Actions)
 
-`.github/workflows/deploy.yml` (manual `workflow_dispatch`, `main` only, serialized by `concurrency: deploy-prod`):
-
-1. Runs the CI workflow (`ci.yml`).
-2. Builds and pushes `ghcr.io/barlito/second-brain-mcp:<short-sha>` (and `:main`). Fails if the `<short-sha>` tag already exists (tags are immutable).
-3. In the `production` environment: over SSH (`DOCKER_HOST`, pinned host key) creates the Swarm secret `vault_deploy_key` if missing, logs the node in to ghcr, runs `make backup-db` if the service exists (a failed backup aborts the deploy), runs `make deploy.prod`, waits up to 3 min for the new task to run, then checks `https://second-brain.barlito.fr/health`.
+1. **Release**: create a GitHub Release `vX.Y.Z`. `release.yaml` runs the tests, then builds and pushes `<DOCKER_HUB_USERNAME>/second-brain-mcp:vX.Y.Z` and `:latest` to Docker Hub (buildcache on ghcr). Tags are immutable: never reuse one.
+2. **Deploy**: run the Deploy workflow on that tag (the job refuses a non-tag ref):
+   ```bash
+   gh workflow run deploy.yaml --ref vX.Y.Z                    # image-only update
+   gh workflow run deploy.yaml --ref vX.Y.Z -f re-deploy=true  # full stack deploy
+   ```
+   - Image-only: `make db.backup` (skipped when no task runs), `docker service update --with-registry-auth --image ...`, `make deploy.assert_image` (waits up to 180 s for the new image to run healthy; fails on rollback or crash loop and prints `docker service ps --no-trunc` + the last 50 log lines), `make smoke.test` (`/health`), `make deploy.prune`.
+   - `re-deploy=true` applies the whole `docker-compose-prod.yml` (`make deploy.prod`: backup, rolling `docker stack deploy --with-registry-auth`, assert, smoke, prune). **The first deploy needs it**, and so does any compose change. It creates the Swarm secret `vault_deploy_key` from `VAULT_DEPLOY_KEY` if missing.
+3. **Rollback**: run the Rollback workflow: `gh workflow run rollback.yaml --ref main -f tag=vX.Y.Z [-f restore-db=acl-<ts>.db]`. It backs up the current DB, optionally restores a backup, switches the image, asserts and smoke-tests (see Rollback below).
 
 Required repo config:
 
-- Variables: `SERVER_HOST`, `SERVER_PORT`, `SERVER_USERNAME`, `SERVER_HOST_KEY` (full `known_hosts` line; the job fails if unset).
-- Secrets: `SSH_PRIVATE_KEY`, `VAULT_DEPLOY_KEY` (private key of the vault deploy key), `ADMIN_PROXY_SECRET`, `ADMIN_WEB_SECRET`.
-- Optional secret `GHCR_PULL_TOKEN`: long-lived PAT with `read:packages`. Without it the job's `GITHUB_TOKEN` is used, which expires after the job, so Swarm may fail to re-pull the image later (a warning is emitted).
+- Secrets: `SSH_PRIVATE_KEY`, `DOCKER_HUB_USERNAME`, `DOCKER_HUB_READ_WRITE_DELETE_ACCESS_TOKEN`, `ADMIN_PROXY_SECRET`, `ADMIN_WEB_SECRET`, `VAULT_DEPLOY_KEY` (private half of the vault deploy key).
+- Variables: `SERVER_HOST`, `SERVER_PORT`, `SERVER_USERNAME`, and optionally `SERVER_HOST_KEY` (full `known_hosts` line to pin the host; without it the jobs fall back to `ssh-keyscan` and warn).
 
-Trigger: `gh workflow run deploy.yml --ref main`.
-
-Rollback is not supported by the workflow (it always deploys the current `main` commit). Roll back manually with `make deploy.prod IMAGE_TAG=<old>` (see Rollback below, including the DB restore note for schema migrations).
+The manual checklist below does the same by hand.
 
 ## Checklist
 
@@ -42,16 +43,9 @@ Rollback is not supported by the workflow (it always deploys the current `main` 
   ```
   The prod compose mounts it at `/run/secrets/vault_deploy_key` (uid/gid 10001, mode 0400) and git uses it via `GIT_SSH_COMMAND`. GitHub host keys are baked into the image and verified.
 
-### 3. Publish the image to ghcr (manual, immutable tag)
+### 3. Publish the image (Docker Hub, immutable tag)
 
-- [ ] `docker login ghcr.io` with a GitHub personal access token (classic) that has `write:packages` on the machine that pushes. The machine running `make deploy.prod` needs a login with `read:packages` (the package is private): `--with-registry-auth` forwards its credentials to the Swarm nodes.
-- [ ] Build, tag and push. Use a unique tag such as the short git SHA; never reuse one:
-  ```bash
-  TAG=$(git rev-parse --short HEAD)
-  docker build -t ghcr.io/barlito/second-brain-mcp:$TAG .
-  docker push ghcr.io/barlito/second-brain-mcp:$TAG
-  ```
-  (Equivalent: `docker build -t second-brain-mcp:ci .` then `docker tag second-brain-mcp:ci ghcr.io/barlito/second-brain-mcp:$TAG` before pushing.)
+- [ ] Create a GitHub Release `vX.Y.Z`: `release.yaml` pushes `barlito/second-brain-mcp:vX.Y.Z`. Manual equivalent: `docker build -t barlito/second-brain-mcp:vX.Y.Z . && docker push barlito/second-brain-mcp:vX.Y.Z` (never reuse a tag). The deploying machine needs `docker login` to Docker Hub (`--with-registry-auth` forwards it to the nodes).
 
 ### 3b. Web admin secrets and Authelia (required: compose refuses to render without them)
 
@@ -74,13 +68,13 @@ The web admin UI (`https://second-brain-admin.barlito.fr`, port 3002) sits behin
 
 - [ ] From the repo root, on the manager:
   ```bash
-  IMAGE_TAG=<tag> make deploy.prod
+  TAG=<tag> make deploy.prod
   ```
-  It renders `docker-compose-prod.yml` and runs `docker stack deploy --with-registry-auth` for the stack `second-brain-mcp`. `IMAGE_TAG` is mandatory.
+  It renders `docker-compose-prod.yml` and runs `docker stack deploy --with-registry-auth` for the stack `second-brain-mcp`. `TAG` is mandatory. It also runs the DB backup, waits for the new task to be healthy, smoke-tests and prunes.
 - [ ] Remote deploy: point the Docker CLI at the manager over SSH, the same pattern traefik-base uses in its GitHub Actions (see its `docs/GITHUB_ACTIONS.md`: SSH agent, pinned host key in `known_hosts`, then `DOCKER_HOST=ssh://...`):
   ```bash
   # deploy@server.barlito.fr is a placeholder: use your own user and manager host
-  DOCKER_HOST=ssh://deploy@server.barlito.fr IMAGE_TAG=<tag> make deploy.prod
+  DOCKER_HOST=ssh://deploy@server.barlito.fr TAG=<tag> make deploy.prod
   ```
   The `make token-*` and `make backup-db` targets use `docker exec`, so they work the same way over `DOCKER_HOST`.
 
@@ -122,19 +116,28 @@ The web admin UI (`https://second-brain-admin.barlito.fr`, port 3002) sits behin
 
 ## Rollback
 
-Updates use `stop-first` with `failure_action: rollback` and a 30 s monitor window, so a task that fails to start is rolled back automatically. Manually:
+Updates use `stop-first` with `failure_action: rollback` and a 30 s monitor window, so a task that fails to start is rolled back automatically (Swarm then exits 0, which is why `deploy.assert_image` exists: it fails the workflow unless the service really runs the new image, healthy).
+
+Run the **Rollback** workflow (`gh workflow run rollback.yaml --ref main -f tag=<old> [-f restore-db=acl-<ts>.db]`) or by hand:
 
 ```bash
-docker service rollback second-brain-mcp_second-brain-mcp
-# or redeploy a previous, still-published tag:
-IMAGE_TAG=<previous-tag> make deploy.prod
+make db.backup
+make docker.service.update args="--replicas 1 --image barlito/second-brain-mcp:<old> second-brain-mcp_second-brain-mcp"
+TAG=<old> make deploy.assert_image && make smoke.test
 ```
 
-**Schema migrations are one-way.** The app upgrades `acl.db` on boot (e.g. migration 6 adds `tokens.expires_at`) and an older image refuses a database whose schema is newer than it knows. Rolling back to an image older than the current DB schema therefore requires restoring the pre-deploy backup (stop the stack, replace `acl.db` in the `acl-data` volume with the copy taken before the upgrade). Tokens created or revoked after that backup are lost with it.
+**Schema migrations are one-way.** The app upgrades `acl.db` on boot (e.g. migration 6 adds `tokens.expires_at`) and refuses to start on a database whose `user_version` is newer than the build knows (`DB schema version N is newer than this build supports`). Rolling back across a migration therefore crash-loops and `deploy.assert_image` fails loudly; the DB is not touched. To roll back across a migration, restore a backup taken before the upgrade: pass `restore-db=<file>` to the workflow, or by hand:
 
-**Before every deploy (`make deploy` or `make deploy.prod`) run `make backup-db`.** Neither target takes a backup itself, so this step is manual and is what makes a rollback past a migration possible.
+```bash
+docker service scale second-brain-mcp_second-brain-mcp=0
+make db.restore TAG=<old> file=acl-<ts>.db     # keeps the current DB as acl.db.pre-restore-<ts>
+make docker.service.update args="--replicas 1 --image barlito/second-brain-mcp:<old> second-brain-mcp_second-brain-mcp"
+TAG=<old> make deploy.assert_image && make smoke.test
+```
 
-The SQLite database and the vault live on named volumes and survive redeploys. Restoring a database backup means stopping the stack and replacing `acl.db` in the `acl-data` volume (not scripted).
+Tokens created or revoked after the restored backup are lost. `deploy.prod` and the Deploy/Rollback workflows take a backup (`make db.backup`) before changing anything, so a pre-upgrade copy always exists under `/data/backups` (list it with `docker exec <cid> ls /data/backups`). Local `make deploy` does not back up.
+
+The SQLite database and the vault live on named volumes and survive redeploys.
 
 ## Troubleshooting
 
@@ -149,4 +152,4 @@ The SQLite database and the vault live on named volumes and survive redeploys. R
 | `/health/details` is `degraded`, `lastPushOk: false` or `unpushed: true` | Push failing: check the logs for `git push` / `periodic sync` errors, that the deploy key has write access, and that GitHub is reachable. Local commits are kept and retried every sync interval. |
 | `vault bootstrap failed` at startup, container restarting | Clone failed: secret `vault_deploy_key` missing or wrong, key not added to the repo, repo or `main` branch missing, or a different repo name than the one in `docker-compose-prod.yml`. |
 | Permission errors on `/vault` or `/data` | The volumes must be writable by uid/gid 10001 (the image pre-creates them so for named volumes). If you switched to bind mounts, `chown 10001:10001` them. |
-| Service does not start: pull denied / no such image | The tag was not pushed, or the deploying machine is not logged in to ghcr (`--with-registry-auth` forwards that login). `IMAGE_TAG` unset aborts before deploying. |
+| Service does not start: pull denied / no such image | The tag was not pushed, or the deploying machine is not logged in to Docker Hub (`--with-registry-auth` forwards that login). `TAG` unset aborts before deploying. |

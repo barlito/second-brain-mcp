@@ -285,3 +285,11 @@ test("migration 6: v5 DB keeps its tokens, gains a nullable expires_at", async (
   assert.equal((d.prepare("SELECT COUNT(*) c FROM scopes").get() as { c: number }).c, 1);
   d.close();
 });
+
+test("refuses to start on a DB whose schema is newer than the build (rollback guard), leaving it untouched", async () => {
+  const { runMigrations, MIGRATIONS } = await import("./db");
+  const d = new Database(join(tmpDir, "newer.db"));
+  d.pragma(`user_version = ${MIGRATIONS.length + 1}`);
+  assert.throws(() => runMigrations(d), /newer than this build supports/);
+  assert.equal(d.pragma("user_version", { simple: true }), MIGRATIONS.length + 1);
+});

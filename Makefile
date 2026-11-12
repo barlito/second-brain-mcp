@@ -1,9 +1,13 @@
 .DEFAULT_GOAL := help
-.PHONY: help deploy deploy.prod prune-local-images undeploy restart logs token-create token-list token-revoke backup-db prune-audit inbox-list inbox-show inbox-accept inbox-reject
+.PHONY: help deploy deploy.prod db.backup db.restore docker.service.update deploy.assert_image smoke.test deploy.pruneprune-local-images undeploy restart logs token-create token-list token-revoke backup-db prune-audit inbox-list inbox-show inbox-accept inbox-reject
 
 stack_name=second-brain-mcp
 service=second-brain-mcp
 svc_full=$(stack_name)_second-brain-mcp
+image_name=barlito/second-brain-mcp
+prod_host=second-brain.barlito.fr
+assert_timeout=180
+assert_settle=10
 
 # Runs the local container as the host user instead of the image's appuser,
 # so it can read/write the bind-mounted vault (host-owned, different uid).
@@ -50,9 +54,54 @@ deploy: ## Build the image and deploy the stack locally (Swarm)
 	  docker compose build && $(call stack_deploy,,)
 	$(MAKE) prune-local-images
 
-deploy.prod: ## Deploy to prod (IMAGE_TAG + ADMIN_PROXY_SECRET + ADMIN_WEB_SECRET in the env; image must be published)
-	@test -n "$(IMAGE_TAG)" || { echo "IMAGE_TAG is required (make deploy.prod IMAGE_TAG=<tag>)" >&2; exit 1; }
+# Rolling stack deploy (never `stack rm`: a recreated service has nothing to roll back to).
+# Needs TAG + ADMIN_PROXY_SECRET + ADMIN_WEB_SECRET in the env; the image must be published.
+deploy.prod: ## Deploy the whole prod stack (TAG=<release tag>): backup, stack deploy, assert, smoke, prune
+	@test -n "$(TAG)" || { echo "TAG is required (TAG=<tag> make deploy.prod)" >&2; exit 1; }
+	$(MAKE) db.backup
 	$(call stack_deploy,-f docker-compose-prod.yml,--with-registry-auth)
+	$(MAKE) deploy.assert_image
+	$(MAKE) smoke.test
+	$(MAKE) deploy.prune
+
+# Skipped silently when the service has no running task (first deploy).
+db.backup: ## Backup the DB if the service is running (skipped on first deploy)
+	@if docker ps -q --filter label=com.docker.swarm.service.name=$(svc_full) | grep -q .; then \
+	  $(MAKE) --no-print-directory backup-db; \
+	else \
+	  echo "no running $(svc_full) task, backup skipped (first deploy?)"; \
+	fi
+
+# Replaces acl.db with /data/backups/<file>. The service must be scaled to 0 first; the current DB
+# is kept as acl.db.pre-restore-<ts>. Runs a one-off container of the target image on the volume.
+db.restore: ## Restore a DB backup (TAG=<image tag> file=acl-<ts>.db); service must be scaled to 0
+	@test -n "$(TAG)" -a -n "$(file)" || { echo "usage: make db.restore TAG=<tag> file=acl-<ts>.db" >&2; exit 1; }
+	@case "$(file)" in */*) echo "file must be a bare backup filename" >&2; exit 1;; esac
+	@! docker ps -q --filter label=com.docker.swarm.service.name=$(svc_full) | grep -q . \
+	  || { echo "$(svc_full) is still running: scale it to 0 first" >&2; exit 1; }
+	docker run --rm --entrypoint sh -v $(stack_name)_acl-data:/data $(image_name):$(TAG) -ec \
+	  'test -f "/data/backups/$(file)"; ts=$$(date -u +%Y%m%dT%H%M%SZ); \
+	   [ ! -f /data/acl.db ] || cp /data/acl.db "/data/acl.db.pre-restore-$$ts"; \
+	   rm -f /data/acl.db-wal /data/acl.db-shm; cp "/data/backups/$(file)" /data/acl.db; echo "restored $(file)"'
+
+docker.service.update: ## docker service update with registry auth (args="--image <img> <service>")
+	docker service update --with-registry-auth $(args)
+
+# Swarm rollbacks exit 0: fail unless the service really runs $(image_name):$(TAG), healthy
+deploy.assert_image: ## Wait until the service runs $(image_name):$(TAG) and is healthy
+	@test -n "$(TAG)" || { echo "TAG is required" >&2; exit 1; }
+	scripts/assert-deployed.sh $(svc_full) $(image_name):$(TAG) $(assert_timeout) $(assert_settle)
+
+smoke.test: ## GET /health on the prod host (retries)
+	@echo "Smoke test https://$(prod_host)/health"
+	@curl -fsS --retry 6 --retry-delay 5 --retry-all-errors --max-time 10 https://$(prod_host)/health \
+	  || { echo "Smoke test KO" >&2; exit 1; }
+	@echo
+	@echo "Smoke test OK"
+
+# Removes the stack's stopped containers (old tasks); never touches running ones
+deploy.prune: ## Remove the stack's stopped containers
+	docker container prune -f --filter label=com.docker.stack.namespace=$(stack_name)
 
 prune-local-images: ## Remove old second-brain-mcp:local-* images (keep the newest 3)
 	@# `docker image ls` lists newest first; images still in use fail to delete and are skipped.
