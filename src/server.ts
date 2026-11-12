@@ -28,6 +28,9 @@ import {
 } from "./vault/git";
 
 export const BODY_LIMIT = "1mb";
+// Max messages in one JSON-RPC batch POST. Each message may be a write; without
+// a cap one request could enqueue hundreds of them.
+export const MAX_JSONRPC_BATCH = 10;
 const DRAIN_TIMEOUT_MS = 25_000;
 
 function jsonRpcError(res: Response, status: number, code: number, message: string): void {
@@ -358,6 +361,10 @@ export function createApp(opts: AppOptions): Express {
   // Stateless Streamable HTTP mode: a fresh McpServer + transport per request,
   // no session state kept between calls.
   app.post("/mcp", async (req, res) => {
+    if (Array.isArray(req.body) && req.body.length > MAX_JSONRPC_BATCH) {
+      jsonRpcError(res, 400, -32600, `Invalid Request: batch too large (max ${MAX_JSONRPC_BATCH} messages)`);
+      return;
+    }
     const server = createMcpServer(vaultRoot);
     let transport: StreamableHTTPServerTransport | undefined;
     let cleanedUp = false;
@@ -496,7 +503,8 @@ export interface ShutdownDeps {
 // signal) exits immediately.
 export function createShutdown(deps: ShutdownDeps): (signal?: string) => Promise<void> {
   const exit = deps.exit ?? ((code: number) => process.exit(code));
-  const drain = deps.drain ?? drainWrites;
+  // Commits in-flight writes, then makes a final push attempt (bounded by the cap).
+  const drain = deps.drain ?? (() => drainWrites({ finalPush: true }));
   const abortPushes = deps.abortPushes ?? abortPendingPushes;
   const timeoutMs = deps.drainTimeoutMs ?? DRAIN_TIMEOUT_MS;
   let started = false;
@@ -514,9 +522,6 @@ export function createShutdown(deps: ShutdownDeps): (signal?: string) => Promise
     if (deps.lifecycle) deps.lifecycle.shuttingDown = true;
     const closed = new Promise<void>((resolve) => deps.server.close(() => resolve()));
     deps.stopSync?.();
-    // Pushes are network-only and retried by the next periodic sync; local
-    // add/commit may still finish within the cap.
-    abortPushes();
 
     let timer: NodeJS.Timeout | undefined;
     const timedOut = new Promise<"timeout">((resolve) => {
@@ -536,6 +541,9 @@ export function createShutdown(deps: ShutdownDeps): (signal?: string) => Promise
       console.error("error while draining writes:", err);
     } finally {
       clearTimeout(timer);
+      // Out of budget (or done): kill any push still in flight. Unpushed
+      // commits are local and the next start's periodic sync pushes them.
+      abortPushes();
     }
 
     // Cut remaining (keep-alive) connections so close() can finish.

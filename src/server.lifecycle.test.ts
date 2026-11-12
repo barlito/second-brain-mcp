@@ -2,7 +2,7 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { cleanup, git, makeBareRemote, makeTempDb, newRepo, tmp } from "./test-support/fixtures";
+import { cleanup, git, makeBareRemote, makeTempDb, makeTempVault, newRepo, tmp } from "./test-support/fixtures";
 import { listen } from "./test-support/server";
 
 makeTempDb();
@@ -60,6 +60,24 @@ test("shutdown drains a pending write, stops sync, closes DB, exits 0; second ca
 
   await shutdown("SIGINT");
   assert.deepEqual(exits, [0, 1]);
+});
+
+test("shutdown commits a pending write and pushes it before exiting", async () => {
+  gitMod.resetPushAbort(); // the previous test's shutdown aborted pushes
+  const { vault, remote } = makeTempVault({ remote: true }) as { vault: string; remote: string };
+  const app = await listen(server.createApp({ vaultRoot: vault }));
+  const exits: number[] = [];
+  const shutdown = server.createShutdown({ server: app.server, closeDb: () => undefined, exit: (c) => exits.push(c) });
+  try {
+    const pending = gitMod.syncWrite(vault, join(vault, "n.md"), "n\n", "pending write");
+    await shutdown("SIGTERM");
+    const { commitSha } = await pending;
+    assert.equal(git(["rev-parse", "main"], remote).trim(), commitSha);
+    assert.equal(gitMod.getSyncStatus(vault).unpushed, false);
+    assert.deepEqual(exits, [0]);
+  } finally {
+    gitMod.resetPushAbort();
+  }
 });
 
 test("shutdown gives up on a stuck drain after the cap", async () => {

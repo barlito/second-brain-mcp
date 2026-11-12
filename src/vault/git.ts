@@ -28,6 +28,12 @@ const NETWORK_TIMEOUT_MS = 30_000;
 const DEFAULT_PUSH_DEADLINE_MS = 150_000;
 const PUSH_RETRIES = 3;
 const PUSH_BACKOFF_MS = 1000;
+// After a network error, writes skip their pre-write pull for this long so a
+// dead remote does not cost every write a network timeout. Env override for tests.
+const DEFAULT_NET_COOLDOWN_MS = 60_000;
+// Max write operations waiting for (or holding) the lock before new ones are
+// refused as busy. Internal jobs (periodic sync, push-retry pulls) are exempt.
+const DEFAULT_WRITE_QUEUE_MAX = 50;
 // An index.lock younger than this may belong to a live human git process.
 const STALE_LOCK_MS = 10 * 60_000;
 const REBASE_MARKER = "second-brain-rebase";
@@ -38,6 +44,16 @@ const OP_MARKER = "second-brain-op";
 
 function pushDeadlineMs(): number {
   return Number(process.env.SB_PUSH_DEADLINE_MS) || DEFAULT_PUSH_DEADLINE_MS;
+}
+
+function netCooldownMs(): number {
+  const v = process.env.SB_NET_COOLDOWN_MS;
+  return v !== undefined && v !== "" && Number.isFinite(Number(v)) ? Number(v) : DEFAULT_NET_COOLDOWN_MS;
+}
+
+export function writeQueueMax(): number {
+  const n = Number(process.env.VAULT_WRITE_QUEUE_MAX);
+  return Number.isInteger(n) && n > 0 ? n : DEFAULT_WRITE_QUEUE_MAX;
 }
 
 // LANG/LC_ALL=C: error-message matching must not depend on the locale.
@@ -255,7 +271,29 @@ function classify(err: unknown): SyncErrorKind {
 }
 
 function recordError(vaultRoot: string, err: unknown): void {
-  st(vaultRoot).lastError = { kind: classify(err), message: errText(err), at: new Date().toISOString() };
+  const kind = classify(err);
+  if (kind === "network") markNetDown(vaultRoot);
+  st(vaultRoot).lastError = { kind, message: errText(err), at: new Date().toISOString() };
+}
+
+// ---- remote reachability ---------------------------------------------------
+
+// Time of the last network failure talking to the remote, per vault; cleared by
+// any successful pull or push.
+const netDownAt = new Map<string, number>();
+
+function markNetDown(vaultRoot: string): void {
+  netDownAt.set(path.resolve(vaultRoot), Date.now());
+}
+
+function markNetUp(vaultRoot: string): void {
+  netDownAt.delete(path.resolve(vaultRoot));
+}
+
+// True while the last network error is recent: skip optional network calls.
+function remoteRecentlyDown(vaultRoot: string): boolean {
+  const at = netDownAt.get(path.resolve(vaultRoot));
+  return at !== undefined && Date.now() - at < netCooldownMs();
 }
 
 // ---- git primitives ------------------------------------------------------
@@ -443,6 +481,7 @@ export async function pullRebase(
     try {
       await runGit(["pull", "--rebase", "--autostash", "origin", branch], vaultRoot, NETWORK_TIMEOUT_MS, signal);
       st(vaultRoot).lastPullAt = new Date().toISOString();
+      markNetUp(vaultRoot);
     } catch (err) {
       // A brand-new remote has no such branch yet: nothing to pull.
       if (/couldn't find remote ref/i.test(errText(err))) return;
@@ -521,8 +560,9 @@ export async function commitFile(
 
 // ---- push ----------------------------------------------------------------
 
-// Shutdown aborts pending pushes: they are network-only and the next periodic
-// sync retries them. Stays aborted until resetPushAbort() (tests only).
+// Aborts pushes in flight (and their retry pulls); used when the shutdown drain
+// budget runs out. The next start's periodic sync retries them. Stays aborted
+// until resetPushAbort() (tests only).
 let pushAbort = new AbortController();
 
 export function abortPendingPushes(): void {
@@ -538,18 +578,34 @@ async function pushOnce(vaultRoot: string, signal: AbortSignal): Promise<void> {
   await runGit(["push", "origin", branch], vaultRoot, NETWORK_TIMEOUT_MS, signal);
 }
 
-// Never rejects. Retries pull first (a rejected push is usually non-fast-forward).
-// Bounded by one overall deadline; every child is killed when it expires, so
-// by the time this settles no git process of ours is left running.
-async function pushWithRetry(vaultRoot: string): Promise<void> {
+// The push-retry pull rewrites HEAD and the working tree, so it takes the lock
+// like a write (exempt from the queue bound: at most one pusher per vault).
+function lockedPull(vaultRoot: string, signal: AbortSignal): Promise<void> {
+  return withLock(
+    vaultRoot,
+    async () => {
+      await selfHeal(vaultRoot);
+      await pullRebase(vaultRoot, signal, "push-retry");
+      return { value: undefined, push: false };
+    },
+    false,
+  );
+}
+
+// Never rejects; true on success. Runs outside the lock: `git push` only reads
+// local refs/objects, so it is safe next to a commit. A rejected push (usually
+// non-fast-forward) is retried after a locked pull; a network failure is
+// retried without one, so a dead remote never holds the lock. Bounded by one
+// overall deadline; every child is killed when it expires.
+async function pushWithRetry(vaultRoot: string): Promise<boolean> {
   const s = st(vaultRoot);
   const signal = AbortSignal.any([AbortSignal.timeout(pushDeadlineMs()), pushAbort.signal]);
   let lastErr: unknown;
   for (let attempt = 1; attempt <= PUSH_RETRIES && !signal.aborted; attempt++) {
     try {
-      if (attempt > 1) {
+      if (attempt > 1 && classify(lastErr) !== "network") {
         try {
-          await pullRebase(vaultRoot, signal, "push-retry");
+          await lockedPull(vaultRoot, signal);
         } catch (pullErr) {
           lastErr = pullErr;
           if (pullErr instanceof SyncConflictError) break; // retrying can't help
@@ -560,9 +616,11 @@ async function pushWithRetry(vaultRoot: string): Promise<void> {
       s.lastPushOk = true;
       s.lastPushAt = new Date().toISOString();
       s.lastError = null;
-      return;
+      markNetUp(vaultRoot);
+      return true;
     } catch (err) {
       lastErr = err;
+      if (classify(err) === "network") markNetDown(vaultRoot);
       if (attempt < PUSH_RETRIES) await sleep(PUSH_BACKOFF_MS * attempt, signal);
     }
   }
@@ -571,23 +629,64 @@ async function pushWithRetry(vaultRoot: string): Promise<void> {
   s.lastPushAt = new Date().toISOString();
   recordError(vaultRoot, lastErr);
   console.error(`git push failed: ${s.lastError?.message}`);
+  return false;
+}
+
+// One background pusher per vault: at most one push cycle in flight; commits
+// landing meanwhile set `again` and are pushed by one follow-up cycle (only if
+// the cycle succeeded: after a failure the next write, periodic sync or
+// shutdown retries, so a dead remote is not hammered).
+interface Pusher {
+  vaultRoot: string;
+  running: Promise<void> | null;
+  again: boolean;
+}
+const pushers = new Map<string, Pusher>();
+
+function schedulePush(vaultRoot: string): void {
+  const key = path.resolve(vaultRoot);
+  let p = pushers.get(key);
+  if (!p) {
+    p = { vaultRoot, running: null, again: false };
+    pushers.set(key, p);
+  }
+  st(vaultRoot).unpushed = true;
+  if (p.running) {
+    p.again = true;
+    return;
+  }
+  const pusher = p;
+  pusher.running = (async () => {
+    try {
+      let ok: boolean;
+      do {
+        pusher.again = false;
+        ok = await pushWithRetry(vaultRoot);
+        // A commit landed while pushing: it may not be on the remote yet.
+        if (pusher.again) st(vaultRoot).unpushed = true;
+      } while (ok && pusher.again && !pushAbort.signal.aborted);
+    } catch (err) {
+      console.error(`background push failed: ${errText(err)}`);
+    } finally {
+      pusher.running = null;
+    }
+  })();
 }
 
 // ---- lock ----------------------------------------------------------------
 
 // Single in-process mutex so concurrent calls serialize instead of interleaving
-// git operations on the same working tree.
-//
-// The queue only advances once the *push* from the previous turn has settled.
-// That is safe because pushWithRetry has a hard overall deadline and kills its
-// children, so it always settles in bounded time.
+// git operations on the same working tree. A turn ends with the local commit;
+// pushing happens in the background pusher (above), never inside a write's turn.
 interface LockedResult<T> {
   value: T;
-  // Resolves when background work (the push) kicked off by this turn settles.
-  settle: Promise<unknown>;
+  // Hand the new commit(s) to the background pusher once the turn ends.
+  push: boolean;
 }
 
 let queue: Promise<unknown> = Promise.resolve();
+// Bounded turns waiting for or holding the lock.
+let queuedWrites = 0;
 
 function opMarkerPath(vaultRoot: string): string {
   return path.join(gitDir(vaultRoot), OP_MARKER);
@@ -606,37 +705,46 @@ function clearOpMarker(vaultRoot: string): void {
   rmSync(opMarkerPath(vaultRoot), { force: true });
 }
 
-// The op marker covers the whole turn, including the background push.
-function withLock<T>(vaultRoot: string, fn: () => Promise<LockedResult<T>>): Promise<T> {
+// `bounded` turns (client-driven writes) are refused with VaultBusyError once
+// writeQueueMax() of them are pending, so one client cannot queue unbounded work.
+function withLock<T>(vaultRoot: string, fn: () => Promise<LockedResult<T>>, bounded = true): Promise<T> {
+  if (bounded) {
+    if (queuedWrites >= writeQueueMax()) {
+      return Promise.reject(new VaultBusyError("vault busy (too many queued writes); try again shortly"));
+    }
+    queuedWrites++;
+  }
   const scheduled = queue.then(async () => {
     setOpMarker(vaultRoot);
     try {
-      return await fn();
-    } catch (err) {
+      const r = await fn();
+      if (r.push) schedulePush(vaultRoot);
+      return r.value;
+    } finally {
       clearOpMarker(vaultRoot);
-      throw err;
+      if (bounded) queuedWrites--;
     }
   });
-  queue = scheduled.then(
-    async (r) => {
-      try {
-        await r.settle.catch(() => undefined);
-      } finally {
-        clearOpMarker(vaultRoot);
-      }
-    },
-    () => undefined,
-  );
-  return scheduled.then((r) => r.value);
+  queue = scheduled.catch(() => undefined);
+  return scheduled;
 }
 
-// Resolves once the lock queue is idle (including in-flight pushes).
-export async function drainWrites(): Promise<void> {
-  let q: Promise<unknown>;
-  do {
-    q = queue;
+// Resolves once the lock queue and every background push are idle. With
+// finalPush (shutdown), first retries vaults left unpushed by an earlier failed
+// cycle, unless their remote just failed with a network error.
+export async function drainWrites(opts: { finalPush?: boolean } = {}): Promise<void> {
+  if (opts.finalPush) {
+    for (const p of pushers.values()) {
+      if (!p.running && st(p.vaultRoot).unpushed && !remoteRecentlyDown(p.vaultRoot)) schedulePush(p.vaultRoot);
+    }
+  }
+  for (;;) {
+    const q = queue;
     await q;
-  } while (q !== queue);
+    const running = [...pushers.values()].flatMap((p) => (p.running ? [p.running] : []));
+    if (running.length === 0 && q === queue) return;
+    await Promise.all(running);
+  }
 }
 
 // A create-only write found the note already there.
@@ -721,11 +829,13 @@ export class MoveTargetExistsError extends Error {
   }
 }
 
-// Pull (best effort) under the lock; shared by every write operation.
+// Pull (best effort) under the lock; shared by every write operation. Skipped
+// while the remote recently failed with a network error: the write commits
+// locally and the background pusher rebases onto the remote once it is back.
 async function prepareLocked(vaultRoot: string): Promise<boolean> {
   await selfHeal(vaultRoot);
   const remote = await hasRemote(vaultRoot);
-  if (remote) {
+  if (remote && !remoteRecentlyDown(vaultRoot)) {
     try {
       await pullRebase(vaultRoot);
     } catch (err) {
@@ -738,14 +848,10 @@ async function prepareLocked(vaultRoot: string): Promise<boolean> {
   return remote;
 }
 
-// Resolve the caller now; the lock queue (settle) waits on the push instead.
+// The turn ends here; with a remote, withLock hands the push to the background pusher.
 function finishLocked<T>(vaultRoot: string, remote: boolean, value: T): LockedResult<T> {
-  let settle: Promise<unknown> = Promise.resolve();
-  if (remote) {
-    st(vaultRoot).unpushed = true;
-    settle = pushWithRetry(vaultRoot);
-  }
-  return { value, settle };
+  if (remote) st(vaultRoot).unpushed = true;
+  return { value, push: remote };
 }
 
 function lockedWrite(
@@ -879,30 +985,37 @@ function lstatOrNull(p: string): boolean {
 
 // ---- periodic sync -------------------------------------------------------
 
-// Pulls remote changes and pushes leftover local commits under the same lock
-// as writes. Errors are logged, never thrown.
+// Pulls remote changes under the same lock as writes, then hands leftover local
+// commits to the background pusher. While the remote recently failed with a
+// network error the pull is skipped (the push then doubles as the probe), so a
+// dead remote does not hold the lock every tick. Errors are logged, never thrown.
 export function startPeriodicSync(vaultRoot: string, intervalMs: number): () => void {
   let running = false;
-  const idle = { value: undefined, settle: Promise.resolve() };
+  const idle = { value: undefined, push: false };
   const tick = async (): Promise<void> => {
     if (running) return;
     running = true;
     try {
-      await withLock(vaultRoot, async () => {
-        await selfHeal(vaultRoot);
-        if (!(await hasRemote(vaultRoot))) return idle;
-        try {
-          await pullRebase(vaultRoot, undefined, "periodic");
-        } catch (err) {
-          recordError(vaultRoot, err);
-          console.error(`periodic sync pull failed: ${errText(err)}`);
-          return idle;
-        }
-        const s = st(vaultRoot);
-        if (!s.unpushed && !(await hasLocalOnlyCommits(vaultRoot))) return idle;
-        s.unpushed = true;
-        return { value: undefined, settle: pushWithRetry(vaultRoot) };
-      });
+      await withLock(
+        vaultRoot,
+        async () => {
+          await selfHeal(vaultRoot);
+          if (!(await hasRemote(vaultRoot))) return idle;
+          if (!remoteRecentlyDown(vaultRoot)) {
+            try {
+              await pullRebase(vaultRoot, undefined, "periodic");
+            } catch (err) {
+              recordError(vaultRoot, err);
+              console.error(`periodic sync pull failed: ${errText(err)}`);
+              return idle;
+            }
+          }
+          const s = st(vaultRoot);
+          if (!s.unpushed && !(await hasLocalOnlyCommits(vaultRoot))) return idle;
+          return { value: undefined, push: true };
+        },
+        false,
+      );
     } catch (err) {
       console.error(`periodic sync failed: ${errText(err)}`);
     } finally {
