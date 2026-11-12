@@ -310,7 +310,7 @@ test("kb_propose caps pending proposals per token and in total, counted under th
     assert.equal((await propose(tq, { note: "q2" })).isError, false);
     const third = await propose(tq, { note: "q3" });
     assert.equal(third.isError, true);
-    assert.match(third.text, /too many pending proposals; ask the user to review the inbox/);
+    assert.match(third.text, /^Too many pending proposals\. Ask the user to review the inbox\.$/);
     assert.equal(lastAudit(db, "action = 'kb_propose'").result, "error");
     assert.equal((await propose(mk("tok-quota-b"), { note: "q4" })).isError, false, "other tokens keep their own share");
     await drain();
@@ -324,7 +324,7 @@ test("kb_propose caps pending proposals per token and in total, counted under th
     process.env.INBOX_MAX_TOTAL = String(ids().length);
     const full = await propose(mk("tok-quota-d"), { note: "q5" });
     assert.equal(full.isError, true);
-    assert.match(full.text, /too many pending proposals/);
+    assert.match(full.text, /Too many pending proposals/);
   } finally {
     delete process.env.INBOX_MAX_PER_TOKEN;
     delete process.env.INBOX_MAX_TOTAL;
