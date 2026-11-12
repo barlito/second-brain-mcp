@@ -1,4 +1,4 @@
-// Connector keys: a fixed secret header (X-SB-Connector-Key) that a claude.ai custom connector or a
+// Connector keys: a fixed secret header (x-api-key, one of the names claude.ai connectors accept) that a claude.ai custom connector or a
 // Claude Code `--header` sends, so the token-less surface is closed to the open internet. Lookup is by
 // SHA-256 hash; the plaintext is also kept encrypted at rest (AES-256-GCM, key from ADMIN_WEB_SECRET
 // via HKDF) so the admin can reveal it again. Not an identity: it grants nothing by itself, it only
@@ -7,7 +7,7 @@ import { createCipheriv, createDecipheriv, createHash, hkdfSync, randomBytes, ra
 import { db } from "../db";
 import { endSession } from "./sessions";
 
-export const CONNECTOR_HEADER = "X-SB-Connector-Key";
+export const CONNECTOR_HEADER = "x-api-key";
 const LAST_USED_THROTTLE_MS = 60_000;
 
 const hashKey = (k: string): string => createHash("sha256").update(k).digest("hex");

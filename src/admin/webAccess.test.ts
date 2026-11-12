@@ -272,11 +272,11 @@ test("connector keys: create (one-time page with header + Copy), list, reveal (a
   const keys = await import("../auth/connectorKeys");
   assert.match((await get("/access")).body, /No keys: token-less access is disabled/);
   const created = await follow(await post("/access/keys", { name: "claude-ai" }));
-  assert.match(created.body, /X-SB-Connector-Key/);
+  assert.match(created.body, /x-api-key/);
   const key = /<textarea id="ckey-value"[^>]*>(sbk_[A-Za-z0-9_-]+)<\/textarea>/.exec(created.body)?.[1];
   assert.ok(key, "key shown on the creation page");
   assert.match(created.body, /data-copy="ckey-value"/);
-  assert.match(created.body, /--header &quot;X-SB-Connector-Key: sbk_/);
+  assert.match(created.body, /--header &quot;x-api-key: sbk_/);
   assert.equal(keys.checkConnectorKey(key)?.name, "claude-ai");
   // One-time flash: a reload does not show it again.
   const again = await get(`/access/keys/created/${"0".repeat(32)}`);
@@ -294,7 +294,7 @@ test("connector keys: create (one-time page with header + Copy), list, reveal (a
   assert.equal(rev.status, 200);
   assert.match(String(rev.headers["cache-control"]), /no-store/);
   assert.ok(rev.body.includes(key as string));
-  assert.match(rev.body, /X-SB-Connector-Key/);
+  assert.match(rev.body, /x-api-key/);
   const audit = db.prepare("SELECT action, token_name, result, detail FROM audit_log WHERE action = 'connector_key_reveal' ORDER BY id DESC").get() as any;
   assert.deepEqual([audit.token_name, audit.result], ["admin:alice", "ok"]);
   assert.equal(JSON.stringify(db.prepare("SELECT * FROM audit_log").all()).includes(key as string), false, "audit never holds the value");
@@ -326,9 +326,9 @@ test("connector key CLI: create, show (audited), list, revoke", async () => {
   try {
     assert.throws(() => run(["create"]), /name must be/);
     const out = run(["create", "--name", "cli-key"]);
-    const key = /X-SB-Connector-Key: (sbk_[A-Za-z0-9_-]+)/.exec(out)?.[1];
+    const key = /x-api-key: (sbk_[A-Za-z0-9_-]+)/.exec(out)?.[1];
     assert.ok(key);
-    assert.match(out, /claude mcp add --scope user --transport http second-brain .* --header "X-SB-Connector-Key: sbk_/);
+    assert.match(out, /claude mcp add --scope user --transport http second-brain .* --header "x-api-key: sbk_/);
     assert.ok(run(["show", "--name", "cli-key"]).includes(key as string));
     const a = db.prepare("SELECT token_name, result, detail FROM audit_log WHERE action = 'connector_key_reveal' ORDER BY id DESC").get() as any;
     assert.deepEqual([a.token_name, a.result], ["cli", "ok"]);
