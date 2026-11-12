@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := help
-.PHONY: help deploy deploy.prod db.backup db.restore docker.service.update deploy.assert_image smoke.test deploy.pruneprune-local-images undeploy restart logs token-create token-list token-revoke backup-db prune-audit inbox-list inbox-show inbox-accept inbox-reject
+.PHONY: help deploy deploy.prod db.backup db.restore docker.service.update deploy.assert_image smoke.test deploy.prune prune-local-images undeploy restart logs token-create token-list token-revoke backup-db prune-audit inbox-list inbox-show inbox-accept inbox-reject
 
 stack_name=second-brain-mcp
 service=second-brain-mcp
@@ -8,6 +8,9 @@ image_name=barlito/second-brain-mcp
 prod_host=second-brain.barlito.fr
 assert_timeout=180
 assert_settle=10
+# Service Version.Index + UpdateStatus.StartedAt before a deploy/update: assert-deployed.sh
+# ignores update states that predate it (stale rollback_*/completed).
+mark_file=.service-mark
 
 # Runs the local container as the host user instead of the image's appuser,
 # so it can read/write the bind-mounted vault (host-owned, different uid).
@@ -54,43 +57,54 @@ deploy: ## Build the image and deploy the stack locally (Swarm)
 	  docker compose build && $(call stack_deploy,,)
 	$(MAKE) prune-local-images
 
+# $(1): file to write. "none" when the service does not exist yet.
+define mark_service
+docker service inspect $(svc_full) --format '{{.Version.Index}}|{{if .UpdateStatus}}{{.UpdateStatus.StartedAt}}{{end}}' > $(1) 2>/dev/null || echo none > $(1)
+endef
+
 # Rolling stack deploy (never `stack rm`: a recreated service has nothing to roll back to).
 # Needs TAG + ADMIN_PROXY_SECRET + ADMIN_WEB_SECRET in the env; the image must be published.
+# --detach=false waits for convergence (or Swarm's own rollback).
 deploy.prod: ## Deploy the whole prod stack (TAG=<release tag>): backup, stack deploy, assert, smoke, prune
 	@test -n "$(TAG)" || { echo "TAG is required (TAG=<tag> make deploy.prod)" >&2; exit 1; }
 	$(MAKE) db.backup
-	$(call stack_deploy,-f docker-compose-prod.yml,--with-registry-auth)
+	@$(call mark_service,$(mark_file))
+	$(call stack_deploy,-f docker-compose-prod.yml,--with-registry-auth --detach=false)
 	$(MAKE) deploy.assert_image
 	$(MAKE) smoke.test
 	$(MAKE) deploy.prune
 
 # Skipped silently when the service has no running task (first deploy).
+# ids= runs as its own command so a docker error aborts the recipe (no pipe, -e is on).
 db.backup: ## Backup the DB if the service is running (skipped on first deploy)
-	@if docker ps -q --filter label=com.docker.swarm.service.name=$(svc_full) | grep -q .; then \
+	@ids=$$(docker ps -q --filter label=com.docker.swarm.service.name=$(svc_full)); \
+	if [ -n "$$ids" ]; then \
 	  $(MAKE) --no-print-directory backup-db; \
 	else \
 	  echo "no running $(svc_full) task, backup skipped (first deploy?)"; \
 	fi
 
-# Replaces acl.db with /data/backups/<file>. The service must be scaled to 0 first; the current DB
-# is kept as acl.db.pre-restore-<ts>. Runs a one-off container of the target image on the volume.
+# Replaces acl.db with /data/backups/<file>. The service must be scaled to 0 first. The current
+# acl.db, -wal and -shm are copied to *.pre-restore-<ts> before anything is deleted.
+# Runs a one-off container of the target image on the volume.
 db.restore: ## Restore a DB backup (TAG=<image tag> file=acl-<ts>.db); service must be scaled to 0
 	@test -n "$(TAG)" -a -n "$(file)" || { echo "usage: make db.restore TAG=<tag> file=acl-<ts>.db" >&2; exit 1; }
 	@case "$(file)" in */*) echo "file must be a bare backup filename" >&2; exit 1;; esac
-	@! docker ps -q --filter label=com.docker.swarm.service.name=$(svc_full) | grep -q . \
-	  || { echo "$(svc_full) is still running: scale it to 0 first" >&2; exit 1; }
+	@ids=$$(docker ps -q --filter label=com.docker.swarm.service.name=$(svc_full)); \
+	[ -z "$$ids" ] || { echo "$(svc_full) is still running: scale it to 0 first" >&2; exit 1; }
 	docker run --rm --entrypoint sh -v $(stack_name)_acl-data:/data $(image_name):$(TAG) -ec \
 	  'test -f "/data/backups/$(file)"; ts=$$(date -u +%Y%m%dT%H%M%SZ); \
-	   [ ! -f /data/acl.db ] || cp /data/acl.db "/data/acl.db.pre-restore-$$ts"; \
+	   for f in acl.db acl.db-wal acl.db-shm; do [ ! -f "/data/$$f" ] || cp -p "/data/$$f" "/data/$$f.pre-restore-$$ts"; done; \
 	   rm -f /data/acl.db-wal /data/acl.db-shm; cp "/data/backups/$(file)" /data/acl.db; echo "restored $(file)"'
 
 docker.service.update: ## docker service update with registry auth (args="--image <img> <service>")
+	@$(call mark_service,$(mark_file))
 	docker service update --with-registry-auth $(args)
 
 # Swarm rollbacks exit 0: fail unless the service really runs $(image_name):$(TAG), healthy
 deploy.assert_image: ## Wait until the service runs $(image_name):$(TAG) and is healthy
 	@test -n "$(TAG)" || { echo "TAG is required" >&2; exit 1; }
-	scripts/assert-deployed.sh $(svc_full) $(image_name):$(TAG) $(assert_timeout) $(assert_settle)
+	scripts/assert-deployed.sh $(svc_full) $(image_name):$(TAG) $(assert_timeout) $(assert_settle) $(mark_file)
 
 smoke.test: ## GET /health on the prod host (retries)
 	@echo "Smoke test https://$(prod_host)/health"

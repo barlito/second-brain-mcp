@@ -44,7 +44,7 @@ jobs:
           context: .
           push: true
           tags: |
-            ${{ secrets.DOCKER_HUB_USERNAME }}/second-brain-mcp:${{ github.ref_name }}
-            ${{ secrets.DOCKER_HUB_USERNAME }}/second-brain-mcp:latest
+            barlito/second-brain-mcp:${{ github.ref_name }}
+            ${{ github.event.release.prerelease == false && 'barlito/second-brain-mcp:latest' || '' }}
           cache-from: type=registry,ref=ghcr.io/${{ github.repository }}:buildcache
           cache-to: type=registry,ref=ghcr.io/${{ github.repository }}:buildcache,mode=max

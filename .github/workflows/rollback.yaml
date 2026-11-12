@@ -13,6 +13,13 @@ on:
         type: string
         default: ""
 
+permissions:
+  contents: read
+
+concurrency:
+  group: prod-deploy
+  cancel-in-progress: false
+
 jobs:
   rollback:
     runs-on: ubuntu-latest
@@ -56,7 +63,8 @@ jobs:
 
       # Safety copy of the current DB (also kept when restoring an older one)
       - name: Backup database before rollback
-        run: make db.backup
+        continue-on-error: true
+        run: make db.backup || { echo "::warning::DB backup failed, rolling back without a fresh safety copy"; exit 1; }
 
       - name: Restore database backup
         if: ${{ inputs.restore-db != '' }}
@@ -71,3 +79,8 @@ jobs:
 
       - name: Smoke test
         run: make smoke.test
+
+      # A Swarm rollback after scale-to-0 would restore replicas=0: make sure the service runs
+      - name: Ensure service is running (on failure)
+        if: failure()
+        run: docker service scale "$SERVICE=1"

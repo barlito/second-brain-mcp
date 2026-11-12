@@ -9,6 +9,13 @@ on:
         type: boolean
         default: false
 
+permissions:
+  contents: read
+
+concurrency:
+  group: prod-deploy
+  cancel-in-progress: false
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
@@ -17,9 +24,6 @@ jobs:
 
     env:
       DOCKER_HOST: ssh://${{ vars.SERVER_USERNAME }}@${{ vars.SERVER_HOST }}:${{ vars.SERVER_PORT }}
-      # Substituted in docker-compose-prod.yml at stack deploy
-      ADMIN_PROXY_SECRET: ${{ secrets.ADMIN_PROXY_SECRET }}
-      ADMIN_WEB_SECRET: ${{ secrets.ADMIN_WEB_SECRET }}
       SERVICE: second-brain-mcp_second-brain-mcp
 
     steps:
@@ -58,9 +62,13 @@ jobs:
         if: inputs.re-deploy
         env:
           VAULT_DEPLOY_KEY: ${{ secrets.VAULT_DEPLOY_KEY }}
+          # Substituted in docker-compose-prod.yml at stack deploy
+          ADMIN_PROXY_SECRET: ${{ secrets.ADMIN_PROXY_SECRET }}
+          ADMIN_WEB_SECRET: ${{ secrets.ADMIN_WEB_SECRET }}
         # No `stack rm`: deploy.prod rolls the existing stack (creates it on a first deploy)
         run: |
           # Swarm secret created once, from stdin (never printed)
+          [ -n "$VAULT_DEPLOY_KEY" ] || { echo "::error::VAULT_DEPLOY_KEY unset"; exit 1; }
           if ! docker secret inspect vault_deploy_key >/dev/null 2>&1; then
             printf '%s\n' "$VAULT_DEPLOY_KEY" | docker secret create vault_deploy_key - >/dev/null
             echo "Secret vault_deploy_key created."

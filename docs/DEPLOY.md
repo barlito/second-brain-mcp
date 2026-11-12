@@ -6,7 +6,7 @@ Releases are cut with GitHub Releases and deployed with GitHub Actions (same flo
 
 ## Release, deploy, rollback (GitHub Actions)
 
-1. **Release**: create a GitHub Release `vX.Y.Z`. `release.yaml` runs the tests, then builds and pushes `<DOCKER_HUB_USERNAME>/second-brain-mcp:vX.Y.Z` and `:latest` to Docker Hub (buildcache on ghcr). Tags are immutable: never reuse one.
+1. **Release**: create a GitHub Release `vX.Y.Z`. `release.yaml` runs the tests, then builds and pushes `barlito/second-brain-mcp:vX.Y.Z` (and `:latest` unless the release is a prerelease) to Docker Hub (buildcache on ghcr). Tags are immutable: never reuse one.
 2. **Deploy**: run the Deploy workflow on that tag (the job refuses a non-tag ref):
    ```bash
    gh workflow run deploy.yaml --ref vX.Y.Z                    # image-only update
@@ -130,7 +130,7 @@ TAG=<old> make deploy.assert_image && make smoke.test
 
 ```bash
 docker service scale second-brain-mcp_second-brain-mcp=0
-make db.restore TAG=<old> file=acl-<ts>.db     # keeps the current DB as acl.db.pre-restore-<ts>
+make db.restore TAG=<old> file=acl-<ts>.db     # keeps acl.db/-wal/-shm as *.pre-restore-<ts>
 make docker.service.update args="--replicas 1 --image barlito/second-brain-mcp:<old> second-brain-mcp_second-brain-mcp"
 TAG=<old> make deploy.assert_image && make smoke.test
 ```
