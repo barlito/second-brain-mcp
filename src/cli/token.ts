@@ -56,6 +56,7 @@ export function projectScopes(project: string | undefined): Scope[] {
     );
   }
   const [space, name] = parts;
+  if (space === SHARED_SPACE) throw new TokenValidationError(`preset "${PROJECT_PRESET}" cannot target the shared space "${SHARED_SPACE}": it is read-only for project tokens`);
   return [
     { space: SHARED_SPACE, project: "*", section: "*", permission: "read" },
     { space, project: name, section: "*", permission: "read" },

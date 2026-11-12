@@ -230,7 +230,7 @@ test("CLI end-to-end: preset project without wildcard flag, and the claude comma
 
   const withDir = run({ PUBLIC_MCP_URL: "https://second-brain.local.barlito.fr/mcp" }, "create", "--name", "pj2", "--scope", "pro:x:y:read", "--dir", "/tmp/it's here");
   assert.equal(withDir.status, 0, withDir.stderr);
-  assert.match(withDir.stdout, /^cd '\/tmp\/it'\\''s here' && claude mcp add --scope local --transport http second-brain https:\/\/second-brain\.local\.barlito\.fr\/mcp --header "Authorization: Bearer sb_\S+"$/m);
+  assert.match(withDir.stdout, /^cd -- '\/tmp\/it'\\''s here' && claude mcp add --scope local --transport http second-brain https:\/\/second-brain\.local\.barlito\.fr\/mcp --header "Authorization: Bearer sb_\S+"$/m);
 
   for (const args of [
     ["--preset", "project"],
@@ -250,4 +250,14 @@ test("CLI end-to-end: preset project without wildcard flag, and the claude comma
   assert.match(nl.stderr, /control characters/);
   assert.doesNotMatch(run({}, "list").stdout, /name=pjnl|name=pjbad/);
   assert.doesNotMatch(run({}, "list").stdout, /claude mcp add/);
+});
+
+test("preset project refuses the shared meta space (CLI)", () => {
+  assert.throws(() => resolveScopes("project", undefined, "n", "meta/x"), /shared space "meta"/);
+  const r = spawnSync(process.execPath, ["--import", "tsx", join(__dirname, "token.ts"), "create", "--name", "pjmeta", "--preset", "project", "--project", "meta/x"], {
+    env: { ...process.env, DB_PATH: dbPath },
+    encoding: "utf8",
+  });
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /shared space "meta"/);
 });

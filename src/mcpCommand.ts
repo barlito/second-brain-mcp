@@ -18,9 +18,10 @@ export function mcpUrl(env: NodeJS.ProcessEnv = process.env): string {
   return DEFAULT_MCP_URL;
 }
 
-// POSIX single-quote quoting; plain strings of safe characters stay unquoted.
+// POSIX single-quote quoting; plain strings of safe characters stay unquoted. `=` is not safe:
+// zsh expands a leading `=cmd`.
 export function shellQuote(s: string): string {
-  return /^[A-Za-z0-9_@%+=:,./-]+$/.test(s) ? s : `'${s.replace(/'/g, "'\\''")}'`;
+  return /^[A-Za-z0-9_@%+:,./-]+$/.test(s) ? s : `'${s.replace(/'/g, "'\\''")}'`;
 }
 
 // Error message when `dir` cannot be quoted into a one-line command; undefined when fine.
@@ -44,5 +45,6 @@ export function claudeAddCommand(opts: { url: string; token: string; dir?: strin
     if (p) throw new Error(p);
   }
   const add = `claude mcp add --scope local --transport http second-brain ${shellQuote(opts.url)} --header "Authorization: Bearer ${opts.token}"`;
-  return dir ? `cd ${cdTarget(dir)} && ${add}` : add;
+  // `--` so a directory starting with `-` is not read as a cd option.
+  return dir ? `cd -- ${cdTarget(dir)} && ${add}` : add;
 }

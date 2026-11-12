@@ -576,7 +576,7 @@ test("tokens: preset project grants meta read + own project, needs no wildcard c
   const plaintext = /(sb_[A-Za-z0-9_-]{43})/.exec(ok.body)![1];
   // The textarea holds the command; quotes are HTML-escaped but a browser reads them back.
   assert.ok(
-    ok.body.includes(`cd &#39;/home/me/my proj&#39; &amp;&amp; claude mcp add --scope local --transport http second-brain https://second-brain.barlito.fr/mcp --header &quot;Authorization: Bearer ${plaintext}&quot;`),
+    ok.body.includes(`cd -- &#39;/home/me/my proj&#39; &amp;&amp; claude mcp add --scope local --transport http second-brain https://second-brain.barlito.fr/mcp --header &quot;Authorization: Bearer ${plaintext}&quot;`),
     "command with quoted dir",
   );
   assert.match(ok.body, /data-copy="claude-cmd"/);
@@ -615,4 +615,17 @@ test("tokens: preset project validation, extras and the dir field", async () => 
   assert.equal(ok.status, 303);
   const scopes = tokens.listTokens().find((x) => x.name === "proj-extra")!.scopes.map((s) => `${s.space}:${s.project}:${s.section}:${s.permission}`);
   assert.ok(scopes.includes("pro:p:*:write") && scopes.includes("sp:*:*:read") && !scopes.includes("sp:pj:notes:read"));
+});
+
+test("tokens: preset project refuses meta; project field without the project preset is refused", async () => {
+  const before = tokens.listTokens().length;
+  const meta = await post("/tokens", { name: "x", preset: "project", project: "meta/x" });
+  assert.equal(meta.status, 422);
+  assert.match(meta.body, /shared space/);
+  for (const f of <Array<Record<string, string>>>[{ name: "x", preset: "master-ro", project: "pro/p", allow_wildcard: "1" }, { name: "x", scopes: "sp:pj:notes:read", project: "pro/p" }]) {
+    const r = await post("/tokens", f);
+    assert.equal(r.status, 422, JSON.stringify(f));
+    assert.match(r.body, /only valid with the/);
+  }
+  assert.equal(tokens.listTokens().length, before);
 });

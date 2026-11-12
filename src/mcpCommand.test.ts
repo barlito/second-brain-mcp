@@ -9,7 +9,7 @@ test("claudeAddCommand: without and with a directory", () => {
   const base = `claude mcp add --scope local --transport http second-brain ${URL} --header "Authorization: Bearer sb_abc"`;
   assert.equal(claudeAddCommand({ url: URL, token: "sb_abc" }), base);
   assert.equal(claudeAddCommand({ url: URL, token: "sb_abc", dir: "  " }), base);
-  assert.equal(claudeAddCommand({ url: URL, token: "sb_abc", dir: "/home/me/proj" }), `cd /home/me/proj && ${base}`);
+  assert.equal(claudeAddCommand({ url: URL, token: "sb_abc", dir: "/home/me/proj" }), `cd -- /home/me/proj && ${base}`);
 });
 
 test("directory quoting: spaces, quotes and shell metacharacters", () => {
@@ -17,10 +17,10 @@ test("directory quoting: spaces, quotes and shell metacharacters", () => {
   assert.equal(shellQuote("it's"), "'it'\\''s'");
   assert.equal(shellQuote("$(rm -rf x);`id`"), "'$(rm -rf x);`id`'");
   const c = claudeAddCommand({ url: URL, token: "t", dir: "/tmp/a b; touch /tmp/pwned" });
-  assert.match(c, /^cd '\/tmp\/a b; touch \/tmp\/pwned' && claude /);
+  assert.match(c, /^cd -- '\/tmp\/a b; touch \/tmp\/pwned' && claude /);
   // ~ still expands, the rest is quoted.
-  assert.match(claudeAddCommand({ url: URL, token: "t", dir: "~/My Proj" }), /^cd ~\/'My Proj' && /);
-  assert.match(claudeAddCommand({ url: URL, token: "t", dir: "~" }), /^cd ~ && /);
+  assert.match(claudeAddCommand({ url: URL, token: "t", dir: "~/My Proj" }), /^cd -- ~\/'My Proj' && /);
+  assert.match(claudeAddCommand({ url: URL, token: "t", dir: "~" }), /^cd -- ~ && /);
 });
 
 test("directory quoting is real: a shell reads back exactly the directory", () => {
@@ -51,4 +51,10 @@ test("mcpUrl: env value, default, and invalid values", () => {
   } finally {
     console.error = orig;
   }
+});
+
+test("dirs starting with - or = are neutralised (cd option, zsh =cmd expansion)", () => {
+  assert.match(claudeAddCommand({ url: URL, token: "t", dir: "-P" }), /^cd -- -P && claude /);
+  assert.equal(shellQuote("=ls"), "'=ls'");
+  assert.match(claudeAddCommand({ url: URL, token: "t", dir: "=ls" }), /^cd -- '=ls' && claude /);
 });

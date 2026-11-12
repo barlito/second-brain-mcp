@@ -327,7 +327,6 @@ export function createWebAdminApp(opts: WebAdminOptions): Express {
 
   tokensRouter.post("/", async (req, res) => {
     const body = req.body as Record<string, unknown>;
-    const projects = await knownProjects();
     const form: TokenForm = {
       name: str(body.name),
       scopes: str(body.scopes),
@@ -337,13 +336,15 @@ export function createWebAdminApp(opts: WebAdminOptions): Express {
       project: str(body.project).trim(),
       dir: str(body.dir).trim(),
     };
-    const fail = (title: string, lines: string[] = []): void =>
-      send(res, tokensView(ctxOf(res), listTokens(), { kind: "err", title, lines }, form, projects), 422);
+    // Project suggestions are only needed when the form is re-rendered.
+    const fail = async (title: string, lines: string[] = []): Promise<void> =>
+      send(res, tokensView(ctxOf(res), listTokens(), { kind: "err", title, lines }, form, await knownProjects()), 422);
     try {
       let scopes: Scope[];
       if (form.preset && !isBoundedPreset(form.preset) && form.scopes.trim()) return fail("Use either a preset or explicit scopes, not both.");
       const dirErr = form.dir ? dirProblem(form.dir) : undefined;
       if (dirErr) return fail(dirErr[0].toUpperCase() + dirErr.slice(1) + ".");
+      if (form.project && form.preset !== PROJECT_PRESET) return fail(`The project field is only valid with the "${PROJECT_PRESET}" preset.`);
       if (isBoundedPreset(form.preset)) {
         scopes = resolveScopes(form.preset, undefined, form.name.trim(), form.preset === PROJECT_PRESET ? form.project : undefined);
         if (form.scopes.trim()) scopes.push(...scopesFromText(form.scopes));
