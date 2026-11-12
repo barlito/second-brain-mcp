@@ -3,7 +3,7 @@ import { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { resolveNotePath } from "../vault/paths";
 import { NoteTooLargeError, syncAppend } from "../vault/git";
 import { NoteRuleError, validateNoteContent } from "./conventions";
-import { kbArgsShape, MAX_CONTENT_CHARS, RegisterTool, toolError, toolText, withAclAndAudit } from "./common";
+import { kbArgsShape, MAX_CONTENT_CHARS, RegisterTool, registerKbTool, toolError, toolText, withAclAndAudit } from "./common";
 import { rejectReservedSection } from "./reserved";
 
 export const MAX_ENTRY_CHARS = 1000;
@@ -19,7 +19,8 @@ export function oneLineEntry(entry: string): string {
 }
 
 export const register: RegisterTool = (server, { vaultRoot }) => {
-  server.registerTool(
+  registerKbTool(
+    server,
     "kb_append",
     {
       description:
@@ -31,7 +32,7 @@ export const register: RegisterTool = (server, { vaultRoot }) => {
         "Section `archive` cannot be appended to. Read recent history with kb_read `tail`.",
       inputSchema: {
         ...kbArgsShape,
-        entry: z.string().min(1).max(MAX_ENTRY_CHARS, "entry too long (max 1000 chars)").describe("Log entry, 1-3 sentences"),
+        entry: z.string().min(1).max(MAX_ENTRY_CHARS, "too long (max 1000 characters)").describe("Log entry, 1-3 sentences"),
       },
     },
     async ({ space, project, section, note, entry }): Promise<CallToolResult> =>

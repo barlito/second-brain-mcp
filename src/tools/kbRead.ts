@@ -2,10 +2,11 @@ import { existsSync, readFileSync } from "node:fs";
 import { z } from "zod";
 import { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { resolveNotePath } from "../vault/paths";
-import { kbArgsShape, RegisterTool, toolError, toolText, withAclAndAudit } from "./common";
+import { kbArgsShape, RegisterTool, registerKbTool, toolError, toolText, withAclAndAudit } from "./common";
 
 export const register: RegisterTool = (server, { vaultRoot }) => {
-  server.registerTool(
+  registerKbTool(
+    server,
     "kb_read",
     {
       description:

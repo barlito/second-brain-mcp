@@ -1,13 +1,14 @@
 import { z } from "zod";
 import { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { listNoteNames, statNote } from "../vault/enumerate";
-import { RegisterTool, toolText } from "./common";
+import { RegisterTool, registerKbTool, toolText } from "./common";
 import { discoveryCall, optSlug, readableChildren } from "./discovery";
 
 export const MAX_LIST_ENTRIES = 500;
 
 export const register: RegisterTool = (server, { vaultRoot }) => {
-  server.registerTool(
+  registerKbTool(
+    server,
     "kb_list",
     {
       description:
