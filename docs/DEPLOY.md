@@ -102,6 +102,8 @@ The web admin UI (`https://second-brain-admin.barlito.fr`, port 3002) sits behin
 
 - [ ] Optional, no token on the clients: configure the MCP without a token (see README "Connecting without a token") and approve each project's access request in the web admin (Access requests) or with `make access-list` / `make access-approve id=<id|code>`. Compose sets `SESSION_IDLE_DAYS`, `ACCESS_MAX_PENDING_TOTAL`, `ANON_INIT_PER_MIN` and `ANON_ACCESS_REQUESTS_PER_HOUR` (defaults); the migration adds the `sessions` and `access_requests` tables on first start (`make db.backup` runs before each prod deploy). The Traefik rate limit applies to `/mcp` as before.
 
+- [ ] Token-less clients need a connector key: `make connector-key-create name=claude-ai` (shown once; see README "Connecting without a token"). Without any key token-less access is disabled.
+
 ### 7. Smoke test
 
 - [ ] Add the MCP server in Claude Code (see the README), then `kb_write` a note, e.g. space `meta`, project `smoke`, section `notes`, note `hello`. It returns a commit SHA.
@@ -142,7 +144,7 @@ make docker.service.update args="--replicas 1 --image barlito/second-brain-mcp:<
 TAG=<old> make deploy.assert_image && make smoke.test
 ```
 
-Tokens created or revoked after the restored backup are lost. `deploy.prod` and the Deploy/Rollback workflows take a backup (`make db.backup`) before changing anything, under `/data/backups` (list it with `docker exec <cid> ls /data/backups`). A pre-upgrade copy is **not** guaranteed: `db.backup` is skipped when no task is running (first deploy, service down or crash-looping), and the Rollback workflow continues when its backup fails (`continue-on-error`, with a warning). Check the job log for the backup line, and take one by hand (`make backup-db`) before a risky upgrade if in doubt. Local `make deploy` does not back up.
+Tokens created or revoked after the restored backup are lost. This includes token-less session grants, connector keys and their revocations: a restore silently **un-revokes** anything revoked after the backup and drops grants/keys created after it. After a restore, re-check `make token-list` and `make connector-key-list` and re-apply every revocation made since the backup (session grants: revoke the session in the web admin Access page or the grant token), and review the audit log (`admin_token_revoke`, `access_revoke`, `admin_connector_key_revoke`) for what to redo. `deploy.prod` and the Deploy/Rollback workflows take a backup (`make db.backup`) before changing anything, under `/data/backups` (list it with `docker exec <cid> ls /data/backups`). A pre-upgrade copy is **not** guaranteed: `db.backup` is skipped when no task is running (first deploy, service down or crash-looping), and the Rollback workflow continues when its backup fails (`continue-on-error`, with a warning). Check the job log for the backup line, and take one by hand (`make backup-db`) before a risky upgrade if in doubt. Local `make deploy` does not back up.
 
 ### Secret rotation
 

@@ -6,6 +6,7 @@ import { db } from "../db";
 import { SessionGrant } from "./context";
 import { Scope } from "./types";
 import { validateTokenInput } from "./tokens";
+import { anonLimits, ipKey } from "../rateLimit";
 
 export const NOGRANT_IDLE_MS = 60 * 60_000;
 const LAST_SEEN_THROTTLE_MS = 60_000;
@@ -15,6 +16,12 @@ const DAY_MS = 86_400_000;
 export function sessionIdleMs(env: NodeJS.ProcessEnv = process.env): number {
   const n = Number(env.SESSION_IDLE_DAYS);
   return Number.isFinite(n) && n > 0 ? n * DAY_MS : 5 * DAY_MS;
+}
+
+// SESSION_MAX_DAYS: absolute lifetime of a session from its first grant (default 30), on top of the idle expiry.
+export function sessionMaxMs(env: NodeJS.ProcessEnv = process.env): number {
+  const n = Number(env.SESSION_MAX_DAYS);
+  return Number.isFinite(n) && n > 0 ? n * DAY_MS : 30 * DAY_MS;
 }
 
 export const hashSid = (sid: string): string => createHash("sha256").update(sid).digest("hex");
@@ -35,13 +42,16 @@ export interface SessionRow {
   client_name: string;
   client_version: string;
   remote_ip: string | null;
+  ip_key: string | null;
+  connector_key_id: string | null;
   created_at: string;
   last_seen_at: string;
+  first_grant_at: string | null;
   revoked_at: string | null;
 }
 
 const insertSession = db.prepare(
-  "INSERT INTO sessions (id, sid_hash, client_name, client_version, remote_ip, created_at, last_seen_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+  "INSERT INTO sessions (id, sid_hash, client_name, client_version, remote_ip, ip_key, connector_key_id, created_at, last_seen_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
 );
 const selectByHash = db.prepare("SELECT * FROM sessions WHERE sid_hash = ?");
 const touchSession = db.prepare("UPDATE sessions SET last_seen_at = ? WHERE id = ?");
@@ -50,11 +60,11 @@ const selectGrantTokens = db.prepare(
 );
 const selectScopes = db.prepare("SELECT space, project, section, permission FROM scopes WHERE token_id = ?");
 
-export function createSession(input: { clientName: unknown; clientVersion: unknown; ip?: string }): { sid: string; id: string } {
+export function createSession(input: { clientName: unknown; clientVersion: unknown; ip?: string; connectorKeyId?: string }): { sid: string; id: string } {
   const sid = randomBytes(32).toString("hex");
   const id = randomUUID();
   const now = new Date().toISOString();
-  insertSession.run(id, hashSid(sid), cleanText(input.clientName, 64, "unknown"), cleanText(input.clientVersion, 32, "?"), input.ip ?? null, now, now);
+  insertSession.run(id, hashSid(sid), cleanText(input.clientName, 64, "unknown"), cleanText(input.clientVersion, 32, "?"), input.ip ?? null, ipKey(input.ip), input.connectorKeyId ?? null, now, now);
   return { sid, id };
 }
 
@@ -71,15 +81,24 @@ export interface LiveSession {
   id: string;
   clientName: string;
   clientVersion: string;
+  connectorKeyId: string | null;
   grants: SessionGrant[];
 }
 
-// Sliding expiry: idle longer than SESSION_IDLE_DAYS with grants, NOGRANT_IDLE_MS without.
+// Expiry rules: with grants, idle longer than SESSION_IDLE_DAYS (sliding) or older than SESSION_MAX_DAYS
+// since the first grant (absolute); without grants, idle longer than 1 h or older than the grantless
+// absolute lifetime (ANON_SESSION_MAX_HOURS), so polling never keeps a useless session alive.
 function isExpired(row: SessionRow, hasGrant: boolean, now: number, env?: NodeJS.ProcessEnv): boolean {
   const last = Date.parse(row.last_seen_at);
   const ttl = hasGrant ? sessionIdleMs(env) : NOGRANT_IDLE_MS;
   // last > now (clock stepped back) is not expiry.
-  return Number.isNaN(last) || now - last >= ttl;
+  if (Number.isNaN(last) || now - last >= ttl) return true;
+  if (hasGrant) {
+    const g = Date.parse(row.first_grant_at ?? row.created_at);
+    return Number.isNaN(g) || now - g >= sessionMaxMs(env);
+  }
+  const c = Date.parse(row.created_at);
+  return Number.isNaN(c) || now - c >= anonLimits(env).grantlessMaxMs;
 }
 
 // Resolves the secret session id; null for unknown, revoked or expired (the caller answers 404 so the
@@ -101,7 +120,7 @@ export function lookupSession(sid: string): LiveSession | null {
       console.error(`session last_seen update failed: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
-  return { id: row.id, clientName: row.client_name, clientVersion: row.client_version, grants };
+  return { id: row.id, clientName: row.client_name, clientVersion: row.client_version, connectorKeyId: row.connector_key_id, grants };
 }
 
 // Revokes every grant of the session and deletes it (and, by cascade, its requests).
@@ -124,16 +143,29 @@ export function revokeSession(id: string): boolean {
   })();
 }
 
-// Live sessions without any grant (what an anonymous flood can fill).
-export function countGrantlessSessions(): number {
-  return (
-    db
-      .prepare(
-        `SELECT COUNT(*) AS n FROM sessions s WHERE revoked_at IS NULL
-         AND NOT EXISTS (SELECT 1 FROM tokens t WHERE t.session_id = s.id AND t.kind = 'session' AND t.revoked_at IS NULL)`,
-      )
-      .get() as { n: number }
-  ).n;
+const GRANTLESS_SQL = `FROM sessions s WHERE revoked_at IS NULL
+  AND NOT EXISTS (SELECT 1 FROM tokens t WHERE t.session_id = s.id AND t.kind = 'session' AND t.revoked_at IS NULL)`;
+
+// Live sessions without any grant (what an anonymous flood can fill); per client when `key` is given.
+export function countGrantlessSessions(key?: string): number {
+  const sql = `SELECT COUNT(*) AS n ${GRANTLESS_SQL}${key === undefined ? "" : " AND ip_key = ?"}`;
+  const r = db.prepare(sql).get(...(key === undefined ? [] : [key])) as { n: number };
+  return r.n;
+}
+
+// Frees one slot by ending the most idle grantless session (ones with no pending request first), so
+// a flood can never lock legitimate clients out; `key` restricts it to one client.
+export function evictGrantlessSession(key?: string): boolean {
+  const where = key === undefined ? "" : " AND ip_key = ?";
+  const row = db
+    .prepare(
+      `SELECT s.id ${GRANTLESS_SQL}${where}
+       ORDER BY EXISTS (SELECT 1 FROM access_requests r WHERE r.session_id = s.id AND r.status = 'pending'), s.last_seen_at LIMIT 1`,
+    )
+    .get(...(key === undefined ? [] : [key])) as { id: string } | undefined;
+  if (!row) return false;
+  endSession(row.id);
+  return true;
 }
 
 // Deletes expired/revoked sessions (revoking their grants) and stale access requests.
@@ -151,6 +183,8 @@ export function pruneSessions(now = Date.now(), env?: NodeJS.ProcessEnv): number
       n++;
     }
   }
+  // Dead grant rows (revoked or expired) are kept 30 days for the audit trail, then dropped (scopes cascade).
+  db.prepare("DELETE FROM tokens WHERE kind = 'session' AND revoked_at IS NOT NULL AND revoked_at < ?").run(new Date(now - 30 * DAY_MS).toISOString());
   const dayAgo = new Date(now - DAY_MS).toISOString();
   db.prepare("DELETE FROM access_requests WHERE (status = 'pending' AND expires_at < ?) OR (status != 'pending' AND decided_at < ?)").run(dayAgo, dayAgo);
   return n;
@@ -176,14 +210,28 @@ export interface ActiveSession {
   remote_ip: string | null;
   created_at: string;
   last_seen_at: string;
+  connector_key: string | null; // name of the connector key it came through
+  expires_at: string; // earliest of sliding idle and absolute end
   grants: Array<{ tokenId: string; name: string; scopes: Scope[] }>;
 }
 
 // Sessions that hold at least one active grant (the admin "active sessions" table).
 export function listActiveSessions(): ActiveSession[] {
-  const rows = db.prepare("SELECT * FROM sessions WHERE revoked_at IS NULL ORDER BY last_seen_at DESC").all() as SessionRow[];
+  const rows = db
+    .prepare("SELECT s.*, k.name AS key_name FROM sessions s LEFT JOIN connector_keys k ON k.id = s.connector_key_id WHERE s.revoked_at IS NULL ORDER BY s.last_seen_at DESC")
+    .all() as Array<SessionRow & { key_name: string | null }>;
   return rows
-    .map((r) => ({ id: r.id, client_name: r.client_name, client_version: r.client_version, remote_ip: r.remote_ip, created_at: r.created_at, last_seen_at: r.last_seen_at, grants: listGrants(r.id) }))
+    .map((r) => ({
+      id: r.id,
+      client_name: r.client_name,
+      client_version: r.client_version,
+      remote_ip: r.remote_ip,
+      created_at: r.created_at,
+      last_seen_at: r.last_seen_at,
+      connector_key: r.key_name,
+      expires_at: new Date(Math.min(Date.parse(r.last_seen_at) + sessionIdleMs(), Date.parse(r.first_grant_at ?? r.created_at) + sessionMaxMs())).toISOString(),
+      grants: listGrants(r.id),
+    }))
     .filter((s) => s.grants.length > 0);
 }
 
@@ -196,5 +244,7 @@ export function insertGrant(sessionId: string, name: string, scopes: Scope[]): {
   db.prepare("INSERT INTO tokens (id, name, token_hash, created_at, kind, session_id) VALUES (?, ?, ?, ?, 'session', ?)").run(id, v.name, hash, new Date().toISOString(), sessionId);
   const ins = db.prepare("INSERT INTO scopes (token_id, space, project, section, permission) VALUES (?, ?, ?, ?, ?)");
   for (const s of v.scopes) ins.run(id, s.space, s.project, s.section, s.permission);
+  // Starts the absolute lifetime clock on the first grant only.
+  db.prepare("UPDATE sessions SET first_grant_at = COALESCE(first_grant_at, ?) WHERE id = ?").run(new Date().toISOString(), sessionId);
   return { id, name: v.name, scopes: v.scopes };
 }

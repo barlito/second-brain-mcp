@@ -248,13 +248,19 @@ make token-revoke id=<token id>
 
 ## Connecting without a token
 
-The MCP can be configured once, everywhere, with no secret: a claude.ai custom connector (set up once on claude.ai, it syncs to Claude web, mobile and desktop and Claude Code) with no authentication, or
+The MCP can be configured once, everywhere, without a per-project token: a claude.ai custom connector (set up once on claude.ai, it syncs to Claude web, mobile and desktop and Claude Code), or `claude mcp add --scope user`. To keep this surface closed to the internet, the client must send a fixed **connector key** in the `X-SB-Connector-Key` header (it grants nothing by itself, it only lets the client open a token-less session):
+
+1. Create a key: web admin, Access page, "Connector keys", or `make connector-key-create name=claude-ai` (also `connector-key-list`, `connector-key-show name=...`, `connector-key-revoke id=<id>`). Lookup is by SHA-256 hash and the key is also stored encrypted (AES-256-GCM, key derived from `ADMIN_WEB_SECRET`), so "Reveal" in the admin (or `connector-key-show`) shows it again, audited as `connector_key_reveal`; the tradeoff is acceptable because the key only allows requesting access and reveal sits behind Authelia 2FA. If `ADMIN_WEB_SECRET` changes, old keys can no longer be revealed (they still authenticate): create a new one. Keys are revocable and show their last use.
+2. claude.ai: custom connector with the server URL, Authentication "No connection" (Aucune connexion), and a request header `X-SB-Connector-Key` with the key as value, marked required.
+3. Claude Code:
 
 ```bash
-claude mcp add --scope user --transport http second-brain https://second-brain.barlito.fr/mcp
+claude mcp add --scope user --transport http second-brain https://second-brain.barlito.fr/mcp --header "X-SB-Connector-Key: <key>"
 ```
 
-An unauthenticated client can initialize, read the server instructions, list the tools and call exactly two tools: `kb_request_access` and `kb_access_status`. The user stays the only one managing access and the agent never sees a token.
+Without a valid, non-revoked key every token-less request gets a generic `401` before anything else happens (no session, no rate-limit bucket, only the coalesced auth-failure audit row), and with no key at all token-less access is disabled. A session is bound to the key that opened it (another key gets `404`); revoking a key ends its sessions and their grants immediately. Requests with an `Authorization` header ignore the connector key entirely.
+
+With the key, a client can initialize, read the server instructions, list the tools and call exactly two tools: `kb_request_access` and `kb_access_status`. The user stays the only one managing access and the agent never sees a token.
 
 Flow:
 
@@ -265,20 +271,25 @@ Flow:
 
 Grants:
 
+- Explicit `scopes` make space/project/access optional. The admin card and the grant name are derived from the scopes actually requested (each listed, writes highlighted); if the stated space/project/access is given and the scopes go beyond it, the card shows a red "scopes exceed the stated request". Approval requires typing the request code on the card (CLI: approve by code, or by id with `code=`).
 - Default scopes: access=write gives `meta:*:*:read`, `<space>:<project>:*:read`, `<space>:<project>:*:write`; access=read gives `meta:*:*:read`, `<space>:<project>:*:read`.
 - Approving creates a real token row (`kind=session`, name `session-<client>-<space>-<project>`) that carries the scopes through the same ACL, audit and commit-attribution path as any token. Its secret is random and never shown, so it can never be used as a Bearer token. It appears in the Tokens page (marked `session`) and revoking it, or the session in Access requests, cuts access immediately.
 - A session may hold several grants (union of scopes) and may call `kb_request_access` again at any time (another project, read to write, explicit scopes): an "elevation". Approval adds a grant, denial leaves existing grants untouched. Each call is attributed (audit row, `via <name>` in the commit) to the grant covering the target.
-- Expiry is sliding: a session with grants expires `SESSION_IDLE_DAYS` (default 5) after its last use; a session without any grant after 1 hour idle. Expired sessions are pruned (grants revoked). A pending request expires after 15 minutes (`ACCESS_REQUEST_TTL_MINUTES`).
+- Expiry: a session with grants expires `SESSION_IDLE_DAYS` (default 5) after its last use (sliding) and at most `SESSION_MAX_DAYS` (default 30) after its first grant; a session without any grant after 1 hour idle and at most `ANON_SESSION_MAX_HOURS` (default 2) after creation. The Access page shows created and expiry. Dead session grants (revoked/expired) are deleted after 30 days; the Tokens page hides session grants unless `?sessions=1` ("Show them"). Expired sessions are pruned (grants revoked). A pending request expires after 15 minutes (`ACCESS_REQUEST_TTL_MINUTES`).
 
 Limits on the unauthenticated surface (all per IP unless noted, in memory):
 
-- `initialize`: `ANON_INIT_PER_MIN` (default 10); access requests: `ANON_ACCESS_REQUESTS_PER_HOUR` (default 10; repeating an identical pending request is free); open sessions without a grant: `ANON_MAX_SESSIONS` (default 1000).
-- At most `ACCESS_MAX_PENDING_PER_SESSION` (3) pending requests per session and `ACCESS_MAX_PENDING_TOTAL` (20) in total.
+- IPv6 clients are bucketed by /64 in every per-IP limit.
+- `initialize`: `ANON_INIT_PER_MIN` (default 10); access requests: `ANON_ACCESS_REQUESTS_PER_HOUR` (default 10; repeating an identical pending request is free); other token-less calls: `ANON_SESSION_CALLS_PER_MIN` per session (120) and `ANON_IP_CALLS_PER_MIN` per client (600), over the limit gives `429`.
+- Open sessions without a grant: `ANON_MAX_SESSIONS_PER_IP` (20) and `ANON_MAX_SESSIONS` (1000); beyond a cap the most idle grantless session is evicted instead of refusing the newcomer (no lockout).
+- Pending requests: `ACCESS_MAX_PENDING_PER_SESSION` (3), `ACCESS_MAX_PENDING_PER_IP` (5, refused beyond) and `ACCESS_MAX_PENDING_TOTAL` (20; at the cap the oldest pending request of the busiest client is expired instead of refusing).
+- Repeated "no access" refusals of one session are one audit row per minute with a count.
 - Bodies without a token are capped at 32 KB (1 MB with a token). Allowed methods: `initialize`, `notifications/*`, `ping`, `tools/list`, `tools/call`; anything else is refused before a session is even looked up. `GET`/`DELETE /mcp` answer `405` (never `401`, which would trigger OAuth discovery in clients).
 
 Security notes:
 
 - No unauthenticated path reads or writes the vault: until a grant exists, every tool except the two access tools is refused centrally (`No access for this session: call kb_request_access ...`), whatever its own gate says.
+- The connector key is a shared secret: treat it like a password (it is a header value, not a token for the vault). The server instructions never mention it. If it leaks, revoke it; defense in depth remains (limits above, nothing granted without your approval).
 - The server instructions and the tool list are public (anyone can fetch them without a token): they hold only generic conventions, never project names, URLs or secrets. Keep it that way when editing them.
 - Session ids and token secrets are never logged or audited (audit rows use an internal session row id). Free text from the client (client name, reason) is length-capped and HTML-escaped in the admin.
 - Residual risk: anyone can create pending requests (bounded by the limits above); nothing is granted without the user's approval, so the admin must compare the code, client and reason before approving.
@@ -456,6 +467,8 @@ Compose sets these; no `.env` file is needed, except that both compose files req
 | `INBOX_MAX_PER_TOKEN`, `INBOX_MAX_TOTAL` | `kb_propose` quotas: pending proposals per token name / in total. | `20` / `200` | unset | unset |
 | `SPACE_LIMITS` | Per-space limits and auto-archive age, see [Agents space and space limits](#agents-space-and-space-limits). Validated at startup. | unset (no limits) | `agents:maxNotes=30,maxNoteBytes=4096,maxProjectBytes=102400,archiveAfterDays=60` | same |
 | `PUBLIC_MCP_URL` | Public MCP endpoint used in the `claude mcp add` command shown after creating a token (CLI and web admin). Must be an http(s) URL, else the default is used with a warning. | `https://second-brain.barlito.fr/mcp` | `https://second-brain.local.barlito.fr/mcp` | `https://second-brain.barlito.fr/mcp` |
+| `SESSION_MAX_DAYS`, `ANON_SESSION_MAX_HOURS` | Absolute lifetime of a session from its first grant / of a session that never got a grant. | `30` / `2` | unset | unset |
+| `ANON_MAX_SESSIONS_PER_IP`, `ANON_SESSION_CALLS_PER_MIN`, `ANON_IP_CALLS_PER_MIN`, `ACCESS_MAX_PENDING_PER_IP` | Token-less limits: grantless sessions per client, calls per session/client per minute, pending requests per client. | `20` / `120` / `600` / `5` | unset | unset |
 | `SESSION_IDLE_DAYS` | Sliding idle expiry of a token-less session that holds grants (a session without grant expires after 1 h). | `5` | `5` | `5` |
 | `ACCESS_REQUEST_TTL_MINUTES`, `ACCESS_MAX_PENDING_PER_SESSION`, `ACCESS_MAX_PENDING_TOTAL` | Access requests: lifetime, pending per session, pending in total. | `15` / `3` / `20` | unset | unset |
 | `ANON_INIT_PER_MIN`, `ANON_ACCESS_REQUESTS_PER_HOUR`, `ANON_MAX_SESSIONS` | Token-less surface: per-IP initialize and access-request budgets, max open sessions without a grant. | `10` / `10` / `1000` | unset | unset |

@@ -365,7 +365,7 @@ export function createApp(opts: AppOptions): Express {
   // exactly as before (it never needs a session); without one it takes the token-less session
   // path, whose own small body cap applies (see sessionAuth.ts).
   const limits = opts.anonLimits ?? anonLimits();
-  const sessionAuth = makeSessionAuth(limits, new RateLimiter(limits.requestsPerHour, 3_600_000), new RateLimiter(limits.initPerMin, 60_000));
+  const sessionAuth = makeSessionAuth(limits, new RateLimiter(limits.requestsPerHour, 3_600_000), new RateLimiter(limits.initPerMin, 60_000), limiter);
   const bearerBody = express.json({ limit: BODY_LIMIT });
   app.use("/mcp", (req, res, next) => {
     if (req.headers.authorization !== undefined) return bearerAuth(req, res, (err?: unknown) => (err ? next(err) : bearerBody(req, res, next)));

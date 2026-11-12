@@ -140,13 +140,13 @@ test("kb_write / kb_read with a wrongly-scoped token are denied", async () => {
   }
 });
 
-test("no Authorization header: never a 401 (token-less path), but no session means no MCP call", async () => {
+test("no Authorization header and no connector key: 401 before anything else", async () => {
   const res = await fetch(baseUrl, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ jsonrpc: "2.0", method: "tools/list", id: 1 }),
   });
-  assert.equal(res.status, 400);
+  assert.equal(res.status, 401);
 });
 
 test("garbage Authorization header also gets 401", async () => {
@@ -313,9 +313,9 @@ test("body over 1 MB gets a JSON-RPC 413 and leaves an audit row; unauthenticate
 
   const unauth = await fetch(baseUrl, { method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer nope" }, body: big });
   assert.equal(unauth.status, 401);
-  // Without any Authorization header the token-less path caps the body at 32 KB.
+  // Without a connector key the token-less path never even reads the body.
   const anon = await fetch(baseUrl, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ pad: "x".repeat(40_000) }) });
-  assert.equal(anon.status, 413);
+  assert.equal(anon.status, 401);
 });
 
 test("oversized content (under the body limit) is rejected and nothing is written", async () => {

@@ -2,7 +2,7 @@
 // granted anything. They touch the DB only (never the vault).
 import { z } from "zod";
 import { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import { accessLimits, AccessError, accessStatus, createAccessRequest, MAX_REASON_CHARS } from "../access";
+import { accessLimits, AccessError, accessStatus, createAccessRequest, MAX_REASON_CHARS, requestedOf } from "../access";
 import { formatScope } from "../cli/token";
 import { Gate, projectArg, RegisterTool, registerKbTool, spaceArg, toolError, toolText, auditedCall } from "./common";
 
@@ -21,9 +21,9 @@ export const register: RegisterTool = (server) => {
         "read or write, and a clear reason. Nothing is granted until the user approves the request in the admin web; " +
         "then check kb_access_status. Returns a request id and a short code the user matches in the admin.",
       inputSchema: {
-        space: spaceArg,
-        project: projectArg,
-        access: z.enum(["read", "write"]).describe("read, or write (which includes read)"),
+        space: spaceArg.optional().describe("Space slug (with project and access; optional when scopes is given)"),
+        project: projectArg.optional().describe("Project slug"),
+        access: z.enum(["read", "write"]).optional().describe("read, or write (which includes read)"),
         scopes: z
           .array(z.string().max(200))
           .max(10)
@@ -44,12 +44,12 @@ export const register: RegisterTool = (server) => {
           const mins = Math.round(accessLimits().ttlMs / 60_000);
           return {
             toolResult: toolText(
-              `Access ${access} on ${space}/${project} requested${created ? "" : " (already pending)"}.\n` +
+              `Access requested${created ? "" : " (already pending)"}: ${requestedOf(request).map(formatScope).join(", ")}.\n` +
                 `Request id: ${request.id}\nCode: ${request.code}\n` +
                 `Ask the user to approve it in the admin web (Access requests page; they can match the code), then call kb_access_status with this request_id. ` +
                 `The request expires in ${mins} minutes.`,
             ),
-            audit: { detail: `${created ? "request" : "repeat"} ${access} ${request.id} code ${request.code}` },
+            audit: { detail: `${created ? "request" : "repeat"} ${access ?? "scopes"} ${request.id} code ${request.code}` },
           };
         } catch (err) {
           if (err instanceof AccessError) return { toolResult: toolError(err.message), audit: { detail: err.message } };

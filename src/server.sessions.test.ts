@@ -6,6 +6,9 @@ import { listen } from "./test-support/server";
 makeTempDb();
 const { vault } = makeTempVault();
 process.env.VAULT_PATH = vault;
+// Leftover pending requests of other tests must not trip the per-client caps; dedicated tests override.
+process.env.ACCESS_MAX_PENDING_PER_IP = "1000";
+process.env.ACCESS_MAX_PENDING_TOTAL = "1000";
 
 type Db = typeof import("./db").db;
 let db: Db;
@@ -15,6 +18,13 @@ let access: typeof import("./access");
 let sessions: typeof import("./auth/sessions");
 let mkApp: (anon?: Partial<import("./rateLimit").AnonLimits>) => Promise<Awaited<ReturnType<typeof listen>>>;
 let masterToken: string;
+let KEY: string;
+let keys: typeof import("./auth/connectorKeys");
+// Approving by id needs the typed code (what the admin does on the card).
+const approve = (ref: string, opts: Omit<Parameters<typeof access.approveRequest>[1], "code"> & { code?: string }) => {
+  const row = db.prepare("SELECT code FROM access_requests WHERE id = ?").get(ref) as { code: string } | undefined;
+  return access.approveRequest(ref, { code: row?.code, ...opts });
+};
 
 const INIT = {
   jsonrpc: "2.0",
@@ -32,7 +42,7 @@ interface Rpc {
 async function rpc(base: string, body: unknown, headers: Record<string, string> = {}): Promise<Rpc> {
   const res = await fetch(`${base}/mcp`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream", ...headers },
+    headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream", "X-SB-Connector-Key": KEY, ...headers },
     body: JSON.stringify(body),
   });
   const text = await res.text();
@@ -55,8 +65,8 @@ async function connect(base = app.baseUrl, extra: Record<string, string> = {}): 
 }
 
 let nextId = 10;
-async function call(sid: string, name: string, args: Record<string, unknown>, base = app.baseUrl): Promise<{ isError: boolean; text: string; status: number }> {
-  const r = await rpc(base, { jsonrpc: "2.0", id: nextId++, method: "tools/call", params: { name, arguments: args } }, { "mcp-session-id": sid });
+async function call(sid: string, name: string, args: Record<string, unknown>, base = app.baseUrl, extra: Record<string, string> = {}): Promise<{ isError: boolean; text: string; status: number }> {
+  const r = await rpc(base, { jsonrpc: "2.0", id: nextId++, method: "tools/call", params: { name, arguments: args } }, { "mcp-session-id": sid, ...extra });
   return { status: r.status, isError: r.json?.result?.isError === true, text: r.json?.result?.content?.[0]?.text ?? JSON.stringify(r.json) };
 }
 
@@ -78,8 +88,12 @@ before(async () => {
   tokens = await import("./auth/tokens");
   access = await import("./access");
   sessions = await import("./auth/sessions");
-  const { createApp } = await import("./server");
-  mkApp = (anon = {}) => listen(createApp({ vaultRoot: vault, anonLimits: { initPerMin: 1000, requestsPerHour: 1000, maxSessions: 1000, ...anon } }));
+  const { createApp, AuthFailureLimiter } = await import("./server");
+  const { anonLimits } = await import("./rateLimit");
+  // A generous failure limiter: many tests deliberately fail auth from the same address.
+  mkApp = (anon = {}) => listen(createApp({ vaultRoot: vault, authLimiter: new AuthFailureLimiter(100_000), anonLimits: { ...anonLimits(), initPerMin: 1000, requestsPerHour: 1000, maxSessions: 1000, sessionsPerIp: 1000, ipCallsPerMin: 100000, sessionCallsPerMin: 100000, ...anon } }));
+  keys = await import("./auth/connectorKeys");
+  KEY = keys.createConnectorKey("test-key", "test-admin-secret").key;
   app = await mkApp();
   masterToken = tokens.createToken("master", [
     { space: "*", project: "*", section: "*", permission: "read" },
@@ -140,7 +154,7 @@ test("notifications and ping work with a session", async () => {
   const sid = await connect();
   const n = await fetch(`${app.baseUrl}/mcp`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream", "mcp-session-id": sid },
+    headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream", "mcp-session-id": sid, "X-SB-Connector-Key": KEY },
     body: JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }),
   });
   assert.equal(n.status, 202);
@@ -175,6 +189,7 @@ test("initialize must be a single, valid request; GET and DELETE are 405, never 
 test("without a grant every other kb_* tool is refused with the access hint, and the vault is untouched", async () => {
   const sid = await connect();
   const before = headSha();
+  const rowsBefore = (db.prepare("SELECT COUNT(*) c FROM audit_log WHERE detail LIKE 'session has no grant%'").get() as { c: number }).c;
   const args = { space: "sp", project: "proj-a", section: "notes", note: "n1" };
   const calls: Array<[string, Record<string, unknown>]> = [
     ["kb_read", args],
@@ -194,9 +209,11 @@ test("without a grant every other kb_* tool is refused with the access hint, and
     assert.match(r.text, /^No access for this session: call kb_request_access \(space, project, access, reason\) and ask the user to approve it\.$/, name);
   }
   assert.equal(headSha(), before, "no commit");
+  
   assert.equal(git(["status", "--porcelain"], vault).trim(), "", "no file written");
-  const rows = db.prepare("SELECT result FROM audit_log WHERE token_name LIKE 'session-claude-code' AND action LIKE 'kb_%' AND detail = 'session has no grant'").all();
-  assert.ok(rows.length >= calls.length);
+  // Repeated refusals of one session are coalesced: one audit row for the whole burst.
+  const rowsAfter = (db.prepare("SELECT COUNT(*) c FROM audit_log WHERE detail LIKE 'session has no grant%'").get() as { c: number }).c;
+  assert.equal(rowsAfter - rowsBefore, 1);
 });
 
 test("request -> pending -> approve -> read; read grant cannot write; default scopes shape", async () => {
@@ -211,7 +228,7 @@ test("request -> pending -> approve -> read; read grant cannot write; default sc
   // Still no access.
   assert.equal((await call(sid, "kb_read", { space: "sp", project: "proj-a", section: "notes", note: "n1" })).isError, true);
 
-  const d = access.approveRequest(code, { actor: "admin:test" });
+  const d = approve(code, { actor: "admin:test" });
   assert.deepEqual(d.scopes.map((s) => `${s.space}:${s.project}:${s.section}:${s.permission}`), ["meta:*:*:read", "sp:proj-a:*:read"]);
   assert.equal(d.tokenName, "session-claude-code-sp-proj-a");
   const st = await call(sid, "kb_access_status", { request_id: id });
@@ -236,9 +253,9 @@ test("write grant: commit and audit carry the session grant name; several grants
   const sid = await connect();
   const a = reqId((await request(sid, "sp", "proj-a", "write")).text);
   const b = reqId((await request(sid, "sp", "proj-b", "write")).text);
-  access.approveRequest(a, { actor: "admin:test" });
+  approve(a, { actor: "admin:test" });
   assert.equal((await call(sid, "kb_read", { space: "sp", project: "proj-b", section: "notes", note: "n1" })).isError, true, "second project not yet approved");
-  access.approveRequest(b, { actor: "admin:test" });
+  approve(b, { actor: "admin:test" });
 
   const wa = await call(sid, "kb_write", { space: "sp", project: "proj-a", section: "notes", note: "from-session", content: "hello a" });
   assert.equal(wa.isError, false, wa.text);
@@ -272,7 +289,7 @@ test("session grants are tokens (listed, kind=session) but can never authenticat
 
 test("revoking a grant from the token list cuts the session's access immediately", async () => {
   const sid = await connect();
-  access.approveRequest(reqId((await request(sid, "sp", "proj-a", "write")).text), { actor: "admin:test" });
+  approve(reqId((await request(sid, "sp", "proj-a", "write")).text), { actor: "admin:test" });
   const args = { space: "sp", project: "proj-a", section: "notes", note: "n1" };
   assert.equal((await call(sid, "kb_read", args)).isError, false);
   const g = db.prepare("SELECT id FROM tokens WHERE session_id = ?").get(sidRow(sid)!.id) as { id: string };
@@ -287,7 +304,7 @@ test("revoking a grant from the token list cuts the session's access immediately
 
 test("revoking the session makes its id 404 and kills every grant", async () => {
   const sid = await connect();
-  access.approveRequest(reqId((await request(sid, "sp", "proj-a", "read")).text), { actor: "admin:test" });
+  approve(reqId((await request(sid, "sp", "proj-a", "read")).text), { actor: "admin:test" });
   const id = sidRow(sid)!.id;
   assert.equal(sessions.revokeSession(id), true);
   assert.equal(sessions.revokeSession(id), false);
@@ -303,13 +320,13 @@ test("deny, expiry and cross-session isolation of request status", async () => {
   assert.match((await call(other, "kb_access_status", { request_id: id })).text, /Unknown request_id/);
   access.denyRequest(id, "admin:test");
   assert.match((await call(sid, "kb_access_status", { request_id: id })).text, /^denied/);
-  assert.throws(() => access.approveRequest(id, { actor: "x" }), /already denied/);
+  assert.throws(() => approve(id, { actor: "x" }), /already denied/);
   assert.equal((await call(sid, "kb_read", { space: "sp", project: "proj-a", section: "notes", note: "n1" })).isError, true);
 
   const id2 = reqId((await request(sid, "sp", "proj-b")).text);
   db.prepare("UPDATE access_requests SET expires_at = ? WHERE id = ?").run(new Date(Date.now() - 1000).toISOString(), id2);
   assert.match((await call(sid, "kb_access_status", { request_id: id2 })).text, /^expired/);
-  assert.throws(() => access.approveRequest(id2, { actor: "x" }), /expired|not found/);
+  assert.throws(() => approve(id2, { actor: "x" }), /expired|not found/);
   assert.match((await call(sid, "kb_access_status", { request_id: "nope" })).text, /Invalid request_id/);
 });
 
@@ -362,10 +379,10 @@ test("limits: 3 pending per session (repeats are idempotent), 20 pending in tota
     }
     const s = await connect();
     const r = await request(s, "sp", "g3", "read");
-    assert.equal(r.isError, true);
-    assert.match(r.text, /Too many pending access requests\. Ask the user/);
+    assert.equal(r.isError, false, "no lockout at the global cap");
+    assert.equal((db.prepare("SELECT COUNT(*) c FROM access_requests WHERE status = 'pending' AND expires_at > ?").get(new Date().toISOString()) as { c: number }).c, 4, "the oldest pending request was expired to make room");
   } finally {
-    delete process.env.ACCESS_MAX_PENDING_TOTAL;
+    process.env.ACCESS_MAX_PENDING_TOTAL = "1000";
     db.prepare("DELETE FROM access_requests").run();
   }
 });
@@ -394,10 +411,13 @@ test("rate limits per IP: initialize, access requests, and the open-session cap"
   } finally {
     await b.close();
   }
-  const c = await mkApp({ maxSessions: sessions.countGrantlessSessions() + 1 });
+  const cap = sessions.countGrantlessSessions() + 1;
+  const c = await mkApp({ maxSessions: cap });
   try {
     await connect(c.baseUrl);
-    assert.equal((await rpc(c.baseUrl, INIT)).status, 503);
+    const second = await connect(c.baseUrl);
+    assert.ok(second, "no lockout: a newcomer is served");
+    assert.ok(sessions.countGrantlessSessions() <= cap, "cap respected by evicting the most idle one");
   } finally {
     await c.close();
   }
@@ -417,7 +437,7 @@ test("sliding expiry: 5 days with a grant, 1 hour without; use refreshes the win
   assert.equal((await rpc(app.baseUrl, list, { "mcp-session-id": bare2 })).status, 200);
 
   const granted = await connect();
-  access.approveRequest(reqId((await request(granted, "sp", "proj-a", "read")).text), { actor: "t" });
+  approve(reqId((await request(granted, "sp", "proj-a", "read")).text), { actor: "t" });
   setSeen(granted, 4 * day);
   assert.equal((await rpc(app.baseUrl, list, { "mcp-session-id": granted })).status, 200, "4 days idle is fine with a grant");
   assert.ok(Date.now() - Date.parse(sidRow(granted)!.last_seen_at) < 5000, "last_seen refreshed (sliding)");
@@ -433,10 +453,10 @@ test("sliding expiry: 5 days with a grant, 1 hour without; use refreshes the win
 
 test("sessions survive a restart (DB-backed); pruning removes expired ones and revokes their grants", async () => {
   const sid = await connect();
-  access.approveRequest(reqId((await request(sid, "sp", "proj-a", "read")).text), { actor: "t" });
+  approve(reqId((await request(sid, "sp", "proj-a", "read")).text), { actor: "t" });
   // "Restart": a brand new app instance over the same database.
   const { createApp } = await import("./server");
-  const fresh = await listen(createApp({ vaultRoot: vault, anonLimits: { initPerMin: 1000, requestsPerHour: 1000, maxSessions: 1000 } }));
+  const fresh = await mkApp();
   try {
     const r = await call(sid, "kb_read", { space: "sp", project: "proj-a", section: "notes", note: "n1" }, fresh.baseUrl);
     assert.equal(r.isError, false, r.text);
@@ -446,7 +466,7 @@ test("sessions survive a restart (DB-backed); pruning removes expired ones and r
 
   const stale = await connect();
   const grantedStale = await connect();
-  access.approveRequest(reqId((await request(grantedStale, "sp", "proj-b", "read")).text), { actor: "t" });
+  approve(reqId((await request(grantedStale, "sp", "proj-b", "read")).text), { actor: "t" });
   const old = new Date(Date.now() - 6 * 86_400_000).toISOString();
   db.prepare("UPDATE sessions SET last_seen_at = ? WHERE sid_hash IN (?, ?)").run(old, sessions.hashSid(stale), sessions.hashSid(grantedStale));
   const gid = (db.prepare("SELECT id FROM tokens WHERE session_id = ?").get(sidRow(grantedStale)!.id) as { id: string }).id;
@@ -475,7 +495,7 @@ test("Bearer requests are unchanged: no session header issued, a stray session i
 test("a real MCP client without any auth: initialize, list tools, request access, poll status", async () => {
   const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
   const { StreamableHTTPClientTransport } = await import("@modelcontextprotocol/sdk/client/streamableHttp.js");
-  const transport = new StreamableHTTPClientTransport(new URL(`${app.baseUrl}/mcp`));
+  const transport = new StreamableHTTPClientTransport(new URL(`${app.baseUrl}/mcp`), { requestInit: { headers: { "X-SB-Connector-Key": KEY } } });
   const client = new Client({ name: "sdk-client", version: "9.9" });
   await client.connect(transport);
   try {
@@ -484,7 +504,7 @@ test("a real MCP client without any auth: initialize, list tools, request access
     const r = (await client.callTool({ name: "kb_request_access", arguments: { space: "sp", project: "proj-a", access: "write", reason: "sdk test" } })) as any;
     assert.equal(r.isError ?? false, false);
     const id = reqId(r.content[0].text);
-    access.approveRequest(id, { actor: "t" });
+    approve(id, { actor: "t" });
     const st = (await client.callTool({ name: "kb_access_status", arguments: { request_id: id } })) as any;
     assert.match(st.content[0].text, /^approved/);
     const read = (await client.callTool({ name: "kb_read", arguments: { space: "sp", project: "proj-a", section: "notes", note: "n1" } })) as any;
@@ -498,7 +518,7 @@ test("a real MCP client without any auth: initialize, list tools, request access
 test("audit: approve/deny/revoke rows carry the actor, no row or log line contains a session id", async () => {
   const sid = await connect();
   const id = reqId((await request(sid, "sp", "audit-p", "read")).text);
-  access.approveRequest(id, { actor: "admin:alice" });
+  approve(id, { actor: "admin:alice" });
   const sid2 = await connect();
   access.denyRequest(reqId((await request(sid2, "sp", "audit-q", "read")).text), "admin:alice");
   const rows = db.prepare("SELECT action, token_name, project, result FROM audit_log WHERE token_name = 'admin:alice' ORDER BY id").all() as any[];
@@ -513,16 +533,16 @@ test("audit: approve/deny/revoke rows carry the actor, no row or log line contai
 test("approve guards: unknown ref, wildcard confirmation, invalid scopes, concurrent decision", async () => {
   const sid = await connect();
   const id = reqId((await request(sid, "sp", "proj-a", "read")).text);
-  assert.throws(() => access.approveRequest("ZZZZZZ", { actor: "t" }), /not found/);
+  assert.throws(() => approve("ZZZZZZ", { actor: "t" }), /not found/);
   const wild = [{ space: "sp", project: "*", section: "*", permission: "write" as const }];
-  assert.throws(() => access.approveRequest(id, { actor: "t", scopes: wild }), (e: any) => e.status === 422 && /Wildcard/.test(e.message) && e.lines.length === 1);
-  assert.throws(() => access.approveRequest(id, { actor: "t", scopes: [{ space: "*", project: "x", section: "*", permission: "read" }] }), /invalid scope/);
-  assert.throws(() => access.approveRequest(id, { actor: "t", scopes: [] }), /at least one scope/);
+  assert.throws(() => approve(id, { actor: "t", scopes: wild }), (e: any) => e.status === 422 && /Wildcard/.test(e.message) && e.lines.length === 1);
+  assert.throws(() => approve(id, { actor: "t", scopes: [{ space: "*", project: "x", section: "*", permission: "read" }] }), /invalid scope/);
+  assert.throws(() => approve(id, { actor: "t", scopes: [] }), /at least one scope/);
   // Nothing was granted by the failed attempts.
   assert.equal(listGrants(sid), 0);
-  const d = access.approveRequest(id, { actor: "t", scopes: wild, allowWildcard: true });
+  const d = approve(id, { actor: "t", scopes: wild, allowWildcard: true });
   assert.equal(d.scopes.length, 1);
-  assert.throws(() => access.approveRequest(id, { actor: "t" }), /already approved/);
+  assert.throws(() => approve(id, { actor: "t" }), /already approved/);
   function listGrants(s: string): number {
     return sessions.listGrants(sidRow(s)!.id).length;
   }
@@ -530,7 +550,7 @@ test("approve guards: unknown ref, wildcard confirmation, invalid scopes, concur
 
 test("elevation: an approved session asks for more; approve adds a grant (union), deny leaves existing grants untouched", async () => {
   const sid = await connect();
-  access.approveRequest(reqId((await request(sid, "sp", "proj-a", "read")).text), { actor: "admin:test" });
+  approve(reqId((await request(sid, "sp", "proj-a", "read")).text), { actor: "admin:test" });
   const aArgs = { space: "sp", project: "proj-a", section: "notes", note: "elev" };
   assert.equal((await call(sid, "kb_write", { ...aArgs, content: "x" })).isError, true, "read only so far");
 
@@ -550,12 +570,12 @@ test("elevation: an approved session asks for more; approve adds a grant (union)
 
   // Ask again, approve: union of both grants.
   const again = reqId((await request(sid, "sp", "proj-a", "write")).text);
-  access.approveRequest(again, { actor: "admin:test" });
+  approve(again, { actor: "admin:test" });
   assert.ok(db.prepare("SELECT 1 FROM audit_log WHERE action = 'access_elevation_approve'").get());
   assert.equal((await call(sid, "kb_write", { ...aArgs, content: "x" })).isError, false);
   assert.equal(sessions.listGrants(sidRow(sid)!.id).length, 2);
   // Another project later in the same session.
-  access.approveRequest(reqId((await request(sid, "sp", "proj-b", "read")).text), { actor: "admin:test" });
+  approve(reqId((await request(sid, "sp", "proj-b", "read")).text), { actor: "admin:test" });
   assert.equal((await call(sid, "kb_read", { space: "sp", project: "proj-b", section: "notes", note: "n1" })).isError, false);
   assert.equal((await call(sid, "kb_read", { ...aArgs, note: "n1" })).isError, false);
 });
@@ -579,10 +599,10 @@ test("explicit scopes: validated, never pre-confirmed wildcards, approved list r
   // A wildcard request needs the admin's confirmation even though it is only a request.
   const w = await call(sid, "kb_request_access", { space: "sp", project: "proj-b", access: "read", reason: "r", scopes: ["sp:*:*:read"] });
   assert.equal(w.isError, false, w.text);
-  assert.throws(() => access.approveRequest(reqId(w.text), { actor: "t" }), /Wildcard/);
-  access.approveRequest(reqId(w.text), { actor: "t", allowWildcard: true });
-  assert.throws(() => access.approveRequest(reqId(ok.text), { actor: "t" }), /Wildcard/, "section wildcard in an explicit list is confirmed too");
-  access.approveRequest(reqId(ok.text), { actor: "t", allowWildcard: true });
+  assert.throws(() => approve(reqId(w.text), { actor: "t" }), /Wildcard/);
+  approve(reqId(w.text), { actor: "t", allowWildcard: true });
+  assert.throws(() => approve(reqId(ok.text), { actor: "t" }), /Wildcard/, "section wildcard in an explicit list is confirmed too");
+  approve(reqId(ok.text), { actor: "t", allowWildcard: true });
   const granted = sessions.listGrants(sidRow(sid)!.id).flatMap((g) => g.scopes.map((s) => `${s.space}:${s.project}:${s.section}:${s.permission}`));
   assert.ok(granted.includes("sp:proj-a:notes:read") && granted.includes("sp:*:*:read"));
   assert.ok(!granted.includes("meta:*:*:read"), "explicit list replaces the default shape");
@@ -593,6 +613,301 @@ test("instructions: access is on demand, not up front, and can be requested agai
   const text: string = r.json.result.instructions;
   assert.match(text, /do NOT have to request access up front/);
   assert.match(text, /request again later in the same session/);
+});
+
+// ---- connector keys ----
+
+const raw = (headers: Record<string, string>, body: unknown = INIT) =>
+  fetch(`${app.baseUrl}/mcp`, { method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream", ...headers }, body: JSON.stringify(body) });
+const count = (sql: string): number => (db.prepare(sql).get() as { c: number }).c;
+
+test("connector key gate: missing, invalid or revoked key is a generic 401 with no session or audit side effects", async () => {
+  const k2 = keys.createConnectorKey("temp", "test-admin-secret");
+  const sessionsBefore = count("SELECT COUNT(*) c FROM sessions");
+  const auditBefore = count("SELECT COUNT(*) c FROM audit_log WHERE action != 'auth'");
+  const authBefore = count("SELECT COUNT(*) c FROM audit_log WHERE action = 'auth'");
+  for (const headers of [{}, { "X-SB-Connector-Key": "" }, { "X-SB-Connector-Key": "sbk_nope" }, { "X-SB-Connector-Key": "x".repeat(300) }, { "X-SB-Connector-Key": KEY.toUpperCase() }]) {
+    const r = await raw(headers as Record<string, string>);
+    assert.equal(r.status, 401, JSON.stringify(headers));
+    assert.deepEqual(await r.json(), { error: "unauthorized" });
+    assert.equal(r.headers.get("mcp-session-id"), null);
+  }
+  // Later session requests need the key too, and it is checked before the session lookup (no 404 oracle).
+  const sid = await connect();
+  const list = { jsonrpc: "2.0", id: 2, method: "tools/list" };
+  assert.equal((await raw({ "mcp-session-id": sid }, list)).status, 401);
+  assert.equal((await raw({ "mcp-session-id": "f".repeat(64) }, list)).status, 401);
+  // Revoked key: same 401, and it never counted as a valid one.
+  assert.equal(keys.revokeConnectorKey(k2.id).revoked, true);
+  assert.equal((await raw({ "X-SB-Connector-Key": k2.key })).status, 401);
+  assert.equal(count("SELECT COUNT(*) c FROM sessions") - sessionsBefore, 1, "only the legitimate connect() made a session");
+  assert.equal(count("SELECT COUNT(*) c FROM audit_log WHERE action != 'auth'") - auditBefore, 1, "only its session_init row; refusals add nothing but the coalesced auth failure");
+  // Refusals are coalesced into the auth-failure audit (at most one row per client per minute).
+  assert.ok(count("SELECT COUNT(*) c FROM audit_log WHERE action = 'auth'") - authBefore <= 1);
+});
+
+test("with no active key at all, token-less access is disabled (same 401); Bearer is unaffected", async () => {
+  db.prepare("UPDATE connector_keys SET revoked_at = '2000-01-01T00:00:00.000Z' WHERE revoked_at IS NULL AND id IN (SELECT id FROM connector_keys WHERE name = 'test-key')").run();
+  try {
+    assert.equal((await raw({ "X-SB-Connector-Key": KEY })).status, 401);
+    const b = await raw({ Authorization: `Bearer ${masterToken}` }, { jsonrpc: "2.0", id: 2, method: "tools/list" });
+    assert.equal(b.status, 200);
+  } finally {
+    db.prepare("UPDATE connector_keys SET revoked_at = NULL WHERE name = 'test-key'").run();
+  }
+  // A Bearer client ignores a wrong connector key.
+  const b2 = await raw({ Authorization: `Bearer ${masterToken}`, "X-SB-Connector-Key": "garbage-key" }, { jsonrpc: "2.0", id: 2, method: "tools/list" });
+  assert.equal(b2.status, 200);
+});
+
+test("a session answers only to the key that opened it (mismatch is a 404); revoking a key ends its sessions and grants", async () => {
+  const other = keys.createConnectorKey("other", "test-admin-secret");
+  const sidA = await connect();
+  const sidB = (await rpc(app.baseUrl, INIT, { "X-SB-Connector-Key": other.key })).headers.get("mcp-session-id") as string;
+  assert.match(sidB, /^[0-9a-f]{64}$/);
+  const list = { jsonrpc: "2.0", id: 2, method: "tools/list" };
+  assert.equal((await rpc(app.baseUrl, list, { "mcp-session-id": sidB })).status, 404, "key A presenting B's session");
+  assert.equal((await rpc(app.baseUrl, list, { "mcp-session-id": sidA, "X-SB-Connector-Key": other.key })).status, 404);
+  assert.equal((await rpc(app.baseUrl, list, { "mcp-session-id": sidB, "X-SB-Connector-Key": other.key })).status, 200);
+
+  approve(reqId((await call(sidB, "kb_request_access", { space: "sp", project: "proj-a", access: "read", reason: "r" }, app.baseUrl, { "X-SB-Connector-Key": other.key })).text), { actor: "t" });
+  const bid = sidRow(sidB)!.id;
+  assert.equal(sessions.listGrants(bid).length, 1);
+  assert.deepEqual(keys.revokeConnectorKey(other.id), { revoked: true, sessions: 1 });
+  assert.equal(sidRow(sidB), undefined);
+  assert.equal(count(`SELECT COUNT(*) c FROM tokens WHERE session_id = '${bid}' AND revoked_at IS NULL`), 0);
+  assert.equal((await rpc(app.baseUrl, list, { "mcp-session-id": sidB, "X-SB-Connector-Key": other.key })).status, 401);
+  assert.equal((await rpc(app.baseUrl, list, { "mcp-session-id": sidA })).status, 200, "the other key's sessions are untouched");
+  assert.deepEqual(keys.revokeConnectorKey(other.id), { revoked: false, sessions: 0 });
+});
+
+test("connector key never reaches the audit log or the DB in clear; instructions do not mention it", async () => {
+  await connect();
+  const dump = JSON.stringify(db.prepare("SELECT * FROM audit_log").all()) + JSON.stringify(db.prepare("SELECT * FROM connector_keys").all());
+  assert.equal(dump.includes(KEY), false);
+  const text: string = (await rpc(app.baseUrl, INIT)).json.result.instructions;
+  assert.doesNotMatch(text, /connector|X-SB|sbk_/i);
+});
+
+test("connector key reveal: encrypted round trip, undecryptable with another secret, revoked or missing", () => {
+  const k = keys.createConnectorKey("reveal-me", "secret-one");
+  const row = db.prepare("SELECT key_enc, key_hash FROM connector_keys WHERE id = ?").get(k.id) as { key_enc: string; key_hash: string };
+  assert.ok(row.key_enc && !row.key_enc.includes(k.key) && !Buffer.from(row.key_enc, "base64").includes(k.key));
+  assert.deepEqual(keys.revealConnectorKey({ id: k.id }, "secret-one"), { status: "ok", id: k.id, name: "reveal-me", key: k.key });
+  assert.deepEqual(keys.revealConnectorKey({ name: "reveal-me" }, "secret-one"), { status: "ok", id: k.id, name: "reveal-me", key: k.key });
+  assert.deepEqual(keys.revealConnectorKey({ id: k.id }, "secret-two"), { status: "undecryptable" });
+  assert.deepEqual(keys.revealConnectorKey({ id: k.id }, undefined), { status: "undecryptable" });
+  assert.equal(keys.checkConnectorKey(k.key)?.id, k.id, "still authenticates after the secret changed");
+  // Two encryptions of the same plaintext differ (random nonce); a tampered blob does not decrypt.
+  db.prepare("UPDATE connector_keys SET key_enc = ? WHERE id = ?").run(Buffer.from("garbage-garbage-garbage-garbage-garbage").toString("base64"), k.id);
+  assert.equal(keys.revealConnectorKey({ id: k.id }, "secret-one").status, "undecryptable");
+  const nokey = keys.createConnectorKey("no-secret");
+  assert.equal(keys.revealConnectorKey({ id: nokey.id }, "secret-one").status, "undecryptable");
+  keys.revokeConnectorKey(k.id);
+  assert.equal(keys.revealConnectorKey({ id: k.id }, "secret-one").status, "missing");
+  assert.equal(keys.revealConnectorKey({ id: "nope" }, "secret-one").status, "missing");
+  assert.throws(() => keys.createConnectorKey("", "s"), /name must be/);
+  assert.throws(() => keys.createConnectorKey("bad\nname", "s"), /control/);
+});
+
+// ---- security hardening ----
+
+test("ipKey buckets IPv6 by /64 and unwraps v4-mapped addresses", async () => {
+  const { ipKey } = await import("./rateLimit");
+  assert.equal(ipKey("203.0.113.7"), "203.0.113.7");
+  assert.equal(ipKey("::ffff:203.0.113.7"), "203.0.113.7");
+  assert.equal(ipKey("2001:db8:1:2:aaaa:bbbb:cccc:dddd"), ipKey("2001:0DB8:1:2::1"));
+  assert.notEqual(ipKey("2001:db8:1:2::1"), ipKey("2001:db8:1:3::1"));
+  assert.equal(ipKey("::1"), "0:0:0:0::/64");
+  assert.equal(ipKey(undefined), "unknown");
+});
+
+test("grantless sessions: absolute lifetime from creation, per-IP cap and global cap evict instead of refusing", async () => {
+  const list = { jsonrpc: "2.0", id: 2, method: "tools/list" };
+  // Kept alive by polling but never granted: dies at the absolute lifetime (default 2 h).
+  const old = await connect();
+  db.prepare("UPDATE sessions SET created_at = ? WHERE sid_hash = ?").run(new Date(Date.now() - 3 * 3_600_000).toISOString(), sessions.hashSid(old));
+  assert.equal((await rpc(app.baseUrl, list, { "mcp-session-id": old })).status, 404);
+  // A granted session is not subject to it.
+  const granted = await connect();
+  approve(reqId((await request(granted, "sp", "proj-a", "read")).text), { actor: "t" });
+  db.prepare("UPDATE sessions SET created_at = ? WHERE sid_hash = ?").run(new Date(Date.now() - 3 * 3_600_000).toISOString(), sessions.hashSid(granted));
+  assert.equal((await rpc(app.baseUrl, list, { "mcp-session-id": granted })).status, 200);
+
+  // Per-IP cap: the client's own most idle grantless session makes room.
+  const mine = sessions.countGrantlessSessions("127.0.0.1");
+  const a = await mkApp({ sessionsPerIp: mine + 1 });
+  try {
+    const s1 = await connect(a.baseUrl);
+    const s2 = await connect(a.baseUrl);
+    assert.match(s2, /^[0-9a-f]{64}$/, "newcomer served");
+    assert.ok(s1);
+    assert.equal(sessions.countGrantlessSessions("127.0.0.1"), mine + 1);
+  } finally {
+    await a.close();
+  }
+  // Sessions holding a pending request are evicted last.
+  const keep = await connect();
+  await request(keep, "sp", "evict-guard", "read");
+  const idle = await connect();
+  db.prepare("UPDATE sessions SET last_seen_at = ? WHERE sid_hash = ?").run(new Date(Date.now() - 1000).toISOString(), sessions.hashSid(keep));
+  db.prepare("UPDATE sessions SET last_seen_at = ? WHERE sid_hash = ?").run(new Date(Date.now() - 60_000).toISOString(), sessions.hashSid(idle));
+  const total = sessions.countGrantlessSessions();
+  const b = await mkApp({ maxSessions: total });
+  try {
+    await connect(b.baseUrl);
+    assert.ok(sidRow(keep), "session with a pending request survives");
+  } finally {
+    await b.close();
+  }
+  db.prepare("DELETE FROM access_requests").run();
+});
+
+test("pending requests: per-client cap refuses, the global cap expires the oldest request of the busiest client", async () => {
+  db.prepare("DELETE FROM access_requests").run();
+  process.env.ACCESS_MAX_PENDING_PER_IP = "2";
+  try {
+    const s1 = await connect();
+    const s2 = await connect();
+    assert.equal((await request(s1, "sp", "ip1", "read")).isError, false);
+    assert.equal((await request(s2, "sp", "ip2", "read")).isError, false);
+    const over = await request(s1, "sp", "ip3", "read");
+    assert.equal(over.isError, true);
+    assert.match(over.text, /Too many pending access requests from this address/);
+  } finally {
+    process.env.ACCESS_MAX_PENDING_PER_IP = "1000";
+  }
+  db.prepare("DELETE FROM access_requests").run();
+  // Busiest client loses its oldest one when the global cap is hit (a quiet client is not the victim).
+  const busy = sessions.createSession({ clientName: "busy", clientVersion: "1", ip: "198.51.100.1" });
+  const quiet = sessions.createSession({ clientName: "quiet", clientVersion: "1", ip: "198.51.100.2" });
+  process.env.ACCESS_MAX_PENDING_TOTAL = "3";
+  try {
+    const b1 = access.createAccessRequest(busy.id, { space: "sp", project: "b1", access: "read", reason: "r" }).request;
+    access.createAccessRequest(busy.id, { space: "sp", project: "b2", access: "read", reason: "r" });
+    const q1 = access.createAccessRequest(quiet.id, { space: "sp", project: "q1", access: "read", reason: "r" }).request;
+    access.createAccessRequest(quiet.id, { space: "sp", project: "q2", access: "read", reason: "r" });
+    assert.equal(access.accessStatus(busy.id, b1.id)?.status, "expired", "busiest client's oldest request was expired");
+    assert.equal(access.accessStatus(quiet.id, q1.id)?.status, "pending");
+  } finally {
+    process.env.ACCESS_MAX_PENDING_TOTAL = "1000";
+  }
+  db.prepare("DELETE FROM access_requests").run();
+});
+
+test("explicit scopes only: space/project/access optional, card and grant name come from the scopes, over-reach is flagged", async () => {
+  const sid = await connect();
+  const r1 = await call(sid, "kb_request_access", { reason: "only scopes", scopes: ["sp:proj-a:notes:write"] });
+  assert.equal(r1.isError, false, r1.text);
+  assert.match(r1.text, /sp:proj-a:notes:write/);
+  const p1 = access.listPendingRequests().find((r) => r.id === reqId(r1.text))!;
+  assert.equal(p1.space, null);
+  assert.equal(p1.exceeds, false, "nothing stated, nothing exceeded");
+  assert.equal(approve(p1.id, { actor: "t" }).tokenName, "session-claude-code-sp-proj-a");
+  // Stated read on proj-a but the list also asks for write elsewhere: flagged, named after the scopes.
+  const r2 = await call(sid, "kb_request_access", { space: "sp", project: "proj-a", access: "read", reason: "sneaky", scopes: ["sp:proj-a:*:read", "sp:proj-b:notes:write"] });
+  const p2 = access.listPendingRequests().find((r) => r.id === reqId(r2.text))!;
+  assert.equal(p2.exceeds, true);
+  assert.equal(approve(p2.id, { actor: "t", allowWildcard: true }).tokenName, "session-claude-code-multi");
+  // Within the stated request: not flagged.
+  const r3 = await call(sid, "kb_request_access", { space: "sp", project: "proj-b", access: "write", reason: "fine", scopes: ["sp:proj-b:notes:write"] });
+  assert.equal(access.listPendingRequests().find((r) => r.id === reqId(r3.text))!.exceeds, false);
+  // Partial stated trio / nothing at all are refused.
+  assert.match((await call(sid, "kb_request_access", { space: "sp", reason: "r" })).text, /together/);
+  assert.match((await call(sid, "kb_request_access", { reason: "r" })).text, /scopes list/);
+  assert.equal(access.grantLabel([{ space: "*", project: "*", section: "*", permission: "read" }]), "all");
+  assert.equal(access.grantLabel([{ space: "meta", project: "*", section: "*", permission: "read" }]), "meta-all");
+  assert.equal(access.grantLabel([{ space: "meta", project: "*", section: "*", permission: "read" }, { space: "sp", project: "*", section: "*", permission: "read" }]), "sp-all");
+});
+
+test("approval needs the typed code when approving by id; a code reference is its own proof", async () => {
+  const sid = await connect();
+  const id = reqId((await request(sid, "sp", "proj-a", "read")).text);
+  const code = (db.prepare("SELECT code FROM access_requests WHERE id = ?").get(id) as { code: string }).code;
+  assert.throws(() => access.approveRequest(id, { actor: "t" }), /Type the request code/);
+  assert.throws(() => access.approveRequest(id, { actor: "t", code: "AAAAAA" }), /Type the request code/);
+  assert.equal(sessions.listGrants(sidRow(sid)!.id).length, 0);
+  assert.equal(access.approveRequest(id, { actor: "t", code: ` ${code.toLowerCase()} ` }).scopes.length, 2);
+  const id2 = reqId((await request(sid, "sp", "proj-b", "read")).text);
+  const code2 = (db.prepare("SELECT code FROM access_requests WHERE id = ?").get(id2) as { code: string }).code;
+  assert.ok(access.approveRequest(code2, { actor: "t" }));
+});
+
+test("token-less calls are rate limited per session and per client (429), without affecting Bearer", async () => {
+  const a = await mkApp({ sessionCallsPerMin: 3 });
+  try {
+    const sid = await connect(a.baseUrl);
+    const list = { jsonrpc: "2.0", id: 2, method: "tools/list" };
+    for (let i = 0; i < 3; i++) assert.equal((await rpc(a.baseUrl, list, { "mcp-session-id": sid })).status, 200);
+    assert.equal((await rpc(a.baseUrl, list, { "mcp-session-id": sid })).status, 429);
+    assert.equal((await rpc(a.baseUrl, list, { Authorization: `Bearer ${masterToken}` })).status, 200);
+  } finally {
+    await a.close();
+  }
+  const b = await mkApp({ ipCallsPerMin: 2 });
+  try {
+    const sid = await connect(b.baseUrl);
+    const list = { jsonrpc: "2.0", id: 2, method: "tools/list" };
+    const codes = [];
+    for (let i = 0; i < 4; i++) codes.push((await rpc(b.baseUrl, list, { "mcp-session-id": sid })).status);
+    assert.deepEqual(codes, [200, 200, 429, 429]);
+  } finally {
+    await b.close();
+  }
+});
+
+test("granted sessions have an absolute lifetime from the first grant (SESSION_MAX_DAYS, default 30)", async () => {
+  const day = 86_400_000;
+  const sid = await connect();
+  approve(reqId((await request(sid, "sp", "proj-a", "read")).text), { actor: "t" });
+  const list = { jsonrpc: "2.0", id: 2, method: "tools/list" };
+  const live = sessions.listActiveSessions().find((s) => s.id === sidRow(sid)!.id)!;
+  const exp = Date.parse(live.expires_at) - Date.now();
+  assert.ok(exp > 4.9 * day && exp <= 5 * day, "idle expiry is the nearer one at first");
+  assert.equal(live.connector_key, "test-key");
+  db.prepare("UPDATE sessions SET first_grant_at = ? WHERE sid_hash = ?").run(new Date(Date.now() - 31 * day).toISOString(), sessions.hashSid(sid));
+  assert.equal((await rpc(app.baseUrl, list, { "mcp-session-id": sid })).status, 404, "used daily, still ends 30 days after the first grant");
+  assert.equal(sessions.sessionMaxMs({ SESSION_MAX_DAYS: "7" } as NodeJS.ProcessEnv), 7 * day);
+  assert.equal(sessions.sessionMaxMs({} as NodeJS.ProcessEnv), 30 * day);
+});
+
+test("pruning deletes dead session grant rows after 30 days, keeps recent ones", async () => {
+  const day = 86_400_000;
+  const sid = await connect();
+  approve(reqId((await request(sid, "sp", "proj-a", "read")).text), { actor: "t" });
+  const sessionId = sidRow(sid)!.id;
+  const gid = (db.prepare("SELECT id FROM tokens WHERE session_id = ?").get(sessionId) as { id: string }).id;
+  tokens.revokeToken(gid);
+  sessions.pruneSessions();
+  assert.ok(db.prepare("SELECT 1 FROM tokens WHERE id = ?").get(gid), "recently revoked grant kept for the audit trail");
+  db.prepare("UPDATE tokens SET revoked_at = ? WHERE id = ?").run(new Date(Date.now() - 31 * day).toISOString(), gid);
+  sessions.pruneSessions();
+  assert.equal(db.prepare("SELECT 1 FROM tokens WHERE id = ?").get(gid), undefined);
+  assert.equal(count(`SELECT COUNT(*) c FROM scopes WHERE token_id = '${gid}'`), 0, "scopes cascade");
+  // Bearer tokens are never pruned this way.
+  const b = tokens.createToken("old-bearer", [{ space: "sp", project: "p", section: "s", permission: "read" }]);
+  tokens.revokeToken(b.id);
+  db.prepare("UPDATE tokens SET revoked_at = ? WHERE id = ?").run(new Date(Date.now() - 400 * day).toISOString(), b.id);
+  sessions.pruneSessions();
+  assert.ok(db.prepare("SELECT 1 FROM tokens WHERE id = ?").get(b.id));
+});
+
+test("failed connector-key attempts feed the auth-failure limiter (429 after 10 per minute per client)", async () => {
+  const { createApp } = await import("./server");
+  const lim = await listen(createApp({ vaultRoot: vault }));
+  try {
+    const hit = () => fetch(`${lim.baseUrl}/mcp`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+    for (let i = 0; i < 10; i++) assert.equal((await hit()).status, 401);
+    assert.equal((await hit()).status, 429);
+  } finally {
+    await lim.close();
+  }
+});
+
+test("anonymous body cap: 32 KB with a connector key", async () => {
+  const r = await raw({ "X-SB-Connector-Key": KEY }, { pad: "x".repeat(40_000) });
+  assert.equal(r.status, 413);
+  assert.match(((await r.json()) as any).error.message, /32 KB/);
 });
 
 test("write request defaults: meta read, project read+write; access=read adds no write", () => {

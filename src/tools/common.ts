@@ -6,6 +6,7 @@ import { attribute, getTokenContext, TokenContext } from "../auth/context";
 import { Permission } from "../auth/types";
 import { checkScope } from "../acl/check";
 import { AuditEntry, logAudit } from "../audit";
+import { Coalescer } from "../rateLimit";
 import { InvalidSlugError, isValidSlug, UnsafePathError } from "../vault/paths";
 import { redact, SyncConflictError, VaultBusyError } from "../vault/git";
 
@@ -243,7 +244,10 @@ export async function auditedCall(
     // future tool can never serve an unauthenticated session by forgetting its own gate.
     const refused = c.session && c.scopes.length === 0 && !SESSION_ONLY_ACTIONS.has(action) ? NO_ACCESS : gate(c);
     if (refused) {
-      safeAudit({ ...base, result: refused.result, detail: refused.detail }, c.name);
+      // Repeated no-grant refusals of one session are one audit row per minute (with a count), so a
+      // token-less client cannot grow the audit log by hammering tools.
+      const co = refused === NO_ACCESS && c.session ? noAccessAudit.hit(c.session.id) : { audit: true, previous: 0 };
+      if (co.audit) safeAudit({ ...base, result: refused.result, detail: co.previous > 0 ? `${refused.detail} (previous minute: ${co.previous} more)` : refused.detail }, c.name);
       const hint = c.session && refused.message === PERMISSION_DENIED ? " For another project, call kb_request_access." : "";
       return toolError(refused.message + hint);
     }
@@ -272,6 +276,7 @@ export async function auditedCall(
 export const NO_ACCESS_MESSAGE =
   "No access for this session: call kb_request_access (space, project, access, reason) and ask the user to approve it.";
 const NO_ACCESS: GateRefusal = { result: "denied", message: NO_ACCESS_MESSAGE, detail: "session has no grant" };
+const noAccessAudit = new Coalescer();
 // Tools a session without any grant may call.
 export const SESSION_ONLY_ACTIONS: ReadonlySet<string> = new Set(["kb_request_access", "kb_access_status"]);
 

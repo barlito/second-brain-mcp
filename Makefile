@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := help
-.PHONY: help deploy deploy.prod db.backup db.restore docker.service.update deploy.assert_image smoke.test deploy.prune prune-local-images undeploy restart logs token-create token-list token-revoke backup-db prune-audit inbox-list inbox-show inbox-accept inbox-reject access-list access-approve access-deny migrate-frontmatter
+.PHONY: help deploy deploy.prod db.backup db.restore docker.service.update deploy.assert_image smoke.test deploy.prune prune-local-images undeploy restart logs token-create token-list token-revoke backup-db prune-audit inbox-list inbox-show inbox-accept inbox-reject access-list access-approve access-deny connector-key-create connector-key-show connector-key-list connector-key-revoke migrate-frontmatter
 
 stack_name=second-brain-mcp
 service=second-brain-mcp
@@ -176,13 +176,28 @@ inbox-reject: ## Reject a proposal (make inbox-reject id=<id>)
 access-list: ## List pending access requests (token-less sessions) and active sessions
 	@$(call exec_in_service,node dist/cli/access.js list)
 
-access-approve: ## Approve an access request (make access-approve id=<id|code> [scope=s:p:sec:perm,...] [allow_wildcard=1]); default scopes: meta read + the project
+access-approve: ## Approve an access request (make access-approve id=<code> | id=<uuid> code=<code> [scope=s:p:sec:perm,...] [allow_wildcard=1]); default scopes: meta read + the project
 	@test -n "$(id)" || { echo "id is required (make access-approve id=<id|code>)" >&2; exit 1; }
-	@$(call exec_in_service,node dist/cli/access.js approve "$(id)" $(if $(scope),--scope "$(scope)") $(if $(allow_wildcard),--allow-wildcard))
+	@$(call exec_in_service,node dist/cli/access.js approve "$(id)" $(if $(code),--code "$(code)") $(if $(scope),--scope "$(scope)") $(if $(allow_wildcard),--allow-wildcard))
 
 access-deny: ## Deny an access request (make access-deny id=<id|code>)
 	@test -n "$(id)" || { echo "id is required (make access-deny id=<id|code>)" >&2; exit 1; }
 	@$(call exec_in_service,node dist/cli/access.js deny "$(id)")
+
+connector-key-create: ## Create a connector key for token-less clients (make connector-key-create name=claude-ai); shown once
+	@test -n "$(name)" || { echo "name is required (make connector-key-create name=claude-ai)" >&2; exit 1; }
+	@$(call exec_in_service,node dist/cli/connectorKey.js create --name "$(name)")
+
+connector-key-show: ## Show a connector key again (make connector-key-show name=claude-ai); audited
+	@test -n "$(name)" || { echo "name is required (make connector-key-show name=claude-ai)" >&2; exit 1; }
+	@$(call exec_in_service,node dist/cli/connectorKey.js show --name "$(name)")
+
+connector-key-list: ## List connector keys
+	@$(call exec_in_service,node dist/cli/connectorKey.js list)
+
+connector-key-revoke: ## Revoke a connector key and end its sessions (make connector-key-revoke id=<id>)
+	@test -n "$(id)" || { echo "id is required (make connector-key-revoke id=<id>)" >&2; exit 1; }
+	@$(call exec_in_service,node dist/cli/connectorKey.js revoke --id "$(id)")
 
 migrate-frontmatter: ## Add frontmatter to existing notes that lack it (one commit, idempotent)
 	@$(call exec_in_service,node dist/cli/migrate.js frontmatter)

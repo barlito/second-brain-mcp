@@ -5,6 +5,8 @@ import type { AddressInfo } from "node:net";
 import { cleanup, makeTempDb, makeTempVault } from "../test-support/fixtures";
 
 makeTempDb();
+process.env.ACCESS_MAX_PENDING_PER_IP = "1000";
+process.env.ACCESS_MAX_PENDING_TOTAL = "1000";
 const { vault } = makeTempVault();
 
 type Web = typeof import("./web");
@@ -97,7 +99,7 @@ test("access page: pending request with client, IP, project, reason (escaped), c
   assert.match(page.body, new RegExp(r.code));
   assert.match(page.body, /Claude Code/);
   assert.match(page.body, /203\.0\.113\.7/);
-  assert.match(page.body, /pro\/alpha/);
+  assert.match(page.body, /<code>pro:alpha:\*:write<\/code> <span class="badge err">write<\/span>/);
   assert.match(page.body, /because &lt;b&gt;reason&lt;\/b&gt;/);
   assert.doesNotMatch(page.body, /<b>reason/);
   assert.match(page.body, /meta:\*:\*:read\npro:alpha:\*:read\npro:alpha:\*:write/);
@@ -112,25 +114,31 @@ test("approve via the page with editable scopes, then active sessions + revoke; 
   const r = ask(s.id, "pro", "beta", "read");
   const path = `/access/${r.id}/approve`;
   const scopes = "meta:*:*:read\npro:beta:notes:read";
-  assert.equal((await post(path, { scopes }, { csrf: null })).status, 403);
-  assert.equal((await post(path, { scopes }, { csrf: "0".repeat(64) })).status, 403);
-  assert.equal((await post(path, { scopes }, { origin: "http://evil.example" })).status, 403);
-  assert.equal((await post(path, { scopes }, { nonce: null })).status, 409);
+  const code = r.code;
+  assert.equal((await post(path, { scopes, code }, { csrf: null })).status, 403);
+  assert.equal((await post(path, { scopes, code }, { csrf: "0".repeat(64) })).status, 403);
+  assert.equal((await post(path, { scopes, code }, { origin: "http://evil.example" })).status, 403);
+  assert.equal((await post(path, { scopes, code }, { nonce: null })).status, 409);
   assert.equal(sessions.listGrants(s.id).length, 0, "nothing granted by refused posts");
 
+  // The typed code is mandatory and compared server-side.
+  assert.match((await follow(await post(path, { scopes }))).body, /Type the request code/);
+  assert.match((await follow(await post(path, { scopes, code: "AAAAAA" }))).body, /Type the request code/);
+  assert.equal(sessions.listGrants(s.id).length, 0);
+
   // Wildcard beyond the default needs the confirmation box.
-  const wild = await follow(await post(path, { scopes: "pro:*:*:write" }));
+  const wild = await follow(await post(path, { scopes: "pro:*:*:write", code }));
   assert.match(wild.body, /Wildcard scopes grant broad access/);
   assert.equal(sessions.listGrants(s.id).length, 0);
 
-  const ok = await follow(await post(path, { scopes }));
+  const ok = await follow(await post(path, { scopes, code }));
   assert.match(ok.body, /Approved pro\/beta as session-claude-desktop-pro-beta/);
   assert.deepEqual(sessions.listGrants(s.id).flatMap((g) => g.scopes.map((x) => `${x.section}:${x.permission}`)), ["*:read", "notes:read"]);
   const row = db.prepare("SELECT action, token_name FROM audit_log WHERE action = 'access_approve' ORDER BY id DESC").get() as any;
   assert.equal(row.token_name, "admin:alice");
 
   // Replay with a spent nonce is refused.
-  assert.equal((await post(path, { scopes }, { nonce: "a".repeat(32) })).status, 409);
+  assert.equal((await post(path, { scopes, code }, { nonce: "a".repeat(32) })).status, 409);
 
   const page = await get("/access");
   assert.match(page.body, /session-claude-desktop-pro-beta/);
@@ -168,14 +176,14 @@ test("page shows the session's CURRENT grants next to the requested ones and lab
   assert.equal(first.elevation, 0);
   let page = await get("/access");
   assert.doesNotMatch(page.body.slice(page.body.indexOf(first.code) - 60, page.body.indexOf(first.code) + 400), /elevation/);
-  access.approveRequest(first.id, { actor: "admin:alice" });
+  access.approveRequest(first.id, { actor: "admin:alice", code: first.code });
   const up = ask(s.id, "pro", "delta", "write");
   assert.equal(up.elevation, 1);
   page = await get("/access");
   const card = page.body.slice(page.body.indexOf(up.code) - 80);
   assert.match(card, /<span class="badge err">elevation<\/span>/);
   assert.match(card, /Current grants of this session:[\s\S]*session-claude-code-pro-delta[\s\S]*<code>pro:delta:\*:read<\/code>/);
-  assert.match(card, /Requested:[\s\S]*<code>pro:delta:\*:write<\/code>/);
+  assert.match(card, /Asks for:[\s\S]*<code>pro:delta:\*:write<\/code>/);
   // Deny leaves the existing grant.
   await follow(await post(`/access/${up.id}/deny`, {}));
   assert.equal(sessions.listGrants(s.id).length, 1);
@@ -183,8 +191,11 @@ test("page shows the session's CURRENT grants next to the requested ones and lab
 
 test("tokens page marks session grants; revoking one there cuts the session", async () => {
   const s = newSession();
-  access.approveRequest(ask(s.id, "pro", "epsilon").id, { actor: "t" });
-  const page = await get("/tokens");
+  { const q = ask(s.id, "pro", "epsilon"); access.approveRequest(q.id, { actor: "t", code: q.code }); }
+  const hidden = await get("/tokens");
+  assert.doesNotMatch(hidden.body, /session-claude-code-pro-epsilon/, "session grants are hidden by default");
+  assert.match(hidden.body, /href="\/tokens\?sessions=1"/);
+  const page = await get("/tokens?sessions=1");
   assert.match(page.body, /session-claude-code-pro-epsilon[\s\S]*?<span class="badge">session<\/span>/);
   const g = sessions.listGrants(s.id)[0];
   assert.ok(page.body.includes(`/tokens/${g.tokenId}/revoke`));
@@ -203,18 +214,19 @@ test("CLI: access list / approve (code or id, scope override, wildcard confirm) 
   const r3 = ask(s.id, "pro", "cli-c", "read");
 
   const list = await run(["list"], base);
-  assert.match(list, new RegExp(`${r1.id}  code=${r1.code}  write pro/cli-a  client=Claude Code 1.2.3  ip=203\\.0\\.113\\.7`));
+  assert.match(list, new RegExp(`${r1.id}  code=${r1.code}  client=Claude Code 1.2.3  ip=203\\.0\\.113\\.7.*scopes=\\[meta:\\*:\\*:read, pro:cli-a:\\*:read, pro:cli-a:\\*:write\\]`));
   assert.match(list, /Active sessions:|No active sessions/);
 
   // by code, default scopes
   const a = await run(["approve", r1.code.toLowerCase()], base);
   assert.match(a, /Approved pro\/cli-a as session-claude-code-pro-cli-a: meta:\*:\*:read, pro:cli-a:\*:read, pro:cli-a:\*:write/);
   // by id, explicit scope; wildcard needs --allow-wildcard
-  await assert.rejects(run(["approve", r2.id, "--scope", "pro:*:*:read"], base), /Wildcard[\s\S]*pro:\*:\*:read/);
+  await assert.rejects(run(["approve", r2.id, "--scope", "pro:*:*:read"], base), /Type the request code/);
+  await assert.rejects(run(["approve", r2.id, "--code", r2.code, "--scope", "pro:*:*:read"], base), /Wildcard[\s\S]*pro:\*:\*:read/);
   assert.equal(sessions.listGrants(s.id).length, 1);
-  assert.match(await run(["approve", r2.id, "--scope", "pro:*:*:read", "--allow-wildcard"], base), /Approved pro\/cli-b/);
+  assert.match(await run(["approve", r2.id, "--code", r2.code, "--scope", "pro:*:*:read", "--allow-wildcard"], base), /Approved pro\/cli-b/);
   await assert.rejects(run(["approve", r2.id], base), /already approved/);
-  await assert.rejects(run(["approve", r3.id, "--scope", "garbage"], base), /invalid scope/);
+  await assert.rejects(run(["approve", r3.id, "--code", r3.code, "--scope", "garbage"], base), /invalid scope/);
   assert.match(await run(["deny", r3.code], base), /Denied access request for pro\/cli-c/);
   await assert.rejects(run(["deny", r3.code], base), /not found/);
   await assert.rejects(run(["approve", "bad ref!"], base), /invalid request id or code|usage/i);
@@ -222,4 +234,105 @@ test("CLI: access list / approve (code or id, scope override, wildcard confirm) 
   assert.ok(db.prepare("SELECT 1 FROM audit_log WHERE action = 'access_approve' AND token_name = 'admin-cli'").get());
   assert.ok(db.prepare("SELECT 1 FROM audit_log WHERE action = 'access_deny' AND token_name = 'admin-cli'").get());
   assert.match(await run(["list"], base), /Active sessions:/);
+});
+
+// ---- scopes headline, elevation, expiry columns ----
+
+test("card lists each requested scope with writes highlighted, warns when scopes exceed the stated request; sessions show created and expiry", async () => {
+  const s = newSession("Claude Code");
+  const r = ask(s.id, "pro", "zeta", "read", { scopes: ["pro:zeta:notes:read", "pro:other:notes:write"] });
+  const page = await get("/access");
+  const card = page.body.slice(page.body.indexOf(r.code) - 40);
+  assert.match(card, /<code>pro:zeta:notes:read<\/code>/);
+  assert.match(card, /<code>pro:other:notes:write<\/code> <span class="badge err">write<\/span>/);
+  assert.match(card, /scopes exceed the stated request/);
+  assert.match(card, /<strong class="code">/, "code is prominent");
+  assert.match(card, /Type the code <strong>[A-Z0-9]{6}<\/strong> to approve/);
+  const t = ask(s.id, "pro", "eta", "read", { scopes: ["pro:eta:notes:read"] });
+  const page2 = await get("/access");
+  assert.doesNotMatch(page2.body.slice(page2.body.indexOf(t.code) - 40, page2.body.indexOf(t.code) + 900), /exceed/);
+  access.approveRequest(t.id, { actor: "t", code: t.code });
+  const sessionsPage = (await get("/access")).body;
+  assert.match(sessionsPage, /<th>Created<\/th><th>Last seen<\/th><th>Expires<\/th>/);
+});
+
+// ---- connector keys ----
+
+test("connector keys: create (one-time page with header + Copy), list, reveal (audited, no-store), revoke ends sessions", async () => {
+  const keys = await import("../auth/connectorKeys");
+  assert.match((await get("/access")).body, /No keys: token-less access is disabled/);
+  const created = await follow(await post("/access/keys", { name: "claude-ai" }));
+  assert.match(created.body, /X-SB-Connector-Key/);
+  const key = /<textarea id="ckey-value"[^>]*>(sbk_[A-Za-z0-9_-]+)<\/textarea>/.exec(created.body)?.[1];
+  assert.ok(key, "key shown on the creation page");
+  assert.match(created.body, /data-copy="ckey-value"/);
+  assert.match(created.body, /--header &quot;X-SB-Connector-Key: sbk_/);
+  assert.equal(keys.checkConnectorKey(key)?.name, "claude-ai");
+  // One-time flash: a reload does not show it again.
+  const again = await get(`/access/keys/created/${"0".repeat(32)}`);
+  assert.equal(again.status, 404);
+
+  let page = (await get("/access")).body;
+  assert.doesNotMatch(page, new RegExp(key as string), "the list never shows the value");
+  assert.match(page, /claude-ai/);
+  const id = db.prepare("SELECT id FROM connector_keys WHERE name = 'claude-ai'").get() as { id: string };
+
+  // Reveal: POST with CSRF + nonce, audited without the value, never cached.
+  const revealPath = `/access/keys/${id.id}/reveal`;
+  assert.equal((await post(revealPath, {}, { csrf: null })).status, 403);
+  const rev = await post(revealPath, {});
+  assert.equal(rev.status, 200);
+  assert.match(String(rev.headers["cache-control"]), /no-store/);
+  assert.ok(rev.body.includes(key as string));
+  assert.match(rev.body, /X-SB-Connector-Key/);
+  const audit = db.prepare("SELECT action, token_name, result, detail FROM audit_log WHERE action = 'connector_key_reveal' ORDER BY id DESC").get() as any;
+  assert.deepEqual([audit.token_name, audit.result], ["admin:alice", "ok"]);
+  assert.equal(JSON.stringify(db.prepare("SELECT * FROM audit_log").all()).includes(key as string), false, "audit never holds the value");
+
+  // Undecryptable (made under another secret): clear message, still authenticates.
+  const foreign = keys.createConnectorKey("foreign", "another-secret");
+  page = (await get("/access")).body;
+  const m = /action="\/access\/keys\/([0-9a-f-]+)\/reveal"/g;
+  assert.ok(page.match(m));
+  const bad = await follow(await post(`/access/keys/${foreign.id}/reveal`, {}));
+  assert.match(bad.body, /Cannot decrypt this key/);
+  assert.ok(keys.checkConnectorKey(foreign.key));
+  assert.equal((db.prepare("SELECT result FROM audit_log WHERE action = 'connector_key_reveal' ORDER BY id DESC").get() as any).result, "error");
+
+  // Revoke: its sessions and their grants end now.
+  const s = sessions.createSession({ clientName: "Claude Code", clientVersion: "1", ip: "203.0.113.9", connectorKeyId: id.id });
+  access.approveRequest(ask(s.id, "pro", "kappa").id, { actor: "t", code: (db.prepare("SELECT code FROM access_requests WHERE session_id = ?").get(s.id) as any).code });
+  assert.match((await get("/access")).body, /<th>Key<\/th>/);
+  const done = await follow(await post(`/access/keys/${id.id}/revoke`, {}));
+  assert.match(done.body, /Key revoked, 1 session\(s\) ended/);
+  assert.equal(keys.checkConnectorKey(key), null);
+  assert.equal(sessions.listGrants(s.id).length, 0);
+  assert.ok(db.prepare("SELECT 1 FROM audit_log WHERE action = 'admin_connector_key_revoke' AND token_name = 'admin:alice'").get());
+});
+
+test("connector key CLI: create, show (audited), list, revoke", async () => {
+  const { run } = await import("../cli/connectorKey");
+  process.env.ADMIN_WEB_SECRET = "cli-secret";
+  try {
+    assert.throws(() => run(["create"]), /name must be/);
+    const out = run(["create", "--name", "cli-key"]);
+    const key = /X-SB-Connector-Key: (sbk_[A-Za-z0-9_-]+)/.exec(out)?.[1];
+    assert.ok(key);
+    assert.match(out, /claude mcp add --scope user --transport http second-brain .* --header "X-SB-Connector-Key: sbk_/);
+    assert.ok(run(["show", "--name", "cli-key"]).includes(key as string));
+    const a = db.prepare("SELECT token_name, result, detail FROM audit_log WHERE action = 'connector_key_reveal' ORDER BY id DESC").get() as any;
+    assert.deepEqual([a.token_name, a.result], ["cli", "ok"]);
+    assert.equal(JSON.stringify(db.prepare("SELECT * FROM audit_log").all()).includes(key as string), false);
+    assert.throws(() => run(["show", "--name", "nope"]), /no active connector key/);
+    process.env.ADMIN_WEB_SECRET = "changed";
+    assert.throws(() => run(["show", "--name", "cli-key"]), /cannot decrypt/);
+    assert.match(run(["list"]), /name=cli-key/);
+    const id = /id=([0-9a-f-]+)  name=cli-key/.exec(run(["list"]))?.[1] as string;
+    assert.match(run(["revoke", "--id", id]), /revoked, 0 session/);
+    assert.throws(() => run(["revoke", "--id", id]), /not found/);
+    assert.throws(() => run(["revoke"]), /--id is required/);
+    assert.throws(() => run(["frobnicate"]), /usage/);
+  } finally {
+    delete process.env.ADMIN_WEB_SECRET;
+  }
 });

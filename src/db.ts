@@ -153,17 +153,30 @@ export const MIGRATIONS: ReadonlyArray<Migration> = [
         client_name TEXT NOT NULL,
         client_version TEXT NOT NULL,
         remote_ip TEXT,
+        ip_key TEXT,
+        connector_key_id TEXT,
         created_at TEXT NOT NULL,
         last_seen_at TEXT NOT NULL,
+        first_grant_at TEXT,
         revoked_at TEXT
+      );
+      CREATE INDEX idx_sessions_ip ON sessions(ip_key);
+      CREATE TABLE connector_keys (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        key_hash TEXT NOT NULL UNIQUE,
+        key_enc TEXT,
+        created_at TEXT NOT NULL,
+        revoked_at TEXT,
+        last_used_at TEXT
       );
       CREATE TABLE access_requests (
         id TEXT PRIMARY KEY,
         code TEXT NOT NULL,
         session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-        space TEXT NOT NULL,
-        project TEXT NOT NULL,
-        access TEXT NOT NULL CHECK(access IN ('read','write')),
+        space TEXT,
+        project TEXT,
+        access TEXT CHECK(access IS NULL OR access IN ('read','write')),
         reason TEXT NOT NULL,
         status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','approved','denied')),
         created_at TEXT NOT NULL,
