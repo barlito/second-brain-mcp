@@ -15,7 +15,6 @@ import { register as registerKbSearch } from "./tools/kbSearch";
 
 // Read at runtime (not imported) so tsc rootDir stays src/; resolves to the
 // repo-root package.json from both src/ and dist/.
-// eslint-disable-next-line @typescript-eslint/no-require-imports
 const pkg = require("../package.json") as { name: string; version: string };
 
 // Add new tools here (one line each).
