@@ -28,6 +28,8 @@ services:
       # Per-agent working memory stays small (see README "Space limits")
       # Token-less sessions: sliding idle expiry and abuse limits (defaults shown)
       - SESSION_IDLE_DAYS=5
+      # Read access of every token-less session without approval: the user's notes on how they work
+      - SESSION_BASELINE_SCOPES=meta:*:*:read
       - ACCESS_MAX_PENDING_TOTAL=20
       - ANON_INIT_PER_MIN=10
       - ANON_ACCESS_REQUESTS_PER_HOUR=10

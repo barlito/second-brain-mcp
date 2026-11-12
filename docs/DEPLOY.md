@@ -100,7 +100,7 @@ The web admin UI (`https://second-brain-admin.barlito.fr`, port 3002) sits behin
   ```
   (This narrow scope covers the smoke-test note below; issue your real working tokens afterwards.)
 
-- [ ] Optional, no token on the clients: configure the MCP without a token (see README "Connecting without a token") and approve each project's access request in the web admin (Access requests) or with `make access-list` / `make access-approve id=<id|code>`. Compose sets `SESSION_IDLE_DAYS`, `ACCESS_MAX_PENDING_TOTAL`, `ANON_INIT_PER_MIN` and `ANON_ACCESS_REQUESTS_PER_HOUR` (defaults); the migration adds the `sessions` and `access_requests` tables on first start (`make db.backup` runs before each prod deploy). The Traefik rate limit applies to `/mcp` as before.
+- [ ] Optional, no token on the clients: configure the MCP without a token (see README "Connecting without a token") and approve each project's access request in the web admin (Access requests) or with `make access-list` / `make access-approve id=<id|code>`. Compose sets `SESSION_BASELINE_SCOPES` (`meta:*:*:read`: every session reads `meta` without approval; remove it to require approval for everything), `SESSION_IDLE_DAYS`, `ACCESS_MAX_PENDING_TOTAL`, `ANON_INIT_PER_MIN` and `ANON_ACCESS_REQUESTS_PER_HOUR` (defaults); the migration adds the `sessions` and `access_requests` tables on first start (`make db.backup` runs before each prod deploy). The Traefik rate limit applies to `/mcp` as before.
 
 - [ ] Token-less clients need a connector key: `make connector-key-create name=claude-ai` (shown once; see README "Connecting without a token"). Without any key token-less access is disabled.
 

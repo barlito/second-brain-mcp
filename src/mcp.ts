@@ -32,10 +32,11 @@ const TOOLS: RegisterTool[] = [
   registerKbAccess,
 ];
 
-export function createMcpServer(vaultRoot: string): McpServer {
+// `userContext`: optional text appended to the instructions (see userContext.ts).
+export function createMcpServer(vaultRoot: string, userContext = ""): McpServer {
   const server = new McpServer(
     { name: pkg.name, version: pkg.version },
-    { instructions: SERVER_INSTRUCTIONS },
+    { instructions: userContext ? `${SERVER_INSTRUCTIONS}\n\n${userContext}` : SERVER_INSTRUCTIONS },
   );
   for (const register of TOOLS) register(server, { vaultRoot });
   return server;

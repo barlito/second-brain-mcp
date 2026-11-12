@@ -3,6 +3,7 @@ import type { Server } from "node:http";
 import net from "node:net";
 import express, { Express, NextFunction, Request, Response } from "express";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { checkToken } from "./auth/tokens";
 import { TokenContext, tokenContextStorage } from "./auth/context";
 import { db } from "./db";
@@ -18,6 +19,10 @@ import { auditAuthFailure, flushAuthAudit } from "./authFailure";
 import { anonLimits, AnonLimits, ipKey, RateLimiter } from "./rateLimit";
 import { makeSessionAuth } from "./sessionAuth";
 import { startSessionPruning } from "./auth/sessions";
+import { sessionBaselineScopes } from "./auth/baseline";
+import { Scope } from "./auth/types";
+import { buildUserContext } from "./userContext";
+import { safeAudit } from "./tools/common";
 import {
   abortPendingPushes,
   BootstrapAbortedError,
@@ -202,6 +207,8 @@ export interface AppOptions {
   authLimiter?: AuthFailureLimiter;
   // Limits of the token-less surface (default: env, see rateLimit.ts).
   anonLimits?: AnonLimits;
+  // Read scopes of every token-less session (default: env SESSION_BASELINE_SCOPES, see auth/baseline.ts).
+  sessionBaseline?: Scope[];
 }
 
 // Bearer-token auth, mounted before the MCP route. No MCP involved on failure.
@@ -358,7 +365,7 @@ export function createApp(opts: AppOptions): Express {
   // exactly as before (it never needs a session); without one it takes the token-less session
   // path, whose own small body cap applies (see sessionAuth.ts).
   const limits = opts.anonLimits ?? anonLimits();
-  const sessionAuth = makeSessionAuth(limits, new RateLimiter(limits.requestsPerHour, 3_600_000), new RateLimiter(limits.initPerMin, 60_000), new AuthFailureLimiter(Infinity));
+  const sessionAuth = makeSessionAuth(limits, new RateLimiter(limits.requestsPerHour, 3_600_000), new RateLimiter(limits.initPerMin, 60_000), new AuthFailureLimiter(Infinity), opts.sessionBaseline ?? sessionBaselineScopes());
   const bearerBody = express.json({ limit: BODY_LIMIT });
   app.use("/mcp", (req, res, next) => {
     if (req.headers.authorization !== undefined) return bearerAuth(req, res, (err?: unknown) => (err ? next(err) : bearerBody(req, res, next)));
@@ -373,7 +380,15 @@ export function createApp(opts: AppOptions): Express {
       jsonRpcError(res, 400, -32600, `Invalid Request: batch too large (max ${MAX_JSONRPC_BATCH} messages)`);
       return;
     }
-    const server = createMcpServer(vaultRoot);
+    // initialize only (the one response that carries instructions): add the caller's readable meta entry notes.
+    let userContext = "";
+    const ctx = res.locals.tokenContext as TokenContext | undefined;
+    if (ctx && isInitializeRequest(req.body)) {
+      const uc = await buildUserContext(vaultRoot, ctx.scopes);
+      userContext = uc.text;
+      if (uc.notes.length) safeAudit({ tokenId: ctx.tokenId, tokenName: ctx.name, action: "user_context", result: "ok", space: "meta", detail: uc.notes.join(" ").slice(0, 200), clientIp: ctx.clientIp }, ctx.name);
+    }
+    const server = createMcpServer(vaultRoot, userContext);
     let transport: StreamableHTTPServerTransport | undefined;
     let cleanedUp = false;
 
@@ -578,6 +593,7 @@ export async function start(): Promise<{ server: Server; shutdown: (signal?: str
   try {
     parseSpaceLimits(process.env.SPACE_LIMITS);
     parseAutoArchiveInterval(process.env.AUTO_ARCHIVE_INTERVAL_MS);
+    sessionBaselineScopes();
   } catch (err) {
     console.error((err as Error).message);
     process.exit(1);
