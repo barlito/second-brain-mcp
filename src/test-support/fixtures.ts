@@ -5,6 +5,9 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+// Keep push-retry backoff short in tests (production default is 1000 ms).
+process.env.SB_PUSH_BACKOFF_MS ??= "20";
+
 const dirs: string[] = [];
 
 /** New tracked temp dir; removed by cleanup(). */
