@@ -1,16 +1,43 @@
 version: 2
+# Majors are never grouped: groups only take minor/patch, so a major arrives as its own PR
+# (visible, reviewable, cannot block the grouped updates). Runtime-bound majors are ignored below.
 updates:
   - package-ecosystem: github-actions
     directory: /
-    schedule: { interval: weekly }
+    schedule: { interval: weekly, day: monday, time: "06:00", timezone: Europe/Paris }
+    cooldown: { default-days: 7 }
+    open-pull-requests-limit: 5
+    labels: [dependencies, github-actions]
+    commit-message: { prefix: ci }
     groups: { actions: { patterns: ['*'] } }
+
   - package-ecosystem: npm
     directory: /
-    schedule: { interval: weekly }
-    cooldown: { default-days: 7 }
+    schedule: { interval: weekly, day: monday, time: "06:30", timezone: Europe/Paris }
+    cooldown: { default-days: 7, semver-major-days: 14 }
+    open-pull-requests-limit: 5
+    labels: [dependencies, javascript]
+    commit-message: { prefix: build, prefix-development: build, include: scope }
+    ignore:
+      # Must track the Node 24 runtime (engines, Docker image)
+      - dependency-name: "@types/node"
+        update-types: [version-update:semver-major]
+      # TS 7 (native) drops moduleResolution=node10 etc.; migrate deliberately, not via a bot PR
+      - dependency-name: typescript
+        update-types: [version-update:semver-major]
     groups:
-      dev: { dependency-type: development }
+      dev: { dependency-type: development, update-types: [minor, patch] }
       prod-minor: { dependency-type: production, update-types: [minor, patch] }
+
   - package-ecosystem: docker
     directory: /
-    schedule: { interval: weekly }
+    schedule: { interval: weekly, day: monday, time: "07:00", timezone: Europe/Paris }
+    cooldown: { default-days: 7 }
+    open-pull-requests-limit: 3
+    labels: [dependencies, docker]
+    commit-message: { prefix: build }
+    ignore:
+      # Stay on Node 24 (digest + minor/patch only)
+      - dependency-name: node
+        update-types: [version-update:semver-major]
+    groups: { docker: { patterns: ['*'] } }

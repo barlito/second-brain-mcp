@@ -1,14 +1,12 @@
-# Base image pinned by digest. To bump:
-#   docker pull node:24-alpine && docker inspect node:24-alpine --format '{{index .RepoDigests 0}}'
-# then replace the sha256 below (used by all stages).
-ARG NODE_IMAGE=node:24-alpine@sha256:a34ab6d7f6f4813f4d0c5469d74685604b962fbdbf5793a7bc7b4998ecb867c8
+# Base image pinned by digest, bumped by Dependabot (it only parses literal FROM lines, not ARG defaults).
+FROM node:24-alpine@sha256:a34ab6d7f6f4813f4d0c5469d74685604b962fbdbf5793a7bc7b4998ecb867c8 AS base
 
 # ────────────────────────────────────────────────────────────────
 # prod-deps stage: production node_modules only. Depends solely on the
 # manifests, so source changes do not invalidate this layer.
 # better-sqlite3 ships N-API prebuilds inside the package (no toolchain).
 # ────────────────────────────────────────────────────────────────
-FROM ${NODE_IMAGE} AS prod-deps
+FROM base AS prod-deps
 
 WORKDIR /app
 
@@ -21,7 +19,7 @@ RUN npm ci --omit=dev --ignore-scripts \
 # ────────────────────────────────────────────────────────────────
 # Builder stage: install all deps and compile TypeScript
 # ────────────────────────────────────────────────────────────────
-FROM ${NODE_IMAGE} AS builder
+FROM base AS builder
 
 WORKDIR /app
 
@@ -36,7 +34,7 @@ RUN npm run build
 # ────────────────────────────────────────────────────────────────
 # Runtime stage: production deps only + compiled output
 # ────────────────────────────────────────────────────────────────
-FROM ${NODE_IMAGE} AS runtime
+FROM base AS runtime
 
 ENV NODE_ENV=production
 WORKDIR /app
