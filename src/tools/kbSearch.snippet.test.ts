@@ -26,3 +26,13 @@ test("never splits a surrogate pair", () => {
   assert.ok(s.includes("needle"));
   assert.ok(!/[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/.test(s));
 });
+
+test("match offset survives characters whose lowercase is longer (İ -> i̇)", () => {
+  const line = "İ".repeat(400) + "Needle" + "b".repeat(400);
+  const s = snippet(line, "needle");
+  assert.ok(s.includes("Needle"), s);
+  assert.ok(s.startsWith("…") && s.endsWith("…"));
+  // A match spanning such a character is kept whole too.
+  const s2 = snippet("a".repeat(400) + "xİy" + "b".repeat(400), "xİy".toLowerCase());
+  assert.ok(s2.includes("xİy"), s2);
+});

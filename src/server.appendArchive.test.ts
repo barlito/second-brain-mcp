@@ -1,6 +1,6 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { cleanup, git, makeTempDb, makeTempVault } from "./test-support/fixtures";
 import { callTool, lastAudit, listen } from "./test-support/server";
@@ -18,18 +18,24 @@ let onlyJournal: string;
 let notesOnly: string;
 let notesAndArchive: string;
 let archiveReader: string;
+let blindArchiver: string;
 const base = { space: "pro", project: "proj" };
 
 before(async () => {
   const { createToken } = await import("./auth/tokens");
   ({ db } = await import("./db"));
   const { createApp } = await import("./server");
-  rw = createToken("agent-rw", [{ space: "pro", project: "*", section: "*", permission: "write" }]).token;
+  rw = createToken("agent-rw", [
+    { space: "pro", project: "*", section: "*", permission: "write" },
+    { space: "pro", project: "*", section: "*", permission: "read" },
+  ]).token;
   ro = createToken("agent-ro", [{ space: "pro", project: "*", section: "*", permission: "read" }]).token;
   onlyJournal = createToken("agent-j", [{ space: "pro", project: "proj", section: "journal", permission: "write" }]).token;
   const sc = (section: string, permission: "read" | "write") => ({ space: "pro", project: "proj", section, permission });
   notesOnly = createToken("agent-notes", [sc("notes", "write")]).token;
-  notesAndArchive = createToken("agent-na", [sc("notes", "write"), sc("archive", "write")]).token;
+  notesAndArchive = createToken("agent-na", [sc("notes", "read"), sc("notes", "write"), sc("archive", "write")]).token;
+  // Can write (but not read) notes, and can read the archive: must not be able to launder a note through it.
+  blindArchiver = createToken("agent-blind", [sc("notes", "write"), sc("archive", "write"), sc("archive", "read")]).token;
   archiveReader = createToken("agent-ar", [sc("archive", "read")]).token;
   app = await listen(createApp({ vaultRoot: vault }));
 });
@@ -77,6 +83,27 @@ test("kb_read tail returns the last N lines", async () => {
   assert.equal((await call(ro, "kb_read", { ...args, tail: 500 })).text, all.join("\n") + "\n");
   assert.equal((await call(ro, "kb_read", { ...args, tail: 0 })).isError, true);
   assert.equal((await call(ro, "kb_read", { ...args, tail: 501 })).isError, true);
+});
+
+test("kb_read refuses a note over the read cap with a clear message", async () => {
+  const { MAX_READ_BYTES } = await import("./tools/kbRead");
+  const args = { ...base, section: "notes", note: "huge" };
+  mkdirSync(join(vault, "pro/proj/notes"), { recursive: true });
+  writeFileSync(join(vault, "pro/proj/notes/huge.md"), "x".repeat(MAX_READ_BYTES + 1));
+  try {
+    assert.deepEqual(await call(ro, "kb_read", args), {
+      isError: true,
+      text: `Note is too large to read (${MAX_READ_BYTES + 1} bytes, max ${MAX_READ_BYTES}).`,
+    });
+    const row = lastAudit(db, "token_name = 'agent-ro'");
+    assert.equal(row.result, "error");
+    assert.match(row.detail ?? "", /note too large/);
+    writeFileSync(join(vault, "pro/proj/notes/huge.md"), "x".repeat(MAX_READ_BYTES));
+    assert.equal((await call(ro, "kb_read", args)).text.length, MAX_READ_BYTES);
+  } finally {
+    rmSync(join(vault, "pro/proj/notes/huge.md"));
+  }
+  assert.deepEqual(await call(ro, "kb_read", args), { isError: true, text: "Note not found." });
 });
 
 test("kb_archive moves to archive/<section>-<note>, then -2, and keeps history", async () => {
@@ -127,6 +154,19 @@ test("kb_archive refusals: missing, already archived, entry note, scope", async 
     isError: true,
     text: "Permission denied.",
   });
+});
+
+test("kb_archive needs read on the source: write + read-on-archive cannot launder an unreadable note", async () => {
+  const w = { ...base, section: "notes", note: "blind" };
+  await call(rw, "kb_write", { ...w, content: "secret\n" });
+  assert.deepEqual(await call(blindArchiver, "kb_read", w), { isError: true, text: "Permission denied." });
+  assert.deepEqual(await call(blindArchiver, "kb_archive", w), { isError: true, text: "Permission denied." });
+  const row = lastAudit(db, "token_name = 'agent-blind'");
+  assert.equal(row.action, "kb_archive");
+  assert.equal(row.result, "denied");
+  assert.equal(row.detail, "no read on source section");
+  assert.ok(existsSync(join(vault, "pro/proj/notes/blind.md")));
+  assert.equal(existsSync(join(vault, "pro/proj/archive/notes-blind.md")), false);
 });
 
 test("kb_archive needs write on source AND archive; reading archive needs read on archive", async () => {

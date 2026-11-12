@@ -4,12 +4,13 @@ import { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { noteHistory } from "../vault/git";
 import { checkScope } from "../acl/check";
 import { isValidSlug, resolveNotePath } from "../vault/paths";
-import { kbArgsShape, RegisterTool, toolError, toolText, withAclAndAudit } from "./common";
+import { kbArgsShape, RegisterTool, registerKbTool, toolError, toolText, withAclAndAudit } from "./common";
 
 const DEFAULT_LIMIT = 20;
 
 export const register: RegisterTool = (server, { vaultRoot }) => {
-  server.registerTool(
+  registerKbTool(
+    server,
     "kb_history",
     {
       description:

@@ -208,7 +208,13 @@ export function checkToken(plaintextToken: string): TokenCheck {
   const last = row.last_used_at ? Date.parse(row.last_used_at) : NaN;
   // last > now: clock stepped back, treat as stale.
   if (Number.isNaN(last) || last > now || now - last >= LAST_USED_THROTTLE_MS) {
-    updateLastUsedAtStmt.run(new Date(now).toISOString(), row.id);
+    // Best effort: a DB locked for longer than busy_timeout (CLI backup/prune)
+    // must not turn a valid request into a 500.
+    try {
+      updateLastUsedAtStmt.run(new Date(now).toISOString(), row.id);
+    } catch (err) {
+      console.error(`last_used_at update failed for token ${row.id}: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
   const scopes = selectScopesByTokenIdStmt.all(row.id) as Scope[];

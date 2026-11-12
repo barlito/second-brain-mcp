@@ -10,12 +10,13 @@ import {
   serializeProposal,
 } from "../inbox";
 import { syncWrite } from "../vault/git";
-import { kbArgsShape, MAX_CONTENT_CHARS, RegisterTool, toolError, toolText, withAclAndAudit } from "./common";
+import { kbArgsShape, MAX_CONTENT_CHARS, RegisterTool, registerKbTool, toolError, toolText, withAclAndAudit } from "./common";
 import { NoteRuleError, validateNoteContent } from "./conventions";
 import { rejectReservedSection } from "./reserved";
 
 export const register: RegisterTool = (server, { vaultRoot }) => {
-  server.registerTool(
+  registerKbTool(
+    server,
     "kb_propose",
     {
       description:
@@ -27,13 +28,13 @@ export const register: RegisterTool = (server, { vaultRoot }) => {
         ...kbArgsShape,
         content: z
           .string()
-          .max(MAX_CONTENT_CHARS, "content too large (max 512 KB)")
+          .max(MAX_CONTENT_CHARS, "too large (max 512 KB)")
           .describe("Full proposed note content"),
         reason: z
           .string()
           .trim()
-          .min(1, "reason must not be empty")
-          .max(MAX_REASON_CHARS, `reason too long (max ${MAX_REASON_CHARS} characters)`)
+          .min(1, "must not be empty")
+          .max(MAX_REASON_CHARS, `too long (max ${MAX_REASON_CHARS} characters)`)
           .describe("Why this note is worth adding"),
       },
     },

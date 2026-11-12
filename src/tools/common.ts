@@ -1,4 +1,4 @@
-// Shared plumbing for kb_* tools: ACL check + audit + error mapping + arg shapes.
+// Shared plumbing for kb_* tools: argument validation + ACL gate + audit + error mapping.
 import { z } from "zod";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
@@ -35,19 +35,16 @@ export function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-const slugArg = (name: string, desc: string) =>
-  z.string().max(64, `${name} must be at most 64 characters`).describe(desc);
+const slugArg = (desc: string) => z.string().max(64, "must be at most 64 characters").describe(desc);
 
-export const spaceArg = slugArg("space", "Space slug (top-level area, e.g. perso, pro)");
-export const projectArg = slugArg("project", "Project slug");
-export const sectionArg = slugArg("section", "Section slug");
-export const noteArg = slugArg("note", "Note slug (without .md extension)");
+export const spaceArg = slugArg("Space slug (top-level area, e.g. perso, pro)");
+export const projectArg = slugArg("Project slug");
 
 export const kbArgsShape = {
   space: spaceArg,
   project: projectArg,
-  section: sectionArg,
-  note: noteArg,
+  section: slugArg("Section slug"),
+  note: slugArg("Note slug (without .md extension)"),
 };
 
 // Extra audit fields a tool handler wants recorded alongside its result
@@ -116,6 +113,91 @@ export function canReadNotePath(scopes: TokenContext["scopes"], relPath: string)
   return checkScope(scopes, parts[0], parts[1], parts[2], "read");
 }
 
+// ---- argument validation ----
+//
+// The SDK validates inputSchema before our handler runs and answers a failure
+// with a bare protocol error, so the call would never be audited. Each field is
+// therefore wrapped so that validation never fails: a bad value is replaced by
+// an InvalidArg marker, which the registered handler turns into an audited
+// error. tools/list still publishes the original field schema (types, limits,
+// required-ness) unchanged.
+
+const INVALID = Symbol("invalid argument");
+
+interface InvalidArg {
+  [INVALID]: true;
+  issue: string;
+}
+
+function isInvalidArg(v: unknown): v is InvalidArg {
+  return typeof v === "object" && v !== null && INVALID in v;
+}
+
+function lenient(schema: z.ZodType): z.ZodType {
+  const optional = schema.safeParse(undefined).success;
+  const caught = schema.catch((ctx: z.core.$ZodCatchCtx | undefined) => {
+    // Called without ctx when tools/list renders the JSON schema: no default to publish.
+    // (ctx.error holds the finalized issues with messages; ctx.issues does not.)
+    if (!ctx) return undefined as never;
+    const issue = ctx.input === undefined ? "required" : (ctx.error.issues[0]?.message ?? "invalid value");
+    return { [INVALID]: true, issue } satisfies InvalidArg as never;
+  });
+  // The identity preprocess keeps the field required in the published schema
+  // (a bare .catch() would mark it optional); optional fields stay optional.
+  const field = z.preprocess((v) => v, caught);
+  return optional ? field.optional() : field;
+}
+
+// First invalid argument as a client-safe message, in schema order.
+function invalidArgMessage(args: Record<string, unknown>, shape: z.ZodRawShape): string | undefined {
+  for (const field of Object.keys(shape)) {
+    const v = args[field];
+    if (isInvalidArg(v)) return `Invalid argument \`${field}\`: ${v.issue.replace(/\.$/, "")}.`;
+  }
+  return undefined;
+}
+
+export interface ToolConfig<S extends z.ZodRawShape> {
+  description: string;
+  inputSchema: S;
+}
+
+// Registers a kb_* tool whose argument validation is audited like everything
+// else: a schema failure gets one "error" audit row and a clear message instead
+// of an unaudited protocol error.
+export function registerKbTool<S extends z.ZodRawShape>(
+  server: McpServer,
+  name: string,
+  config: ToolConfig<S>,
+  handler: (args: z.output<z.ZodObject<S>>) => Promise<CallToolResult>,
+): void {
+  const shape = Object.fromEntries(Object.entries(config.inputSchema).map(([k, s]) => [k, lenient(s as z.ZodType)]));
+  const cb = async (args: Record<string, unknown>): Promise<CallToolResult> => {
+    const invalid = invalidArgMessage(args, config.inputSchema);
+    if (invalid === undefined) return handler(args as z.output<z.ZodObject<S>>);
+    const str = (k: string): string | undefined => (typeof args[k] === "string" ? (args[k] as string) : undefined);
+    const target = { space: str("space"), project: str("project"), section: str("section"), note: str("note") };
+    return auditedCall(
+      name,
+      target,
+      () => ({ result: "error", message: invalid, detail: `invalid arguments: ${invalid}` }),
+      async () => {
+        throw new Error("unreachable");
+      },
+    );
+  };
+  server.registerTool(name, { description: config.description, inputSchema: shape }, cb as never);
+}
+
+// ---- audited call ----
+
+export interface AuditTarget {
+  space?: string;
+  project?: string;
+  section?: string;
+  note?: string;
+}
+
 export interface Target {
   space: string;
   project: string;
@@ -123,59 +205,108 @@ export interface Target {
   note: string;
 }
 
-// Shared ACL-check + audit-log + error-handling wrapper for kb_* tools.
-// Every call gets exactly one audit row, whether it's denied, ok, a handled
-// tool-level error, or an unexpected exception. Slug validation, then ACL, run before any filesystem access.
-export async function withAclAndAudit(
+// What a gate returns to stop a call before any filesystem access; undefined = proceed.
+export interface GateRefusal {
+  result: "denied" | "error";
+  message: string;
+  detail?: string;
+}
+
+export type Gate = (ctx: TokenContext) => GateRefusal | undefined;
+
+// The one audited-call path for every kb_* tool. Every call gets exactly one
+// audit row, whether it's refused by the gate, ok, a handled tool-level error,
+// or an unexpected exception.
+export async function auditedCall(
   action: string,
-  target: Target,
-  permission: Permission | Permission[], // an array means any of them suffices
+  target: AuditTarget,
+  gate: Gate,
   run: (ctx: TokenContext) => Promise<ToolRunResult>,
 ): Promise<CallToolResult> {
   let ctx: TokenContext | undefined;
   try {
     ctx = getTokenContext();
+    const c = ctx;
     const base = {
-      tokenId: ctx.tokenId,
-      tokenName: ctx.name,
+      tokenId: c.tokenId,
+      tokenName: c.name,
       action,
       space: target.space,
       project: target.project,
       section: target.section,
       note: target.note,
-      clientIp: ctx.clientIp,
+      clientIp: c.clientIp,
     };
 
-    // Slug syntax first: a literal "*", empty or garbage value must never reach checkScope
-    // or the filesystem. Syntax reveals nothing about the vault, so this leaks nothing.
-    for (const field of ["space", "project", "section", "note"] as const) {
-      if (!isValidSlug(target[field])) {
-        safeAudit({ ...base, result: "error", detail: `invalid ${field} slug` }, ctx.name);
-        return toolError("Invalid space/project/section/note name.");
-      }
-    }
-
-    const anyOf = Array.isArray(permission) ? permission : [permission];
-    if (!anyOf.some((p) => checkScope(ctx!.scopes, target.space, target.project, target.section, p))) {
-      safeAudit({ ...base, result: "denied" }, ctx.name);
-      // Generic message: don't reveal whether the space/project/section exists.
-      return toolError("Permission denied.");
+    const refused = gate(c);
+    if (refused) {
+      safeAudit({ ...base, result: refused.result, detail: refused.detail }, c.name);
+      return toolError(refused.message);
     }
 
     try {
-      const { toolResult, audit } = await run(ctx);
-      safeAudit({ ...base, result: toolResult.isError ? "error" : "ok", ...audit }, ctx.name);
+      const { toolResult, audit } = await run(c);
+      safeAudit({ ...base, result: toolResult.isError ? "error" : "ok", ...audit }, c.name);
       return toolResult;
     } catch (err) {
       const reason = redact(errorMessage(err));
-      console.error(`tool ${action} failed (token=${ctx.name}): ${reason}`);
-      safeAudit({ ...base, result: "error", detail: reason }, ctx.name);
-      const notePath = `${target.space}/${target.project}/${target.section}/${target.note}.md`;
-      return toolError(clientMessage(err, { notePath, canSee: (p) => canReadNotePath(ctx!.scopes, p) }));
+      console.error(`tool ${action} failed (token=${c.name}): ${reason}`);
+      safeAudit({ ...base, result: "error", detail: reason }, c.name);
+      const notePath =
+        target.space && target.project && target.section && target.note
+          ? `${target.space}/${target.project}/${target.section}/${target.note}.md`
+          : undefined;
+      return toolError(clientMessage(err, { notePath, canSee: (p) => canReadNotePath(c.scopes, p) }));
     }
   } catch (err) {
     // Missing token context or similar wiring bug: log it, never leak it.
     console.error(`tool ${action} failed (token=${ctx?.name ?? "unknown"}): ${redact(errorMessage(err))}`);
     return toolError("Internal error.");
   }
+}
+
+export const INVALID_NAME = "Invalid space/project/section/note name.";
+export const PERMISSION_DENIED = "Permission denied.";
+
+// A permission every call needs on top of the main one, optionally on another
+// section of the same project (e.g. kb_archive: write on `archive`).
+export interface ExtraPermission {
+  permission: Permission;
+  section?: string;
+  detail: string;
+}
+
+// Gate for tools addressing one note: slug syntax, then ACL. `permission` as an
+// array means any of them suffices; every `also` entry is required as well.
+export function noteGate(target: Target, permission: Permission | Permission[], also: ExtraPermission[] = []): Gate {
+  return (ctx) => {
+    // Slug syntax first: a literal "*", empty or garbage value must never reach checkScope
+    // or the filesystem. Syntax reveals nothing about the vault, so this leaks nothing.
+    for (const field of ["space", "project", "section", "note"] as const) {
+      if (!isValidSlug(target[field])) return { result: "error", message: INVALID_NAME, detail: `invalid ${field} slug` };
+    }
+    const { space, project, section } = target;
+    const anyOf = Array.isArray(permission) ? permission : [permission];
+    // Generic message: don't reveal whether the space/project/section exists.
+    if (!anyOf.some((p) => checkScope(ctx.scopes, space, project, section, p))) {
+      return { result: "denied", message: PERMISSION_DENIED };
+    }
+    for (const x of also) {
+      if (!checkScope(ctx.scopes, space, project, x.section ?? section, x.permission)) {
+        return { result: "denied", message: PERMISSION_DENIED, detail: x.detail };
+      }
+    }
+    return undefined;
+  };
+}
+
+// auditedCall with the per-note gate. Slug validation, then ACL, run before any filesystem access.
+export function withAclAndAudit(
+  action: string,
+  target: Target,
+  permission: Permission | Permission[],
+  run: (ctx: TokenContext) => Promise<ToolRunResult>,
+  also: ExtraPermission[] = [],
+): Promise<CallToolResult> {
+  return auditedCall(action, target, noteGate(target, permission, also), run);
 }

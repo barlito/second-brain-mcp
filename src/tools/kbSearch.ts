@@ -2,11 +2,10 @@ import { z } from "zod";
 import { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { listNoteNames, readFileNoFollow } from "../vault/enumerate";
 import { resolveNotePath } from "../vault/paths";
-import { RegisterTool, toolError, toolText } from "./common";
-import { MAX_LINE_CHARS, snippet } from "./snippet";
+import { RegisterTool, registerKbTool, toolError, toolText } from "./common";
+import { snippet } from "./snippet";
 import { discoveryCall, optSlug, readableSections } from "./discovery";
 
-export { MAX_LINE_CHARS };
 export const MAX_HIT_FILES = 50;
 export const MAX_LINES_PER_FILE = 3;
 export const MAX_FILE_BYTES = 1024 * 1024;
@@ -22,15 +21,16 @@ export const limits = {
 };
 
 export const register: RegisterTool = (server, { vaultRoot }) => {
-  server.registerTool(
+  registerKbTool(
+    server,
     "kb_search",
     {
       description:
         "Case-insensitive plain-text substring search over the notes this token can read. " +
         "Optionally narrow by space/project/section. Returns up to 50 notes with up to 3 matching lines each. " +
-        "Archived notes are skipped unless include_archived is true.",
+        "Archived notes are skipped unless include_archived is true or section 'archive' is requested explicitly.",
       inputSchema: {
-        query: z.string().max(MAX_QUERY, `query must be at most ${MAX_QUERY} characters`).describe("Text to find (2-200 chars)"),
+        query: z.string().max(MAX_QUERY, `must be at most ${MAX_QUERY} characters`).describe("Text to find (2-200 chars)"),
         space: optSlug("space"),
         project: optSlug("project"),
         section: optSlug("section"),
@@ -82,7 +82,11 @@ export const register: RegisterTool = (server, { vaultRoot }) => {
               const p = resolveNotePath(vaultRoot, sec.space, sec.project, sec.section, name);
               // One fd, O_NOFOLLOW: a swap to a symlink after listing is never followed.
               const r = await readFileNoFollow(p, MAX_FILE_BYTES);
-              if (!r) continue;
+              if (!r) {
+                // Over the size cap (or no longer a regular file): say so instead of dropping it silently.
+                stats.skipped++;
+                continue;
+              }
               content = r.content;
               bytes += r.bytes;
             } catch {
@@ -109,7 +113,7 @@ export const register: RegisterTool = (server, { vaultRoot }) => {
 
         let text = out.length ? out.join("\n") : "No matches.";
         if (truncated) text += `\n(truncated: ${truncated}; results may be incomplete, narrow the search)`;
-        if (stats.skipped) text += `\n(skipped ${stats.skipped} unreadable entries)`;
+        if (stats.skipped) text += `\n(skipped ${stats.skipped} unreadable or oversized entries)`;
         const detail =
           `qlen=${trimmed.length} hits=${files}` +
           (truncated ? ` truncated(${truncated})` : "") +

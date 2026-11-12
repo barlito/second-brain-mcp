@@ -1,12 +1,13 @@
 import { z } from "zod";
 import { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import { kbArgsShape, MAX_CONTENT_CHARS, RegisterTool, withAclAndAudit } from "./common";
+import { kbArgsShape, MAX_CONTENT_CHARS, RegisterTool, registerKbTool, withAclAndAudit } from "./common";
 import { ENTRY_NOTE_MAX_BYTES, RESERVED_SECTIONS_SUMMARY } from "./conventions";
 import { rejectReservedSection } from "./reserved";
 import { writeNote } from "./writeNote";
 
 export const register: RegisterTool = (server, { vaultRoot }) => {
-  server.registerTool(
+  registerKbTool(
+    server,
     "kb_write",
     {
       description:
@@ -16,7 +17,7 @@ export const register: RegisterTool = (server, { vaultRoot }) => {
         ...kbArgsShape,
         content: z
           .string()
-          .max(MAX_CONTENT_CHARS, "content too large (max 512 KB)")
+          .max(MAX_CONTENT_CHARS, "too large (max 512 KB)")
           .describe("Full note content, written verbatim"),
       },
     },
