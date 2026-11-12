@@ -390,7 +390,7 @@ test("ensureVaultRepo clone does not check out symlinks", async () => {
   assert.ok(lstatSync(join(dir, "link.md")).isFile());
 });
 
-test("a hung push does not wedge later writes beyond the lock; push holds the queue until settled", async () => {
+test("a hung push does not hold the write queue; later commits are pushed by one coalesced follow-up", async () => {
   const { vault, remote } = newVaultWithRemote();
   const gate = join(tmp("gate"), "open");
   const hook = join(remote, "hooks", "pre-receive");
@@ -398,18 +398,69 @@ test("a hung push does not wedge later writes beyond the lock; push holds the qu
   chmodSync(hook, 0o755);
 
   await syncWrite(vault, join(vault, "one.md"), "1\n", "one");
-  let secondDone = false;
-  const second = syncWrite(vault, join(vault, "two.md"), "2\n", "two").then((r) => {
-    secondDone = true;
-    return r;
-  });
-  await sleep(300);
-  assert.equal(secondDone, false, "second write must wait for the first push");
-  assert.equal(git(["rev-list", "--count", "HEAD"], vault).trim(), "2"); // seed + one
+  await sleep(200); // the background push is now stuck in the hook
+  // Writes keep landing locally while the push hangs.
+  await Promise.all([1, 2, 3, 4, 5].map((i) => syncWrite(vault, join(vault, `w${i}.md`), `${i}\n`, `w${i}`)));
+  assert.equal(git(["rev-list", "--count", "HEAD"], vault).trim(), "7"); // seed + one + five
+  assert.equal(getSyncStatus(vault).unpushed, true);
   writeFileSync(gate, "");
-  await second;
   await drainWrites();
-  assert.equal(git(["show", "main:two.md"], remote), "2\n");
+  assert.equal(git(["rev-parse", "main"], remote).trim(), git(["rev-parse", "HEAD"], vault).trim());
+  const s = getSyncStatus(vault);
+  assert.equal(s.unpushed, false);
+  assert.equal(s.lastPushOk, true);
+});
+
+test("write queue is bounded: excess writes are refused as busy, the rest land", async () => {
+  const repo = newRepo();
+  process.env.VAULT_WRITE_QUEUE_MAX = "3";
+  try {
+    const results = await Promise.allSettled(
+      Array.from({ length: 8 }, (_, i) => syncWrite(repo, join(repo, `q${i}.md`), `${i}\n`, `q${i}`)),
+    );
+    const ok = results.filter((r) => r.status === "fulfilled");
+    const busy = results.filter((r) => r.status === "rejected" && r.reason instanceof VaultBusyError);
+    assert.equal(ok.length, 3);
+    assert.equal(busy.length, 5);
+    // Slots free up once the queue drains.
+    await syncWrite(repo, join(repo, "after.md"), "a\n", "after");
+  } finally {
+    delete process.env.VAULT_WRITE_QUEUE_MAX;
+  }
+});
+
+test("after a network error the pre-write pull is skipped; the pusher rebases onto the remote later", async () => {
+  const { vault, remote } = newVaultWithRemote();
+  const realUrl = git(["remote", "get-url", "origin"], vault).trim();
+  git(["remote", "set-url", "origin", join(tmp("gone"), "nope.git")], vault);
+  const orig = console.error;
+  console.error = () => undefined;
+  try {
+    await syncWrite(vault, join(vault, "a.md"), "a\n", "a");
+    await drainWrites(); // push cycle fails: remote marked down
+    assert.equal(getSyncStatus(vault).lastError?.kind, "network");
+
+    git(["remote", "set-url", "origin", realUrl], vault);
+    const other = otherClone(remote);
+    writeFileSync(join(other, "theirs.md"), "t\n");
+    git(["add", "."], other);
+    git(["commit", "-m", "theirs"], other);
+    git(["push"], other);
+
+    await syncWrite(vault, join(vault, "b.md"), "b\n", "b");
+    assert.equal(existsSync(join(vault, "theirs.md")), false, "pre-write pull must be skipped");
+    await drainWrites();
+  } finally {
+    console.error = orig;
+  }
+  // The push was rejected (non-fast-forward), so the pusher pulled and pushed again.
+  assert.equal(readFileSync(join(vault, "theirs.md"), "utf8"), "t\n");
+  assert.equal(git(["show", "main:b.md"], remote), "b\n");
+  assert.equal(git(["show", "main:a.md"], remote), "a\n");
+  const s = getSyncStatus(vault);
+  assert.equal(s.unpushed, false);
+  assert.equal(s.lastPushOk, true);
+  assert.equal(s.lastError, null);
 });
 
 test("symlinked section dir and note are rejected; nothing is written outside the vault", async () => {
