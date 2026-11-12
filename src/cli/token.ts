@@ -2,6 +2,14 @@
 import { parseArgs as nodeParseArgs } from "node:util";
 import { createToken, listTokens, revokeToken, validateTokenInput } from "../auth/tokens";
 import { Permission, Scope } from "../auth/types";
+import { safeAudit } from "../tools/common";
+
+// Audit identity for token changes made from the command line (the web admin uses admin:<user>).
+export const CLI_ACTOR = "cli";
+
+function auditCli(action: string, result: "ok" | "error", detail: string): void {
+  safeAudit({ tokenId: CLI_ACTOR, tokenName: CLI_ACTOR, action, result, detail }, CLI_ACTOR);
+}
 
 // Shape only (space:project:section:permission); createToken validates the values.
 export function parseScopes(raw: string): Scope[] {
@@ -123,6 +131,7 @@ function cmdCreate(argv: string[]): void {
   }
 
   const created = createToken(name, scopes, { expiresInDays });
+  auditCli("admin_token_create", "ok", `${created.id} ${created.name} [${scopes.map(formatScope).join(",")}]`);
   console.log("Token created. The plaintext token is shown ONLY ONCE below — store it now:");
   console.log("");
   console.log(`  id:    ${created.id}`);
@@ -165,11 +174,12 @@ function cmdRevoke(argv: string[]): void {
   const { id } = values;
   if (!id) fail("--id is required");
 
-  const revoked = revokeToken(id);
-  if (revoked) {
+  if (revokeToken(id)) {
+    auditCli("admin_token_revoke", "ok", id);
     console.log(`Token ${id} revoked.`);
   } else {
-    console.log(`Token ${id} not found (or already revoked).`);
+    auditCli("admin_token_revoke", "error", `${id} not found or already revoked`);
+    fail(`token ${id} not found (or already revoked)`);
   }
 }
 
