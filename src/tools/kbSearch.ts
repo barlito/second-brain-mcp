@@ -82,7 +82,11 @@ export const register: RegisterTool = (server, { vaultRoot }) => {
               const p = resolveNotePath(vaultRoot, sec.space, sec.project, sec.section, name);
               // One fd, O_NOFOLLOW: a swap to a symlink after listing is never followed.
               const r = await readFileNoFollow(p, MAX_FILE_BYTES);
-              if (!r) continue;
+              if (!r) {
+                // Over the size cap (or no longer a regular file): say so instead of dropping it silently.
+                stats.skipped++;
+                continue;
+              }
               content = r.content;
               bytes += r.bytes;
             } catch {
@@ -109,7 +113,7 @@ export const register: RegisterTool = (server, { vaultRoot }) => {
 
         let text = out.length ? out.join("\n") : "No matches.";
         if (truncated) text += `\n(truncated: ${truncated}; results may be incomplete, narrow the search)`;
-        if (stats.skipped) text += `\n(skipped ${stats.skipped} unreadable entries)`;
+        if (stats.skipped) text += `\n(skipped ${stats.skipped} unreadable or oversized entries)`;
         const detail =
           `qlen=${trimmed.length} hits=${files}` +
           (truncated ? ` truncated(${truncated})` : "") +

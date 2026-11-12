@@ -159,10 +159,13 @@ test("kb_search finds only readable notes; no content or names outside the scope
   assert.ok(pro.text.includes("pro/b/notes/x: needle in b"));
   assert.ok(pro.text.includes("pro/a/journal/2026-01: needle in journal"));
   assert.ok(!pro.text.includes("PERSO") && !pro.text.includes("archived"));
+  // pro/a/notes/big.md is over the per-file cap: skipped, and the output says so.
+  assert.ok(ex.text.endsWith("\n(skipped 1 unreadable or oversized entries)"), ex.text);
+  assert.match((lastAudit(db, "token_name='exact'") as { detail: string }).detail, /skipped=1$/);
   const mixed = await search("mixed", { query: "perso secret" });
-  assert.equal(mixed.text, "perso/p/notes/y: needle PERSO secret");
+  assert.equal(mixed.text, "perso/p/notes/y: needle PERSO secret\n(skipped 1 unreadable or oversized entries)");
   const none = await search("exact", { query: "perso secret" });
-  assert.equal(none.text, "No matches.");
+  assert.equal(none.text, "No matches.\n(skipped 1 unreadable or oversized entries)");
 });
 
 test("kb_search master: archive is hidden by default, shown with include_archived; symlinks never searched", async () => {
@@ -190,8 +193,8 @@ test("kb_search query validation: 2..200 chars, plain substring (no regex)", asy
   assert.equal((await search("master", { query: "a" })).isError, true);
   assert.equal((await search("master", { query: " a " })).isError, true);
   assert.equal((await search("master", { query: "x".repeat(201) })).isError, true);
-  assert.equal((await search("master", { query: "(a+)+$" })).text, "No matches.");
-  assert.equal((await search("master", { query: "n.t" })).text, "No matches.");
+  assert.equal((await search("master", { query: "(a+)+$" })).text, "No matches.\n(skipped 1 unreadable or oversized entries)");
+  assert.equal((await search("master", { query: "n.t" })).text, "No matches.\n(skipped 1 unreadable or oversized entries)");
 });
 
 test("kb_search caps: 3 lines per file, 200 chars per line, 50 files with truncated flag", async () => {
@@ -214,7 +217,7 @@ test("kb_search audit: query length and hit count, never the query text", async 
   const row = lastAudit(db, "token_name='exact'") as { action: string; result: string; detail: string };
   assert.equal(row.action, "kb_search");
   assert.equal(row.result, "ok");
-  assert.equal(row.detail, "qlen=12 hits=0");
+  assert.equal(row.detail, "qlen=12 hits=0 skipped=1");
   assert.ok(!JSON.stringify(row).includes("perso secret"));
 });
 
@@ -283,7 +286,7 @@ test("kb_search skips and counts an unreadable directory and keeps going", async
 
 test("kb_search audit logs the trimmed query length, also when too short", async () => {
   await search("exact", { query: "   perso secret   " });
-  assert.equal((lastAudit(db, "token_name='exact'") as { detail: string }).detail, "qlen=12 hits=0");
+  assert.equal((lastAudit(db, "token_name='exact'") as { detail: string }).detail, "qlen=12 hits=0 skipped=1");
   assert.equal((await search("exact", { query: "   a   " })).isError, true);
   assert.equal((lastAudit(db, "token_name='exact'") as { detail: string }).detail, "qlen=1 too short");
 });
