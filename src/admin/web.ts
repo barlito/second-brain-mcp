@@ -25,6 +25,7 @@ import {
   Ctx,
   DashboardData,
   dashboardView,
+  accessView,
   errorView,
   inboxView,
   proposalView,
@@ -32,6 +33,8 @@ import {
   tokensView,
   TokenForm,
 } from "../web/views";
+import { AccessError, approveRequest, auditSessionRevoke, countPendingRequests, denyRequest, listPendingRequests } from "../access";
+import { listActiveSessions, revokeSession } from "../auth/sessions";
 import { OneTimeStore } from "./onetime";
 import { acceptProposal, AdminError, listInbox, rejectProposal, showProposal } from "./service";
 import { vaultRouter } from "./vaultRoutes";
@@ -156,6 +159,7 @@ async function dashboardData(vaultRoot: string): Promise<DashboardData> {
     conflictBranches: sync.conflictBranches,
     activeTokens: safeCount(countActiveTokens),
     pendingProposals: pending,
+    pendingAccess: safeCount(countPendingRequests),
     audit24h: count("SELECT COUNT(*) AS n FROM audit_log WHERE ts >= ?", since),
   };
 }
@@ -456,6 +460,51 @@ export function createWebAdminApp(opts: WebAdminOptions): Express {
   inboxRouter.post("/:id/accept", resolveWith((id, body, actor) => acceptProposal(vaultRoot, id, body.overwrite === "1", actor), "Accepted"));
   inboxRouter.post("/:id/reject", resolveWith((id, _body, actor) => rejectProposal(vaultRoot, id, actor), "Rejected"));
   app.use("/inbox", inboxRouter);
+
+  // ---- access requests (token-less sessions) ----
+
+  const accessRouter = express.Router();
+  accessRouter.param("id", (_req, res, next, id: string) => {
+    if (!UUID_RE.test(id)) return void send(res, errorView(ctxOf(res), 400, "invalid id"), 400);
+    next();
+  });
+  accessRouter.get("/", (req, res) => {
+    send(res, accessView(ctxOf(res), listPendingRequests(), listActiveSessions(), takeBanner(req, res)));
+  });
+  const accessBanner = (res: Response, banner: Banner): void => redirectWithFlash(res, "/access", { kind: "banner", banner });
+  accessRouter.post("/:id/approve", (req, res) => {
+    const body = req.body as Record<string, unknown>;
+    try {
+      const text = str(body.scopes);
+      const d = approveRequest(req.params.id as string, {
+        scopes: text.trim() ? scopesFromText(text) : undefined,
+        allowWildcard: body.allow_wildcard === "1",
+        actor: res.locals.actor as string,
+      });
+      accessBanner(res, { kind: "ok", title: `Approved ${d.space}/${d.project} as ${d.tokenName}.`, lines: [d.scopes.map(formatScope).join(", "), ...d.notes] });
+    } catch (err) {
+      if (err instanceof AccessError) return accessBanner(res, { kind: "err", title: err.message, lines: err.lines });
+      // Scope-shape errors from parseScopes.
+      if (err instanceof Error && /^invalid scope/.test(err.message)) return accessBanner(res, { kind: "err", title: err.message });
+      throw err;
+    }
+  });
+  accessRouter.post("/:id/deny", (req, res) => {
+    try {
+      const d = denyRequest(req.params.id as string, res.locals.actor as string);
+      accessBanner(res, { kind: "ok", title: `Denied ${d.space}/${d.project}.` });
+    } catch (err) {
+      if (err instanceof AccessError) return accessBanner(res, { kind: "err", title: err.message });
+      throw err;
+    }
+  });
+  accessRouter.post("/sessions/:id/revoke", (req, res) => {
+    const id = req.params.id as string;
+    const ok = revokeSession(id);
+    auditSessionRevoke(res.locals.actor as string, id, ok);
+    accessBanner(res, ok ? { kind: "ok", title: "Session revoked." } : { kind: "err", title: "Session not found or already revoked." });
+  });
+  app.use("/access", accessRouter);
 
   // ---- vault browser / editor ----
 

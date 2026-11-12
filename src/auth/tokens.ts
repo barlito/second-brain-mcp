@@ -120,6 +120,8 @@ export interface TokenListEntry {
   expires_at: string | null;
   expired: boolean;
   scopes: Scope[];
+  // 'session': a grant approved for a token-less MCP session (never usable as a Bearer token).
+  kind: "bearer" | "session";
 }
 
 function hashToken(token: string): string {
@@ -141,9 +143,9 @@ const EXPIRED_SQL =
 const selectTokenByHashStmt = db.prepare(
   `SELECT id, name, last_used_at, revoked_at, ${EXPIRED_SQL} AS expired,
           (expires_at IS NOT NULL AND julianday(expires_at) IS NULL) AS unparseable
-   FROM tokens WHERE token_hash = ?`,
+   FROM tokens WHERE token_hash = ? AND kind = 'bearer'`,
 );
-const COUNT_ACTIVE_SQL = `SELECT COUNT(*) AS n FROM tokens WHERE revoked_at IS NULL AND NOT ${EXPIRED_SQL}`;
+const COUNT_ACTIVE_SQL = `SELECT COUNT(*) AS n FROM tokens WHERE kind = 'bearer' AND revoked_at IS NULL AND NOT ${EXPIRED_SQL}`;
 const updateLastUsedAtStmt = db.prepare("UPDATE tokens SET last_used_at = ? WHERE id = ?");
 const selectScopesByTokenIdStmt = db.prepare(
   "SELECT space, project, section, permission FROM scopes WHERE token_id = ?",
@@ -152,7 +154,7 @@ const revokeTokenStmt = db.prepare(
   "UPDATE tokens SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL",
 );
 const selectAllTokensStmt = db.prepare(
-  `SELECT id, name, created_at, revoked_at, last_used_at, expires_at, ${EXPIRED_SQL} AS expired,
+  `SELECT id, name, created_at, revoked_at, last_used_at, expires_at, kind, ${EXPIRED_SQL} AS expired,
           (expires_at IS NOT NULL AND julianday(expires_at) IS NULL) AS unparseable
    FROM tokens ORDER BY created_at`,
 );
@@ -164,7 +166,7 @@ function warnUnparseable(id: string, expiresAt: unknown): void {
   console.warn(`warning: token ${id} has an unparseable expires_at ${JSON.stringify(expiresAt)}; treating it as expired`);
 }
 
-// Non-revoked, non-expired tokens (dashboard).
+// Non-revoked, non-expired Bearer tokens (dashboard); session grants are counted separately.
 export function countActiveTokens(): number {
   return (db.prepare(COUNT_ACTIVE_SQL).get() as { n: number }).n;
 }

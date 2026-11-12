@@ -100,6 +100,8 @@ The web admin UI (`https://second-brain-admin.barlito.fr`, port 3002) sits behin
   ```
   (This narrow scope covers the smoke-test note below; issue your real working tokens afterwards.)
 
+- [ ] Optional, no token on the clients: configure the MCP without a token (see README "Connecting without a token") and approve each project's access request in the web admin (Access requests) or with `make access-list` / `make access-approve id=<id|code>`. Compose sets `SESSION_IDLE_DAYS`, `ACCESS_MAX_PENDING_TOTAL`, `ANON_INIT_PER_MIN` and `ANON_ACCESS_REQUESTS_PER_HOUR` (defaults); the migration adds the `sessions` and `access_requests` tables on first start (`make db.backup` runs before each prod deploy). The Traefik rate limit applies to `/mcp` as before.
+
 ### 7. Smoke test
 
 - [ ] Add the MCP server in Claude Code (see the README), then `kb_write` a note, e.g. space `meta`, project `smoke`, section `notes`, note `hello`. It returns a commit SHA.

@@ -3,6 +3,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { RegisterTool } from "./tools/common";
 import { SERVER_INSTRUCTIONS } from "./tools/conventions";
+import { register as registerKbAccess } from "./tools/kbAccess";
 import { register as registerKbAppend } from "./tools/kbAppend";
 import { register as registerKbArchive } from "./tools/kbArchive";
 import { register as registerKbHistory } from "./tools/kbHistory";
@@ -28,6 +29,7 @@ const TOOLS: RegisterTool[] = [
   registerKbHistory,
   registerKbInitProject,
   registerKbPropose,
+  registerKbAccess,
 ];
 
 export function createMcpServer(vaultRoot: string): McpServer {

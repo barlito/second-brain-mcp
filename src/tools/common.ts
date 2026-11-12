@@ -2,7 +2,7 @@
 import { z } from "zod";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import { getTokenContext, TokenContext } from "../auth/context";
+import { attribute, getTokenContext, TokenContext } from "../auth/context";
 import { Permission } from "../auth/types";
 import { checkScope } from "../acl/check";
 import { AuditEntry, logAudit } from "../audit";
@@ -226,7 +226,8 @@ export async function auditedCall(
   let ctx: TokenContext | undefined;
   try {
     ctx = getTokenContext();
-    const c = ctx;
+    // Session with several grants: sign the call with the grant covering the target.
+    const c = attribute(ctx, target);
     const base = {
       tokenId: c.tokenId,
       tokenName: c.name,
@@ -238,10 +239,13 @@ export async function auditedCall(
       clientIp: c.clientIp,
     };
 
-    const refused = gate(c);
+    // Central fence for token-less sessions: until a grant exists only the two access tools run, so a
+    // future tool can never serve an unauthenticated session by forgetting its own gate.
+    const refused = c.session && c.scopes.length === 0 && !SESSION_ONLY_ACTIONS.has(action) ? NO_ACCESS : gate(c);
     if (refused) {
       safeAudit({ ...base, result: refused.result, detail: refused.detail }, c.name);
-      return toolError(refused.message);
+      const hint = c.session && refused.message === PERMISSION_DENIED ? " For another project, call kb_request_access." : "";
+      return toolError(refused.message + hint);
     }
 
     try {
@@ -264,6 +268,12 @@ export async function auditedCall(
     return toolError("Internal error.");
   }
 }
+
+export const NO_ACCESS_MESSAGE =
+  "No access for this session: call kb_request_access (space, project, access, reason) and ask the user to approve it.";
+const NO_ACCESS: GateRefusal = { result: "denied", message: NO_ACCESS_MESSAGE, detail: "session has no grant" };
+// Tools a session without any grant may call.
+export const SESSION_ONLY_ACTIONS: ReadonlySet<string> = new Set(["kb_request_access", "kb_access_status"]);
 
 export const INVALID_NAME = "Invalid space/project/section/note name.";
 export const PERMISSION_DENIED = "Permission denied.";

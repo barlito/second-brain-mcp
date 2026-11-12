@@ -4,7 +4,8 @@ An MCP server that exposes a git-backed, Obsidian-compatible knowledge-base vaul
 
 - Transport: stateless Streamable HTTP at `POST /mcp` (TypeScript, Express 5, MCP SDK).
 - Nine tools: `kb_read`, `kb_write`, `kb_append`, `kb_archive`, `kb_list`, `kb_search`, `kb_history`, `kb_init_project`, `kb_propose`.
-- Admin: a [web admin UI](#web-admin-ui) behind Traefik + Authelia (tokens, proposals inbox, vault browser, audit log) and `make` targets for tokens and the inbox.
+- Admin: a [web admin UI](#web-admin-ui) behind Traefik + Authelia (tokens, access requests, proposals inbox, vault browser, audit log) and `make` targets for tokens, access requests and the inbox.
+- Clients can also connect [without a token](#connecting-without-a-token) and ask the user for access, which the user approves in the admin.
 - Deployed with Docker Swarm (`docker stack deploy`, driven by the Makefile) behind the [traefik-base](https://github.com/barlito/traefik-base) stack (network `traefik_traefik_proxy`).
 - Releases and prod deploys/rollbacks run through GitHub Actions (see [docs/DEPLOY.md](docs/DEPLOY.md)).
 - Local: `https://second-brain.local.barlito.fr` (admin: `https://second-brain-admin.local.barlito.fr`). Prod: `https://second-brain.barlito.fr` (admin: `https://second-brain-admin.barlito.fr`; not deployed yet, see [docs/DEPLOY.md](docs/DEPLOY.md)).
@@ -14,7 +15,7 @@ An MCP server that exposes a git-backed, Obsidian-compatible knowledge-base vaul
 Request path:
 
 ```
-Traefik -> bearer auth (+ per-IP failure limiter) -> /mcp -> ACL check -> vault path safety -> git sync -> audit
+Traefik -> bearer auth (+ per-IP failure limiter) or token-less session -> /mcp -> ACL check -> vault path safety -> git sync -> audit
 ```
 
 1. Traefik terminates TLS (plain HTTP is redirected to HTTPS). Security headers apply in both local and prod; only the rate limit (20 avg / 40 burst per IP) is prod-only.
@@ -245,6 +246,43 @@ make token-revoke id=<token id>
 - The plaintext token (`sb_...`) is printed once at creation and cannot be recovered. Only its hash is stored. If lost, revoke and create a new one.
 - `token-list` shows id, name, created/revoked/last-used timestamps, `expires_at` (`-` if none, suffixed ` (EXPIRED)` once past) and scopes (4-part format).
 
+## Connecting without a token
+
+The MCP can be configured once, everywhere, with no secret: a claude.ai custom connector (set up once on claude.ai, it syncs to Claude web, mobile and desktop and Claude Code) with no authentication, or
+
+```bash
+claude mcp add --scope user --transport http second-brain https://second-brain.barlito.fr/mcp
+```
+
+An unauthenticated client can initialize, read the server instructions, list the tools and call exactly two tools: `kb_request_access` and `kb_access_status`. The user stays the only one managing access and the agent never sees a token.
+
+Flow:
+
+1. On `initialize` (no `Authorization` header) the server issues its own `Mcp-Session-Id` (256-bit random, stored hashed in SQLite with client name/version, IP and timestamps). The client sends it on every later request. An unknown, expired or revoked id gets HTTP `404`, so the client re-initializes (MCP spec). Sessions live in the DB and survive restarts and redeploys. Requests that carry a Bearer token behave exactly as before and never need a session.
+2. When it actually needs the knowledge base (it need not ask up front), the agent calls `kb_request_access({space, project, access: "read"|"write", reason, scopes?})`. It gets a request id and a short code (6 characters), and is told to ask the user to approve. `scopes` is an optional explicit list (`space:project:section:permission`), validated like token scopes; wildcards are accepted only as a request, the admin must confirm them.
+3. The user opens the admin web (Access requests), matches the code, optionally edits the scopes and approves (or denies). CLI: `make access-list`, `make access-approve id=<id|code> [scope=s:p:sec:perm,...] [allow_wildcard=1]`, `make access-deny id=<id|code>`.
+4. The agent polls `kb_access_status({request_id})` (pending / approved with the scopes / denied / expired / revoked) and then uses the normal tools.
+
+Grants:
+
+- Default scopes: access=write gives `meta:*:*:read`, `<space>:<project>:*:read`, `<space>:<project>:*:write`; access=read gives `meta:*:*:read`, `<space>:<project>:*:read`.
+- Approving creates a real token row (`kind=session`, name `session-<client>-<space>-<project>`) that carries the scopes through the same ACL, audit and commit-attribution path as any token. Its secret is random and never shown, so it can never be used as a Bearer token. It appears in the Tokens page (marked `session`) and revoking it, or the session in Access requests, cuts access immediately.
+- A session may hold several grants (union of scopes) and may call `kb_request_access` again at any time (another project, read to write, explicit scopes): an "elevation". Approval adds a grant, denial leaves existing grants untouched. Each call is attributed (audit row, `via <name>` in the commit) to the grant covering the target.
+- Expiry is sliding: a session with grants expires `SESSION_IDLE_DAYS` (default 5) after its last use; a session without any grant after 1 hour idle. Expired sessions are pruned (grants revoked). A pending request expires after 15 minutes (`ACCESS_REQUEST_TTL_MINUTES`).
+
+Limits on the unauthenticated surface (all per IP unless noted, in memory):
+
+- `initialize`: `ANON_INIT_PER_MIN` (default 10); access requests: `ANON_ACCESS_REQUESTS_PER_HOUR` (default 10; repeating an identical pending request is free); open sessions without a grant: `ANON_MAX_SESSIONS` (default 1000).
+- At most `ACCESS_MAX_PENDING_PER_SESSION` (3) pending requests per session and `ACCESS_MAX_PENDING_TOTAL` (20) in total.
+- Bodies without a token are capped at 32 KB (1 MB with a token). Allowed methods: `initialize`, `notifications/*`, `ping`, `tools/list`, `tools/call`; anything else is refused before a session is even looked up. `GET`/`DELETE /mcp` answer `405` (never `401`, which would trigger OAuth discovery in clients).
+
+Security notes:
+
+- No unauthenticated path reads or writes the vault: until a grant exists, every tool except the two access tools is refused centrally (`No access for this session: call kb_request_access ...`), whatever its own gate says.
+- The server instructions and the tool list are public (anyone can fetch them without a token): they hold only generic conventions, never project names, URLs or secrets. Keep it that way when editing them.
+- Session ids and token secrets are never logged or audited (audit rows use an internal session row id). Free text from the client (client name, reason) is length-capped and HTML-escaped in the admin.
+- Residual risk: anyone can create pending requests (bounded by the limits above); nothing is granted without the user's approval, so the admin must compare the code, client and reason before approving.
+
 ## Proposals inbox
 
 `kb_propose` writes pending proposals to `_inbox/<id>.md` in the vault. Review them with `make` targets (a CLI inside the service container that talks to the server's local admin listener on `127.0.0.1:ADMIN_PORT`, so accept/reject share the server's write lock) or in the [web admin UI](#web-admin-ui):
@@ -266,6 +304,7 @@ make inbox-reject id=<id>                # remove the proposal
 - Dashboard: DB/vault/sync status, unpushed commits, last push, conflict branches, active tokens, pending proposals, audit rows in the last 24 h.
 - Tokens: list (expiry, active/expired/revoked); create with a preset or scopes (one per line), the wildcard confirmation and an optional expiry; the plaintext is shown once on a one-time page; revoke. Audit actions `admin_token_create`/`admin_token_revoke`, actor `admin:<user>`.
 - Inbox: list, view a proposal rendered or raw, accept (optionally overwriting) or reject.
+- Access requests: pending requests from token-less sessions (client, IP, requested project/scopes, reason, code, age, the session's current grants, an "elevation" label), approve with editable scopes (wildcard confirmation as for tokens) or deny; active sessions with revoke. Audit actions `access_approve`/`access_deny`/`access_revoke` and `access_elevation_request`/`_approve`/`_deny`. The dashboard shows the pending count.
 - Vault browser: browse spaces/projects/sections/notes, view, edit (optimistic concurrency: the form carries a hash of the version it loaded; if the note changed meanwhile the save is refused with a conflict instead of overwriting), create, archive, history, and view a note at a past commit. Archived notes are read-only. Writes go through the same write lock as the tools; commits `web: edit|create|archive <space>/<project>/<section>/<note> by <user>`; audit actions `web_note_create`/`web_note_edit`/`web_note_archive`, actor `web:<user>`.
 - Audit viewer: read-only, newest first, 50 rows per page, exact-match filters on token name and action.
 
@@ -417,6 +456,9 @@ Compose sets these; no `.env` file is needed, except that both compose files req
 | `INBOX_MAX_PER_TOKEN`, `INBOX_MAX_TOTAL` | `kb_propose` quotas: pending proposals per token name / in total. | `20` / `200` | unset | unset |
 | `SPACE_LIMITS` | Per-space limits and auto-archive age, see [Agents space and space limits](#agents-space-and-space-limits). Validated at startup. | unset (no limits) | `agents:maxNotes=30,maxNoteBytes=4096,maxProjectBytes=102400,archiveAfterDays=60` | same |
 | `PUBLIC_MCP_URL` | Public MCP endpoint used in the `claude mcp add` command shown after creating a token (CLI and web admin). Must be an http(s) URL, else the default is used with a warning. | `https://second-brain.barlito.fr/mcp` | `https://second-brain.local.barlito.fr/mcp` | `https://second-brain.barlito.fr/mcp` |
+| `SESSION_IDLE_DAYS` | Sliding idle expiry of a token-less session that holds grants (a session without grant expires after 1 h). | `5` | `5` | `5` |
+| `ACCESS_REQUEST_TTL_MINUTES`, `ACCESS_MAX_PENDING_PER_SESSION`, `ACCESS_MAX_PENDING_TOTAL` | Access requests: lifetime, pending per session, pending in total. | `15` / `3` / `20` | unset | unset |
+| `ANON_INIT_PER_MIN`, `ANON_ACCESS_REQUESTS_PER_HOUR`, `ANON_MAX_SESSIONS` | Token-less surface: per-IP initialize and access-request budgets, max open sessions without a grant. | `10` / `10` / `1000` | unset | unset |
 | `AUTO_ARCHIVE_INTERVAL_MS` | Auto-archive run interval (also runs once after startup); `0` disables. | `86400000` | unset | unset |
 | `GIT_SSH_COMMAND` | SSH command for git; points at the deploy key secret. | unset | unset | `ssh -i /run/secrets/vault_deploy_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=10` |
 | `GIT_AUTHOR_NAME`, `GIT_AUTHOR_EMAIL`, `GIT_COMMITTER_NAME`, `GIT_COMMITTER_EMAIL` | Git identity (git refuses to commit without one). | none | `second-brain-mcp` / `second-brain-mcp@noreply.local` | same |
@@ -432,6 +474,7 @@ Hardened:
 
 - Tokens are random (256-bit), stored only as SHA-256 hashes, shown once, individually revocable.
 - Optional token expiry.
+- Token-less sessions (opt-in by the client, see [Connecting without a token](#connecting-without-a-token)): narrow method allowlist, per-IP rate limits, quotas, 32 KB bodies, no vault access before an admin-approved grant.
 - Per-IP auth-failure limiter; audit of every tool call, admin action and auth failure; Traefik rate limit in prod, security headers in both.
 - Web admin only behind Traefik + Authelia (trusted peer + proxy secret + group), with CSRF, one-time nonces and a strict CSP.
 - Strict slug validation, path re-check against the vault root, symlinks refused; body and note size limits.

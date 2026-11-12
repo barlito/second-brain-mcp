@@ -14,6 +14,9 @@ import { listen } from "./listen";
 import { parseAutoArchiveInterval, startAutoArchive } from "./autoArchive";
 import { parseSpaceLimits } from "./limits";
 import { createMcpServer } from "./mcp";
+import { anonLimits, AnonLimits, RateLimiter } from "./rateLimit";
+import { makeSessionAuth } from "./sessionAuth";
+import { startSessionPruning } from "./auth/sessions";
 import {
   abortPendingPushes,
   BootstrapAbortedError,
@@ -196,6 +199,8 @@ export interface AppOptions {
   lifecycle?: Lifecycle;
   trustedProxy?: TrustedProxy;
   authLimiter?: AuthFailureLimiter;
+  // Limits of the token-less surface (default: env, see rateLimit.ts).
+  anonLimits?: AnonLimits;
 }
 
 // Bearer-token auth, mounted before the MCP route. No MCP involved on failure.
@@ -356,12 +361,20 @@ export function createApp(opts: AppOptions): Express {
     next();
   });
 
-  // Body parsing only after auth, so unauthenticated callers can't make us
-  // buffer anything.
-  app.use("/mcp", bearerAuth, express.json({ limit: BODY_LIMIT }));
+  // Body parsing only after auth. A request with an Authorization header takes the Bearer path
+  // exactly as before (it never needs a session); without one it takes the token-less session
+  // path, whose own small body cap applies (see sessionAuth.ts).
+  const limits = opts.anonLimits ?? anonLimits();
+  const sessionAuth = makeSessionAuth(limits, new RateLimiter(limits.requestsPerHour, 3_600_000), new RateLimiter(limits.initPerMin, 60_000));
+  const bearerBody = express.json({ limit: BODY_LIMIT });
+  app.use("/mcp", (req, res, next) => {
+    if (req.headers.authorization !== undefined) return bearerAuth(req, res, (err?: unknown) => (err ? next(err) : bearerBody(req, res, next)));
+    sessionAuth(req, res, next);
+  });
 
-  // Stateless Streamable HTTP mode: a fresh McpServer + transport per request,
-  // no session state kept between calls.
+  // Stateless Streamable HTTP mode: a fresh McpServer + transport per request. The only state is
+  // the server-issued session id (DB), used to bind access requests to a client; the transport
+  // does not know about it.
   app.post("/mcp", async (req, res) => {
     if (Array.isArray(req.body) && req.body.length > MAX_JSONRPC_BATCH) {
       jsonRpcError(res, 400, -32600, `Invalid Request: batch too large (max ${MAX_JSONRPC_BATCH} messages)`);
@@ -421,7 +434,7 @@ export function createApp(opts: AppOptions): Express {
     if (e.type === "entity.too.large") {
       status = 413;
       code = -32600;
-      message = "Request too large (max 1 MB)";
+      message = res.locals.anon ? "Request too large (max 32 KB without a token)" : "Request too large (max 1 MB)";
     } else if (e.type === "entity.parse.failed") {
       status = 400;
       code = -32700;
@@ -633,6 +646,7 @@ export async function start(): Promise<{ server: Server; shutdown: (signal?: str
   const stopSync = intervalMs > 0 ? startPeriodicSync(vaultRoot, intervalMs) : undefined;
 
   const stopArchive = startAutoArchive(vaultRoot);
+  const stopSessions = startSessionPruning();
 
   shutdown = createShutdown({
     server: withAdmin(withAdmin(server, adminServer), webAdminServer),
@@ -640,6 +654,7 @@ export async function start(): Promise<{ server: Server; shutdown: (signal?: str
     stopSync: () => {
       stopSync?.();
       stopArchive?.();
+      stopSessions();
       trustedProxy.stop();
     },
     closeDb: () => db.close(),

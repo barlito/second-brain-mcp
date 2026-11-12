@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := help
-.PHONY: help deploy deploy.prod db.backup db.restore docker.service.update deploy.assert_image smoke.test deploy.prune prune-local-images undeploy restart logs token-create token-list token-revoke backup-db prune-audit inbox-list inbox-show inbox-accept inbox-reject migrate-frontmatter
+.PHONY: help deploy deploy.prod db.backup db.restore docker.service.update deploy.assert_image smoke.test deploy.prune prune-local-images undeploy restart logs token-create token-list token-revoke backup-db prune-audit inbox-list inbox-show inbox-accept inbox-reject access-list access-approve access-deny migrate-frontmatter
 
 stack_name=second-brain-mcp
 service=second-brain-mcp
@@ -172,6 +172,17 @@ inbox-accept: ## Accept a proposal into its target (make inbox-accept id=<id> [o
 inbox-reject: ## Reject a proposal (make inbox-reject id=<id>)
 	@test -n "$(id)" || { echo "id is required (make inbox-reject id=<id>)" >&2; exit 1; }
 	@$(call exec_in_service,node dist/cli/inbox.js reject "$(id)")
+
+access-list: ## List pending access requests (token-less sessions) and active sessions
+	@$(call exec_in_service,node dist/cli/access.js list)
+
+access-approve: ## Approve an access request (make access-approve id=<id|code> [scope=s:p:sec:perm,...] [allow_wildcard=1]); default scopes: meta read + the project
+	@test -n "$(id)" || { echo "id is required (make access-approve id=<id|code>)" >&2; exit 1; }
+	@$(call exec_in_service,node dist/cli/access.js approve "$(id)" $(if $(scope),--scope "$(scope)") $(if $(allow_wildcard),--allow-wildcard))
+
+access-deny: ## Deny an access request (make access-deny id=<id|code>)
+	@test -n "$(id)" || { echo "id is required (make access-deny id=<id|code>)" >&2; exit 1; }
+	@$(call exec_in_service,node dist/cli/access.js deny "$(id)")
 
 migrate-frontmatter: ## Add frontmatter to existing notes that lack it (one commit, idempotent)
 	@$(call exec_in_service,node dist/cli/migrate.js frontmatter)
