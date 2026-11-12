@@ -65,8 +65,8 @@ async function follow(r: Res): Promise<Res> {
 
 // One pending card (from its opening div to the next card or the end of the pending list).
 function cardOf(body: string, id: string): string {
-  const start = body.lastIndexOf('<div class="card stack">', body.indexOf(id));
-  const next = body.indexOf('<div class="card stack">', start + 10);
+  const start = body.lastIndexOf('<div class="card pad stack g12">', body.indexOf(id));
+  const next = body.indexOf('<div class="card pad stack g12">', start + 10);
   return body.slice(start, next === -1 ? start + 4000 : next);
 }
 
@@ -107,14 +107,14 @@ test("access page: pending request with client, IP, project, reason (escaped), c
   assert.match(page.body, new RegExp(r.id));
   assert.match(page.body, /Claude Code/);
   assert.match(page.body, /203\.0\.113\.7/);
-  assert.match(page.body, /<code>pro:alpha:\*:write<\/code> <span class="badge err">write<\/span>/);
+  assert.match(page.body, /<span class="scope-path">pro:alpha:\*<\/span><span class="scope-perm p-write">read &amp; write<\/span>/);
   assert.match(page.body, /because &lt;b&gt;reason&lt;\/b&gt;/);
   assert.doesNotMatch(page.body, /<b>reason/);
   assert.match(page.body, /meta:\*:\*:read\npro:alpha:\*:read\npro:alpha:\*:write/);
-  assert.match(page.body, /<a href="\/access"[^>]*>Access<\/a>/);
+  assert.match(page.body, /<a href="\/access"[^>]*>[^]*?<span class="label">Access<\/span>/);
   assert.doesNotMatch(page.body, /\sstyle\s*=|\son[a-z]+\s*=/i);
   const dash = await get("/");
-  assert.match(dash.body, /<div class="n">1<\/div><div class="l">pending access requests/);
+  assert.match(dash.body, /Pending access requests<\/span><span class="n">1<\/span>/);
 });
 
 test("approve via the page with editable scopes, then active sessions + revoke; CSRF and nonce enforced", async () => {
@@ -190,8 +190,8 @@ test("page shows the session's CURRENT grants next to the requested ones and lab
   page = await get("/access");
   const card = cardOf(page.body, up.id);
   assert.match(card, /<span class="badge err">elevation<\/span>/);
-  assert.match(card, /Current grants of this session:[\s\S]*session-claude-code-pro-delta[\s\S]*<code>pro:delta:\*:read<\/code>/);
-  assert.match(card, /Asks for:[\s\S]*<code>pro:delta:\*:write<\/code>/);
+  assert.match(card, /Current grants of this session[\s\S]*session-claude-code-pro-delta[\s\S]*<span class="scope-path">pro:delta:\*<\/span><span class="scope-perm p-read">read<\/span>/);
+  assert.match(card, /Asks for[\s\S]*<span class="scope-path">pro:delta:\*<\/span><span class="scope-perm p-write">read &amp; write<\/span>/);
   // Deny leaves the existing grant.
   await follow(await post(`/access/${up.id}/deny`, {}));
   assert.equal(sessions.listGrants(s.id).length, 1);
@@ -253,8 +253,8 @@ test("card lists each requested scope with writes highlighted, warns when scopes
   const r = ask(s.id, "pro", "zeta", "read", { scopes: ["pro:zeta:notes:read", "pro:other:notes:write"] });
   const page = await get("/access");
   const card = cardOf(page.body, r.id);
-  assert.match(card, /<code>pro:zeta:notes:read<\/code>/);
-  assert.match(card, /<code>pro:other:notes:write<\/code> <span class="badge err">write<\/span>/);
+  assert.match(card, /<span class="scope-path">pro:zeta:notes<\/span><span class="scope-perm p-read">read<\/span>/);
+  assert.match(card, /<span class="scope-path">pro:other:notes<\/span><span class="scope-perm p-write">read &amp; write<\/span>/);
   assert.match(card, /scopes exceed the stated request/);
   assert.ok(!card.slice(0, 1500).includes(r.code), "code not shown");
   assert.match(card, /Request code/);
@@ -273,7 +273,7 @@ test("connector keys: create (one-time page with header + Copy), list, reveal (a
   assert.match((await get("/access")).body, /No keys: token-less access is disabled/);
   const created = await follow(await post("/access/keys", { name: "claude-ai" }));
   assert.match(created.body, /x-api-key/);
-  const key = /<textarea id="ckey-value"[^>]*>(sbk_[A-Za-z0-9_-]+)<\/textarea>/.exec(created.body)?.[1];
+  const key = /<textarea class="field cmd" id="ckey-value"[^>]*>(sbk_[A-Za-z0-9_-]+)<\/textarea>/.exec(created.body)?.[1];
   assert.ok(key, "key shown on the creation page");
   assert.match(created.body, /data-copy="ckey-value"/);
   assert.match(created.body, /--header &quot;x-api-key: sbk_/);
