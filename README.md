@@ -22,8 +22,8 @@ Traefik -> bearer auth (+ per-IP failure limiter) -> /mcp -> ACL check -> vault 
 3. `/mcp` builds a fresh MCP server per request (stateless).
 4. The tool checks the token's scopes (space, project and section match exactly or via trailing `*` wildcards; `read`, `write` and `propose` are separate permissions). This runs before any filesystem access.
 5. The path is resolved from validated slugs, re-checked against the vault root, and symlinks are refused.
-6. Writes go through a single queue: pull (rebase), atomic write, local commit, then asynchronous push.
-7. One audit row is written per tool call (`ok`, `denied` or `error`), plus rows for HTTP-level errors, (coalesced) auth failures, admin actions and asynchronous sync conflicts.
+6. Writes go through a single bounded queue: pull (rebase), atomic write, local commit; a background pusher then pushes (one push at a time, coalescing writes).
+7. One audit row is written per tool call (`ok`, `denied` or `error`), including calls whose arguments fail schema validation, plus rows for HTTP-level errors, (coalesced) auth failures, admin actions and asynchronous sync conflicts.
 
 ## Vault layout and naming
 
@@ -68,13 +68,13 @@ All note-addressed tools take `space`, `project`, `section`, `note` (strings, ma
 - Args: `space`, `project`, `section`, `note`; optional `tail` (integer 1-500).
 - Permission: `read` on the section.
 - Returns the note as text. With `tail`, only the last N lines (a trailing newline is not counted as a line). Use it for recent journal history.
-- Errors: `Note not found.`
+- Errors: `Note not found.`; `Note is too large to read (<n> bytes, max 2097152).` (only for files that did not come through `kb_write`, e.g. pushed by a human).
 
 ### `kb_write`
 
-- Args: the four names plus `content` (string, max 512 x 1024 = 524288 characters, not bytes; more is rejected by schema validation, whose message includes `content too large (max 512 KB)`). Written verbatim.
+- Args: the four names plus `content` (string, max 512 x 1024 = 524288 characters, not bytes; more is rejected with ``Invalid argument `content`: too large (max 512 KB).`` (every argument that fails validation gets an `Invalid argument `<name>`: ...` message and an audit row)). Written verbatim.
 - Permission: `write` on the section.
-- Creates or overwrites the note and returns the git commit SHA. Commit message: `kb_write: <space>/<project>/<section>/<note> via <token name>`.
+- Creates or overwrites the note and returns the git commit SHA. Rewriting identical content makes no commit and returns `No changes (content identical).` Commit message: `kb_write: <space>/<project>/<section>/<note> via <token name>`.
 - Errors: ``Section `archive` is managed by kb_archive and cannot be written directly.``; for `overview/index` over 3 KB: `overview/index is too large (<n> bytes, max 3072). The entry note must stay small: move detail into other sections (decisions, conventions, notes) and link to those notes from the Docs map.`
 - Writes are direct and overwrite without merging: re-read before overwriting a note you did not just read.
 
@@ -90,7 +90,7 @@ All note-addressed tools take `space`, `project`, `section`, `note` (strings, ma
 ### `kb_archive`
 
 - Args: `space`, `project`, `section`, `note` (the note to archive).
-- Permission: `write` on the source section AND `write` on `<space>:<project>:archive`. A token scoped to a single section therefore cannot archive; a project-wide scope such as `space:project:*` can. If the archive write is missing the client gets `Permission denied.`. Reading an archived note afterwards needs `read` on `archive`.
+- Permission: `read` and `write` on the source section AND `write` on `<space>:<project>:archive` (read on the source is required so that archiving cannot be used to read a note through `archive`). A token scoped to a single section therefore cannot archive; a project-wide scope such as `space:project:*` can. If the archive write is missing the client gets `Permission denied.`. Reading an archived note afterwards needs `read` on `archive`.
 - Moves `<space>/<project>/<section>/<note>` to `<space>/<project>/archive/<section>-<note>` (a `-2`, `-3`, ... suffix is appended if the name is taken, up to 50 tries; long names are truncated to stay a valid slug) and returns the new location, e.g. `pro/myproj/archive/notes-old-idea`. The move is a git commit, so history is kept.
 - There is no delete tool: archive instead.
 - Errors: `Note is already archived.` (section is `archive`); `The project entry note (overview/index) cannot be archived.`; `Note not found.`; `Note has uncommitted changes in the vault; commit or discard them first.`; `Too many archived notes with this name.`
@@ -99,7 +99,7 @@ All note-addressed tools take `space`, `project`, `section`, `note` (strings, ma
 
 - Args (all optional): `space`, `project`, `section`, `include_archived` (boolean, default false). A level requires the one above it, otherwise `Invalid arguments: project requires space, section requires project.`
 - Permission: `read`; the deepest level you pass must be readable (else `Permission denied.`), and results are filtered to what the token can read.
-- One level at a time: no args lists spaces; `space` lists projects; `space`+`project` lists sections; adding `section` lists notes as `name<TAB><n> bytes<TAB><ISO mtime>`. The `archive` section is hidden unless `include_archived` is true. Empty results print `(empty)`. Dotfiles, symlinks and non-slug names are skipped.
+- One level at a time: no args lists spaces; `space` lists projects; `space`+`project` lists sections; adding `section` lists notes as `name<TAB><n> bytes<TAB><ISO mtime>`. The `archive` section is hidden unless `include_archived` is true or `section` is explicitly `archive`. Empty results print `(empty)`. Dotfiles, symlinks and non-slug names are skipped.
 - Cap: 500 entries, then `(truncated: showing the first 500 entries)`.
 
 ### `kb_search`
@@ -107,7 +107,7 @@ All note-addressed tools take `space`, `project`, `section`, `note` (strings, ma
 - Args: `query` (string, max 200 characters as sent, at least 2 after trimming; shorter gives `Query must be at least 2 characters.`), optional `space`, `project`, `section` (same hierarchy rule as `kb_list`), `include_archived` (default false).
 - Permission: `read`. Only sections the token can read are opened: the ACL is applied before any directory or file is read.
 - Case-insensitive plain substring match (not regex, no ranking) per line. Output lines are `<space>/<project>/<section>/<note>: <snippet>`; up to 50 notes and 3 lines per note, each snippet at most 200 characters around the match. No hits prints `No matches.`
-- Limits: files over 1 MB are skipped; stops after 3 s, 20 MB read or 5000 notes scanned. When it stops early the output ends with `(truncated: <reason>; results may be incomplete, narrow the search)`, where reason is `time limit reached`, `read limit reached`, `too many notes` or `more notes match` (more than 50 notes hit). Unreadable entries are counted in `(skipped <n> unreadable entries)`. Narrow with `space`/`project`/`section` when truncated.
+- Limits: files over 1 MB are skipped; stops after 3 s, 20 MB read or 5000 notes scanned. When it stops early the output ends with `(truncated: <reason>; results may be incomplete, narrow the search)`, where reason is `time limit reached`, `read limit reached`, `too many notes` or `more notes match` (more than 50 notes hit). Unreadable and oversized entries are counted in `(skipped <n> unreadable or oversized entries)`. Narrow with `space`/`project`/`section` when truncated.
 
 ### `kb_history`
 
@@ -130,7 +130,7 @@ All note-addressed tools take `space`, `project`, `section`, `note` (strings, ma
 - Permission: `propose` OR `write` on the target section.
 - Does not touch the target. Writes `_inbox/<id>.md` (YAML frontmatter `target`, `proposed_by` (token name), `reason`, `created`, then the content) as a commit `kb_propose: <space>/<project>/<section>/<note> via <token name>` and returns the id, `YYYYMMDDTHHMMSSZ-<6 hex>`. A human then accepts or rejects it (see [Proposals inbox](#proposals-inbox)).
 - Quotas: at most 20 pending proposals per token name and 200 in total (`INBOX_MAX_PER_TOKEN`, `INBOX_MAX_TOTAL`).
-- Errors: the `archive` and entry-note-size errors above; `Proposal too large (max 576 KiB as UTF-8 including metadata).`; `too many pending proposals; ask the user to review the inbox` (quota).
+- Errors: the `archive` and entry-note-size errors above; `Proposal too large (max 576 KiB as UTF-8 including metadata).`; `Too many pending proposals. Ask the user to review the inbox.` (quota).
 
 ### Typical agent session
 
@@ -159,10 +159,10 @@ Returned with `isError: true`:
 | `Conflict: this note was changed remotely. Your version was saved on branch <conflict/...>. Re-read the note and retry.` | See [Git sync](#git-sync). |
 | `Conflict: ... Your version was saved on branch (none). ...` | Uncommitted human changes in the vault conflicted with the remote and were put in `git stash`. See [Git sync](#git-sync). |
 | `Proposal too large (max 576 KiB as UTF-8 including metadata).` | `kb_propose`: the proposal file (frontmatter + content) would exceed 576 KiB. |
-| `too many pending proposals; ask the user to review the inbox` | `kb_propose`: per-token or total inbox quota reached. |
+| `Too many pending proposals. Ask the user to review the inbox.` | `kb_propose`: per-token or total inbox quota reached. |
 | `Internal error.` | Anything else. Details are in the server log and the audit row only. |
 
-Tool-specific messages are listed under each tool. HTTP-level: `401` (missing/invalid/revoked/expired token), `429` (too many failed auths), `503` (shutting down), `405` for `GET /mcp` and `DELETE /mcp`, `413` (request body over 1 MB) and `400` (malformed JSON). The `405`, `413`, `400`, `429` and `/mcp` `503` responses are JSON-RPC errors; `401` is `{"error": "<reason>"}` (an expired token gets `{"error":"token expired"}` and does not count toward the `429` limiter).
+Tool-specific messages are listed under each tool. HTTP-level: `401` (missing/invalid/revoked/expired token), `429` (too many failed auths), `503` (shutting down), `405` for `GET /mcp` and `DELETE /mcp`, `413` (request body over 1 MB) and `400` (malformed JSON, or a JSON-RPC batch of more than 10 messages). The `405`, `413`, `400`, `429` and `/mcp` `503` responses are JSON-RPC errors; `401` is `{"error": "<reason>"}` (an expired token gets `{"error":"token expired"}` and does not count toward the `429` limiter).
 
 ## Token management
 
@@ -318,14 +318,14 @@ Release, deploy, rollback and DB restore operator targets (`deploy.prod`, `db.ba
 
 ## Git sync
 
-- Every write (`kb_write`, `kb_append`, `kb_archive`, `kb_init_project`, `kb_propose`, inbox accept/reject, web edit/create/archive) goes through the same locked path: it pulls (rebase) first, writes atomically and commits locally, then pushes asynchronously with retries. If the remote is unreachable, the write still commits locally and the push is retried later.
+- Every write (`kb_write`, `kb_append`, `kb_archive`, `kb_init_project`, `kb_propose`, inbox accept/reject, web edit/create/archive) goes through the same locked path: it pulls (rebase) first, writes atomically and commits locally, and returns; a single background pusher then pushes (with retries), so a slow or dead remote never holds up later writes. If the remote is unreachable, writes still commit locally; after a network error the pre-write pull is skipped for 60 s and the push is retried later. At most `VAULT_WRITE_QUEUE_MAX` writes (default 50) may wait for the lock; beyond that a write fails at once with `Vault is busy, retry in a moment.`
 - A periodic sync (every `VAULT_SYNC_INTERVAL_MS`, default 60 s; `0` disables it) pulls remote changes and pushes leftover local commits.
 - With no `VAULT_REMOTE_URL` the vault is a local-only repo (the local-dev case).
-- Conflict (before the write): if the remote changed the same note(s) as unsynced local work and this is detected during the pull that precedes a write, the local commits are saved on a backup branch `conflict/<timestamp>` (pushed best-effort), the working branch is reset to the remote, and the write fails with the `Conflict: ...` message. Re-read the note and retry.
-- Conflict (uncommitted human changes): if uncommitted changes in the vault conflict with remote changes, they are kept in `git stash` and the client message says "saved on branch (none)". Recover with `git stash list` (and `git stash show`/`apply`) in the vault.
-- Known limitation, asynchronous conflicts: a conflict detected later, during a push-retry pull or a periodic sync, can move a write that was already acknowledged (its SHA was returned) onto a `conflict/<timestamp>` branch and reset `main` to the remote. The client is not told. Notice it via `/health/details` (`sync.conflicts`, `sync.conflictBranches`), the web admin dashboard, a `sync_conflict` audit row (token `git-sync`), `SYNC CONFLICT` in the server logs, or a `conflict/*` branch on the remote.
+- Conflict (before the write): if the remote changed the same note(s) as unsynced local work and this is detected during the pull that precedes a write, the full local state is saved on a backup branch `conflict/<timestamp>` (pushed best-effort), the working branch is reset to the remote, and each unsynced local commit is re-applied in order: only the commits that actually conflict stay parked on the backup branch (if none do, the branch is deleted). The triggering write fails with a `Conflict: ...` message naming the conflicting note(s) (paths the token cannot read are only counted) and saying it was not applied. Re-read the note and retry. Every such conflict gets a `sync_conflict` audit row listing the parked commits.
+- Conflict (uncommitted human changes): if uncommitted changes in the vault conflict with remote changes, they are kept in `git stash` and the client message says so. Recover with `git stash list` (and `git stash show`/`apply`) in the vault.
+- Known limitation, asynchronous conflicts: a conflict detected later, during a push-retry pull or a periodic sync, can park a write that was already acknowledged (its SHA was returned) on a `conflict/<timestamp>` branch (non-conflicting commits are re-applied as above). The client is not told. Notice it via `/health/details` (`sync.conflicts`, `sync.conflictBranches`), the web admin dashboard, a `sync_conflict` audit row (token `git-sync`), `SYNC CONFLICT` in the server logs, or a `conflict/*` branch on the remote.
 - A human's in-progress git operation is not touched: a rebase the server did not start, or an `index.lock` younger than 10 minutes, makes writes fail with `Vault is busy`. The server aborts only rebases it started (it leaves a marker), removes an `index.lock` left by its own interrupted operation at startup (marker), and treats any `index.lock` older than 10 minutes as stale and removes it regardless of owner.
-- On shutdown, in-flight requests and queued writes are drained (up to 25 s) and pending pushes are aborted; the next sync retries them.
+- On shutdown, in-flight requests and queued writes are drained (up to 25 s), including a final push attempt; pushes still pending when the budget runs out are aborted and retried by the next sync.
 
 ## Environment variables
 
@@ -350,6 +350,7 @@ Compose sets these; no `.env` file is needed, except that both compose files req
 | `GIT_SSH_COMMAND` | SSH command for git; points at the deploy key secret. | unset | unset | `ssh -i /run/secrets/vault_deploy_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=10` |
 | `GIT_AUTHOR_NAME`, `GIT_AUTHOR_EMAIL`, `GIT_COMMITTER_NAME`, `GIT_COMMITTER_EMAIL` | Git identity (git refuses to commit without one). | none | `second-brain-mcp` / `second-brain-mcp@noreply.local` | same |
 | `NODE_ENV` | Node mode. | `production` (set in the Dockerfile) | `development` | `production` |
+| `VAULT_WRITE_QUEUE_MAX` | Max client writes waiting for the vault lock before new ones get `Vault is busy`. | `50` | unset | unset |
 | `SB_PUSH_DEADLINE_MS` | Overall push deadline including retries (test override). | `150000` | unset | unset |
 | `HOST_UID`, `HOST_GID` | Compose-time only (local): container user, set by `make deploy` to your uid/gid. | n/a | auto | unused |
 | `TAG` / `IMAGE_TAG` | Compose-time only: image tag. Prod compose uses `TAG` (`make deploy.prod TAG=<tag>`, required); local `make deploy` sets `IMAGE_TAG` to a unique local one. | n/a | auto | required |
