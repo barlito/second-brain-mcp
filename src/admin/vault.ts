@@ -23,11 +23,19 @@ export const STALE_MESSAGE = "note changed since you opened it";
 const MAX_READ_BYTES = 2 * 1024 * 1024;
 const MAX_SHOW_CHARS = 1024 * 1024;
 const HISTORY_LIMIT = 100;
-export const HASH_RE = /^[0-9a-f]{7,40}$/;
+const MAX_HISTORY_SCAN = 5000;
+export const HASH_RE = /^[0-9a-f]{40}$/;
+export const NOT_UTF8_MESSAGE = "note is not valid UTF-8, edit it in git";
 const SHA256_RE = /^[0-9a-f]{64}$/;
 
 export const sha256Hex = (s: string): string => createHash("sha256").update(s, "utf8").digest("hex");
-const relPath = (t: NoteRef): string => `${t.space}/${t.project}/${t.section}/${t.note}.md`;
+
+// Text as served to the edit form: CRLF-only files are shown with LF (the browser submits LF
+// anyway); the base hash is over this text. `crlf` = every newline is CRLF, restored on write.
+function formView(content: string): { text: string; crlf: boolean } {
+  const crlf = content.includes("\r\n") && !/(^|[^\r])\n/.test(content);
+  return { text: crlf ? content.replace(/\r\n/g, "\n") : content, crlf };
+}
 
 // Unsafe paths (symlinks etc.) look like "not found" to the client.
 function resolve(vaultRoot: string, t: NoteRef): string {
@@ -66,9 +74,11 @@ export async function browse(vaultRoot: string, parts: string[]): Promise<Listin
 export interface ShownNote {
   content: string;
   size: number;
-  hash: string;
+  hash: string; // of `formText`
+  formText: string;
   last: NoteHistoryEntry | null;
   writable: boolean;
+  editable: boolean; // false when the bytes do not round-trip as UTF-8
 }
 
 export async function showNote(vaultRoot: string, t: NoteRef): Promise<ShownNote> {
@@ -83,7 +93,9 @@ export async function showNote(vaultRoot: string, t: NoteRef): Promise<ShownNote
   }
   if (!r) throw new AdminError(413, "note too large to show");
   const { entries } = await noteHistory(vaultRoot, abs, 1);
-  return { content: r.content, size: r.bytes, hash: sha256Hex(r.content), last: entries[0] ?? null, writable: t.section !== ARCHIVE_SECTION };
+  const { text } = formView(r.content);
+  const editable = Buffer.from(r.content, "utf8").equals(r.raw);
+  return { content: r.content, size: r.bytes, hash: sha256Hex(text), formText: text, last: entries[0] ?? null, writable: t.section !== ARCHIVE_SECTION, editable };
 }
 
 // ---- write ----
@@ -107,15 +119,22 @@ export async function editNote(vaultRoot: string, t: NoteRef, content: string, b
   if (!SHA256_RE.test(base)) throw new AdminError(422, "missing or invalid form state; reload the note");
   checkContent(t, content);
   const abs = resolve(vaultRoot, t);
-  const { commitSha } = await syncWrite(vaultRoot, abs, content, `web: edit ${t.space}/${t.project}/${t.section}/${t.note} by ${user}`, {
+  const read = async (): Promise<{ text: string; crlf: boolean; utf8: boolean } | undefined> => {
+    try {
+      const cur = await readFileNoFollow(abs, MAX_READ_BYTES);
+      return cur && { ...formView(cur.content), utf8: Buffer.from(cur.content, "utf8").equals(cur.raw) };
+    } catch {
+      return undefined;
+    }
+  };
+  const before = await read();
+  if (before && !before.utf8) throw new AdminError(422, NOT_UTF8_MESSAGE);
+  const out = before?.crlf ? content.replace(/\n/g, "\r\n") : content;
+  const { commitSha } = await syncWrite(vaultRoot, abs, out, `web: edit ${t.space}/${t.project}/${t.section}/${t.note} by ${user}`, {
     precheck: async () => {
-      let cur;
-      try {
-        cur = await readFileNoFollow(abs, MAX_READ_BYTES);
-      } catch {
-        cur = undefined;
-      }
-      if (!cur || sha256Hex(cur.content) !== base) throw new AdminError(409, STALE_MESSAGE);
+      const cur = await read();
+      if (!cur || sha256Hex(cur.text) !== base || cur.crlf !== before?.crlf) throw new AdminError(409, STALE_MESSAGE);
+      if (!cur.utf8) throw new AdminError(422, NOT_UTF8_MESSAGE);
     },
   });
   return commitSha;
@@ -163,13 +182,18 @@ export async function noteLog(vaultRoot: string, t: NoteRef): Promise<NoteHistor
   return entries;
 }
 
-// `hash` must already match HASH_RE (hex only, so it can never be read as an option).
-export async function noteAt(vaultRoot: string, t: NoteRef, hash: string): Promise<{ content: string; truncated: boolean }> {
+// `hash` must already match HASH_RE (40 hex, so it can never be read as an option). The path is
+// never taken from the client: it must be the one noteHistory reports for that exact commit
+// (it differs from the current path for notes renamed/archived since).
+export async function noteAt(vaultRoot: string, t: NoteRef, hash: string, atPath?: string): Promise<{ content: string; truncated: boolean }> {
   if (!HASH_RE.test(hash)) throw new AdminError(404, "not found");
-  resolve(vaultRoot, t);
+  const abs = resolve(vaultRoot, t);
+  const { entries } = await noteHistory(vaultRoot, abs, MAX_HISTORY_SCAN);
+  const e = entries.find((x) => x.hash === hash);
+  if (!e || (atPath !== undefined && atPath !== e.path)) throw new AdminError(404, "note not found at this commit");
   let out: string;
   try {
-    out = await runGit(["show", `${hash}:${relPath(t)}`], vaultRoot);
+    out = await runGit(["show", `${hash}:./${e.path}`], vaultRoot);
   } catch {
     throw new AdminError(404, "note not found at this commit");
   }

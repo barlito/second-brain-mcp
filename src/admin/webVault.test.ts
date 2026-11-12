@@ -2,7 +2,7 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { cleanup, git, makeTempDb, makeTempVault } from "../test-support/fixtures";
 
@@ -133,7 +133,7 @@ test("view: rendered is escaped, raw view, size and last commit", async () => {
   assert.equal(r.status, 200);
   assert.match(r.body, /<h1>Foo<\/h1>/);
   assert.doesNotMatch(r.body, /<script>alert/);
-  assert.match(r.body, /last commit <a href="\/vault\/pro\/x\/notes\/foo\/at\/[0-9a-f]{7,}"/);
+  assert.match(r.body, /last commit <a href="\/vault\/pro\/x\/notes\/foo\/at\/[0-9a-f]{40}\?path=/);
   assert.match(r.body, /seed pro\/x\/notes\/foo\.md/);
   const raw = await get(`${NOTE}?view=raw`);
   assert.match(raw.body, /<pre># Foo/);
@@ -231,17 +231,17 @@ test("history + at-commit: lists commits, shows escaped content, rejects bad has
   assert.equal(h.status, 200);
   assert.match(h.body, /web: edit pro\/x\/notes\/foo by barlito/);
   assert.match(h.body, /<td>Test User<\/td>/);
-  const links = [...h.body.matchAll(/href="\/vault\/pro\/x\/notes\/foo\/at\/([0-9a-f]{7,40})"/g)].map((m) => m[1]);
+  const links = [...h.body.matchAll(/href="\/vault\/pro\/x\/notes\/foo\/at\/([0-9a-f]{40})\?path=[^"]+"/g)].map((m) => m[1]);
   assert.ok(links.length >= 3);
   const oldest = links[links.length - 1];
   const at = await get(`${NOTE}/at/${oldest}`);
   assert.equal(at.status, 200);
   assert.match(at.body, /&lt;script&gt;alert\(1\)&lt;\/script&gt;/);
   assert.doesNotMatch(at.body, /<script>alert/);
-  for (const bad of ["zzzzzzz", "abc", "ABCDEF1", "a".repeat(41), "--help", "HEAD"]) {
+  for (const bad of ["zzzzzzz", "abc", "ABCDEF1", "a".repeat(41), "a".repeat(39), "abcdef0", "--help", "HEAD"]) {
     assert.equal((await get(`${NOTE}/at/${bad}`)).status, 400, bad);
   }
-  assert.equal((await get(`${NOTE}/at/abcdef0`)).status, 404);
+  assert.equal((await get(`${NOTE}/at/${"0".repeat(40)}`)).status, 404);
   assert.equal((await get("/vault/pro/x/notes/missing/history")).status, 404);
 });
 
@@ -333,4 +333,108 @@ test("web writes carry no inline script/style and nav links exist", async () => 
     assert.doesNotMatch(body, /\son[a-z]+\s*=/i);
     assert.doesNotMatch(body, /<script(?![^>]*\ssrc=)/i);
   }
+});
+
+test("at-commit works for pre-archive history; client path is not trusted", async () => {
+  seed("pro/x/notes/mover.md", "old content\n");
+  const p = "/vault/pro/x/notes/mover";
+  await follow(await post(`${p}/archive`, {}, { page: p }));
+  const ap = "/vault/pro/x/archive/notes-mover";
+  const h = await get(`${ap}/history`);
+  const links = [...h.body.matchAll(/href="([^"]*\/at\/[0-9a-f]{40}\?path=[^"]+)"/g)].map((m) => m[1].replace(/&amp;/g, "&"));
+  assert.ok(links.length >= 2);
+  const oldest = links[links.length - 1];
+  assert.match(oldest, /path=pro%2Fx%2Fnotes%2Fmover\.md/);
+  const at = await get(oldest);
+  assert.equal(at.status, 200, at.body);
+  assert.match(at.body, /old content/);
+  // forged path for a real hash
+  const hash = /at\/([0-9a-f]{40})/.exec(oldest)![1];
+  assert.equal((await get(`${ap}/at/${hash}?path=pro%2Fx%2Fnotes%2Ffoo.md`)).status, 404);
+  assert.equal((await get(`${ap}/at/${hash}?path=seed.md`)).status, 404);
+});
+
+test("symlinked note and section: view/edit/create refused, nothing written", async () => {
+  symlinkSync(join(vault, "pro/x/notes/foo.md"), join(vault, "pro/x/notes/sl.md"));
+  symlinkSync(join(vault, "pro/y/decisions"), join(vault, "pro/x/linked"));
+  const f = await form(`${NOTE}/edit`, `${NOTE}/edit`);
+  const headBefore = git(["rev-parse", "HEAD"], vault).trim();
+  const fooBefore = read("pro/x/notes/foo.md");
+  const d1 = read("pro/y/decisions/d1.md");
+  try {
+    const sl = "/vault/pro/x/notes/sl";
+    assert.equal((await get(sl)).status, 404);
+    assert.equal((await get(`${sl}/edit`)).status, 404);
+    assert.equal((await post(`${sl}/edit`, { content: "pwn\n", base: f.base! }, { nonce: f.nonce })).status, 404);
+    assert.equal((await get("/vault/pro/x/linked/d1")).status, 404);
+    assert.equal((await get("/vault/pro/x/linked/_new")).status, 404);
+    const n2 = await form(`${NOTE}/edit`, `${NOTE}/edit`);
+    assert.equal((await post("/vault/pro/x/linked/_new", { note: "pwn", content: "x" }, { nonce: n2.nonce })).status, 404);
+    const n3 = await form(`${NOTE}/edit`, `${NOTE}/edit`);
+    assert.equal((await post("/vault/pro/x/linked/d1/edit", { content: "pwn\n", base: f.base! }, { nonce: n3.nonce })).status, 404);
+    assert.equal(existsSync(join(vault, "pro/y/decisions/pwn.md")), false);
+    assert.equal(read("pro/y/decisions/d1.md"), d1);
+    assert.equal(read("pro/x/notes/foo.md"), fooBefore);
+    assert.equal(git(["rev-parse", "HEAD"], vault).trim(), headBefore);
+  } finally {
+    rmSync(join(vault, "pro/x/notes/sl.md"));
+    rmSync(join(vault, "pro/x/linked"));
+  }
+});
+
+test("markdown javascript: links are not rendered as hrefs", async () => {
+  seed("pro/x/notes/xss.md", "[x](javascript:alert(1)) and [y](JaVaScRiPt:alert(2))\n");
+  const r = await get("/vault/pro/x/notes/xss");
+  assert.equal(r.status, 200);
+  assert.doesNotMatch(r.body, /href="\s*javascript:/i);
+});
+
+test("unauthenticated large POST to /vault is refused with 401", async () => {
+  const body = new URLSearchParams({ content: "x".repeat(2 * 1024 * 1024), base: "0".repeat(64) }).toString();
+  const { "x-sb-admin-proxy": _p, ...noProxy } = ADMIN;
+  const r = await request("POST", `${NOTE}/edit`, { ...noProxy, "content-type": "application/x-www-form-urlencoded" }, body);
+  assert.equal(r.status, 401);
+});
+
+test("edit race: write lands between form load and submit -> 409 keeps the text, original base", async () => {
+  const f = await form(`${NOTE}/edit`, `${NOTE}/edit`);
+  const { syncWrite } = await import("../vault/git");
+  await syncWrite(vault, join(vault, "pro/x/notes/foo.md"), "from mcp\n", "mcp: write");
+  const r = await post(`${NOTE}/edit`, { content: "my precious edit\n", base: f.base! }, { nonce: f.nonce });
+  assert.equal(r.status, 409);
+  assert.match(r.body, /my precious edit/);
+  assert.match(r.body, new RegExp(`name="base" value="${f.base}"`));
+  assert.match(r.body, /target="_blank"/);
+  assert.equal(read("pro/x/notes/foo.md"), "from mcp\n");
+  const again = await form(`${NOTE}/edit`, `${NOTE}/edit`);
+  const r2 = await post(`${NOTE}/edit`, { content: "my precious edit\n", base: f.base! }, { nonce: again.nonce });
+  assert.equal(r2.status, 409, "resave with the original base is still refused");
+});
+
+test("edit: non-UTF-8 note is not editable; CRLF files keep CRLF", async () => {
+  seed("pro/x/notes/bin.md", "ok\n");
+  writeFileSync(join(vault, "pro/x/notes/bin.md"), Buffer.from([0x61, 0xff, 0x0a]));
+  git(["commit", "-am", "bin"], vault);
+  const b = "/vault/pro/x/notes/bin";
+  assert.doesNotMatch((await get(b)).body, /\/edit"/);
+  assert.equal((await get(`${b}/edit`)).status, 422);
+  const f = await form(NOTE, `${NOTE}/archive`); // any valid nonce
+  const r = await post(`${b}/edit`, { content: "x\n", base: "0".repeat(64) }, { nonce: f.nonce });
+  assert.equal(r.status, 422);
+  assert.match(r.body, /not valid UTF-8/);
+  assert.deepEqual([...readFileSync(join(vault, "pro/x/notes/bin.md"))], [0x61, 0xff, 0x0a]);
+
+  seed("pro/x/notes/crlf.md", "a\r\nb\r\n");
+  const c = "/vault/pro/x/notes/crlf";
+  const cf = await form(`${c}/edit`, `${c}/edit`);
+  await follow(await post(`${c}/edit`, { content: "a\r\nb\r\nc\r\n", base: cf.base! }, { nonce: cf.nonce }));
+  assert.equal(read("pro/x/notes/crlf.md"), "a\r\nb\r\nc\r\n");
+});
+
+test("failed web writes are audited (create into a missing section)", async () => {
+  const f = await form(NOTE, `${NOTE}/archive`);
+  const n = (a: string): number => (db.prepare("SELECT COUNT(*) AS n FROM audit_log WHERE action = ? AND result = 'error'").get(a) as { n: number }).n;
+  const c0 = n("web_note_create");
+  assert.equal((await post("/vault/pro/x/nosection/_new", { note: "a", content: "c" }, { nonce: f.nonce })).status, 404);
+  assert.equal(n("web_note_create"), c0 + 1);
 });

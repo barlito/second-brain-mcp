@@ -5,6 +5,7 @@ import { html, raw, SafeHtml } from "./html";
 import { Banner, bannerView, csrfField, Ctx, fmtSize, layout, renderMd } from "./views";
 
 const TITLE = "Vault";
+const atUrl = (p: string, e: NoteHistoryEntry): string => `${p}/at/${e.hash}?path=${encodeURIComponent(e.path)}`;
 const notePath = (t: NoteRef): string => `/vault/${t.space}/${t.project}/${t.section}/${t.note}`;
 
 // parts: [] .. [space, project, section, note]; the last one is the current page.
@@ -46,7 +47,7 @@ export function noteView(ctx: Ctx, t: NoteRef, n: ShownNote, mode: "rendered" | 
     html`<h1>${t.note}</h1>${crumbs([t.space, t.project, t.section, t.note])}${bannerView(banner)}
 <div class="card"><p>${fmtSize(n.size)} &nbsp; ${
       n.last
-        ? html`last commit <a href="${p}/at/${n.last.sha}"><code>${n.last.sha}</code></a> <span class="muted mono">${n.last.date}</span> ${n.last.subject}`
+        ? html`last commit <a href="${atUrl(p, n.last)}"><code>${n.last.sha}</code></a> <span class="muted mono">${n.last.date}</span> ${n.last.subject}`
         : html`<span class="muted">no commits yet</span>`
     }</p>
 <p><a href="${p}/history">History</a></p></div>
@@ -58,7 +59,7 @@ export function noteView(ctx: Ctx, t: NoteRef, n: ShownNote, mode: "rendered" | 
 ${
       n.writable
         ? html`<div class="actions">
-<a href="${p}/edit">Edit</a>
+${n.editable ? html`<a href="${p}/edit">Edit</a>` : html`<span class="muted">Not valid UTF-8: edit it in git.</span>`}
 <form method="post" action="${p}/archive" class="inline" data-confirm="Archive this note? It moves to the archive section (history is kept).">${csrfField(ctx)}<button class="danger" type="submit">Archive</button></form>
 </div>`
         : html`<p class="muted">Archived notes are read-only.</p>`
@@ -70,7 +71,7 @@ const textarea = (content: string): SafeHtml =>
   // The HTML parser drops one leading newline in a textarea: add one back.
   html`<textarea id="content" name="content" class="wide" spellcheck="false">${raw("\n")}${content}</textarea>`;
 
-export function editView(ctx: Ctx, t: NoteRef, content: string, base: string, banner?: Banner): SafeHtml {
+export function editView(ctx: Ctx, t: NoteRef, content: string, base: string, banner?: Banner, stale = false): SafeHtml {
   const p = notePath(t);
   return layout(
     ctx,
@@ -78,6 +79,7 @@ export function editView(ctx: Ctx, t: NoteRef, content: string, base: string, ba
     TITLE,
     html`<h1>Edit ${t.note}</h1>${crumbs([t.space, t.project, t.section, t.note])}${bannerView(banner)}
 <form method="post" action="${p}/edit" class="card stack">
+${stale ? html`<p><a href="${p}" target="_blank" rel="noopener">View the current note in a new page</a> to copy changes; saving here is refused until you reload the editor.</p>` : ""}
 ${csrfField(ctx)}<input type="hidden" name="base" value="${base}">
 <label for="content">Content</label>
 ${textarea(content)}
@@ -116,7 +118,7 @@ export function historyView(ctx: Ctx, t: NoteRef, entries: NoteHistoryEntry[]): 
 <tbody>${
       entries.length === 0
         ? html`<tr><td colspan="4" class="muted">No commits yet.</td></tr>`
-        : entries.map((e) => html`<tr><td><a href="${p}/at/${e.sha}"><code>${e.sha}</code></a></td><td class="mono">${e.date}</td><td>${e.author}</td><td>${e.subject}</td></tr>`)
+        : entries.map((e) => html`<tr><td><a href="${atUrl(p, e)}"><code>${e.sha}</code></a></td><td class="mono">${e.date}</td><td>${e.author}</td><td>${e.subject}</td></tr>`)
     }</tbody></table></div>
 <p><a href="${p}">Back to the note</a></p>`,
   );
@@ -128,7 +130,7 @@ export function atView(ctx: Ctx, t: NoteRef, hash: string, a: { content: string;
     ctx,
     "/vault",
     TITLE,
-    html`<h1>${t.note} at <code>${hash}</code></h1>${crumbs([t.space, t.project, t.section, t.note])}
+    html`<h1>${t.note} at <code>${hash.slice(0, 7)}</code></h1>${crumbs([t.space, t.project, t.section, t.note])}
 ${a.truncated ? html`<div class="banner warn">Output truncated.</div>` : ""}
 <div class="card"><pre>${a.content}</pre></div>
 <p><a href="${p}/history">Back to history</a></p>`,

@@ -8,7 +8,7 @@ import type { SafeHtml } from "../web/html";
 import { Banner, Ctx, errorView } from "../web/views";
 import { atView, browseView, editView, historyView, newView, noteView } from "../web/vaultViews";
 import { AdminError } from "./service";
-import { archiveWebNote, browse, createNote, editNote, HASH_RE, noteAt, noteLog, NoteRef, showNote } from "./vault";
+import { archiveWebNote, browse, createNote, editNote, HASH_RE, NOT_UTF8_MESSAGE, noteAt, noteLog, NoteRef, showNote } from "./vault";
 
 export interface VaultDeps {
   vaultRoot: string;
@@ -48,6 +48,7 @@ export function vaultRouter(d: VaultDeps): express.Router {
     const actor = `web:${res.locals.user as string}`;
     safeAudit({ tokenId: actor, tokenName: actor, action, ...t, result, detail, gitCommit }, actor);
   };
+  const reasonOf = (err: unknown): string => (err instanceof AdminError ? err.message : clientMessage(err));
   const userOf = (res: Response): string => res.locals.user as string;
 
   // Maps a failure to an error page; anything unexpected goes to the generic 500 handler.
@@ -92,14 +93,14 @@ export function vaultRouter(d: VaultDeps): express.Router {
     const body = req.body as Record<string, unknown>;
     const t = { ...refOf(req), note: str(body.note) };
     const content = str(body.content).replace(/\r\n?/g, "\n");
-    await browse(vaultRoot, [t.space, t.project, t.section]);
     try {
+      await browse(vaultRoot, [t.space, t.project, t.section]);
       const sha = await createNote(vaultRoot, t, content, userOf(res));
       auditWrite(res, "web_note_create", t, "ok", "created", sha);
       d.redirectBanner(res, noteUrl(t), { kind: "ok", title: `Created ${t.note}.`, lines: [`Commit ${sha.slice(0, 7)}`] });
     } catch (err) {
+      auditWrite(res, "web_note_create", t, "error", reasonOf(err));
       if (err instanceof AdminError && (err.status === 422 || err.status === 409)) {
-        auditWrite(res, "web_note_create", t, "error", err.message);
         return newPage(res, t, content, { kind: "err", title: err.message }, err.status);
       }
       throw err;
@@ -117,7 +118,8 @@ export function vaultRouter(d: VaultDeps): express.Router {
     const t = refOf(req);
     const n = await showNote(vaultRoot, t);
     if (!n.writable) throw new AdminError(422, "Archived notes are read-only.");
-    send(res, editView(ctxOf(res), t, n.content, n.hash));
+    if (!n.editable) throw new AdminError(422, NOT_UTF8_MESSAGE);
+    send(res, editView(ctxOf(res), t, n.formText, n.hash));
   }));
   r.post("/:space/:project/:section/:note/edit", h(async (req, res) => {
     const t = refOf(req);
@@ -129,10 +131,14 @@ export function vaultRouter(d: VaultDeps): express.Router {
       auditWrite(res, "web_note_edit", t, "ok", "edited", sha);
       d.redirectBanner(res, noteUrl(t), { kind: "ok", title: `Saved ${t.note}.`, lines: [`Commit ${sha.slice(0, 7)}`] });
     } catch (err) {
-      if (err instanceof AdminError) auditWrite(res, "web_note_edit", t, "error", err.message);
-      // 422: rule violation; keep the user's text in the form. 409 (stale) and the rest: error page.
-      if (err instanceof AdminError && err.status === 422) {
+      auditWrite(res, "web_note_edit", t, "error", reasonOf(err));
+      // 422 (rule violation) and 409 (stale): keep the user's text and the ORIGINAL base, so a
+      // resave is still refused. Not-UTF-8 and the rest: error page.
+      if (err instanceof AdminError && err.status === 422 && err.message !== NOT_UTF8_MESSAGE) {
         return send(res, editView(ctxOf(res), t, content, base, { kind: "err", title: err.message }), 422);
+      }
+      if (err instanceof AdminError && err.status === 409) {
+        return send(res, editView(ctxOf(res), t, content, base, { kind: "err", title: err.message }, true), 409);
       }
       throw err;
     }
@@ -145,8 +151,8 @@ export function vaultRouter(d: VaultDeps): express.Router {
       auditWrite(res, "web_note_archive", t, "ok", `-> archive/${a.name}`, a.commitSha || undefined);
       d.redirectBanner(res, dirOf(t), { kind: "ok", title: `Archived ${t.note} to archive/${a.name}.` });
     } catch (err) {
+      auditWrite(res, "web_note_archive", t, "error", reasonOf(err));
       if (err instanceof AdminError) {
-        auditWrite(res, "web_note_archive", t, "error", err.message);
         return d.redirectBanner(res, err.status === 404 ? dirOf(t) : noteUrl(t), { kind: "err", title: err.message });
       }
       throw err;
@@ -161,7 +167,7 @@ export function vaultRouter(d: VaultDeps): express.Router {
   r.get("/:space/:project/:section/:note/at/:hash", h(async (req, res) => {
     const t = refOf(req);
     const hash = req.params.hash as string;
-    send(res, atView(ctxOf(res), t, hash, await noteAt(vaultRoot, t, hash)));
+    send(res, atView(ctxOf(res), t, hash, await noteAt(vaultRoot, t, hash, typeof req.query.path === "string" ? req.query.path : undefined)));
   }));
 
   return r;

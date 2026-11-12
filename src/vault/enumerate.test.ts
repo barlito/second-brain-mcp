@@ -14,7 +14,7 @@ test("readFileNoFollow reads a regular file and refuses a symlink (ELOOP)", asyn
   try {
     writeFileSync(join(d, "real.md"), "hello");
     symlinkSync(join(d, "real.md"), join(d, "link.md"));
-    assert.deepEqual(await readFileNoFollow(join(d, "real.md"), 100), { content: "hello", bytes: 5 });
+    assert.deepEqual(await readFileNoFollow(join(d, "real.md"), 100), { content: "hello", bytes: 5, raw: Buffer.from("hello") });
     await assert.rejects(readFileNoFollow(join(d, "link.md"), 100), { code: "ELOOP" });
     assert.equal(await readFileNoFollow(join(d, "real.md"), 2), undefined); // over the cap
     mkdirSync(join(d, "dir.md"));
