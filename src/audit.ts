@@ -74,3 +74,50 @@ export function pruneAudit(olderThanDays: number): number {
   const cutoff = new Date(Date.now() - olderThanDays * 86_400_000).toISOString();
   return pruneAuditStmt.run(cutoff).changes;
 }
+
+export interface AuditRow {
+  id: number;
+  ts: string;
+  token_name: string | null;
+  action: string;
+  space: string | null;
+  project: string | null;
+  section: string | null;
+  note: string | null;
+  result: string;
+  detail: string | null;
+  git_commit: string | null;
+  client_ip: string | null;
+}
+
+export const AUDIT_PAGE_SIZE = 50;
+
+// Newest first, keyset-paginated on id: one extra row tells whether another page exists.
+export function queryAudit(f: { before?: number; tokenName?: string; action?: string }): {
+  rows: AuditRow[];
+  nextBefore: number | null;
+} {
+  const where: string[] = [];
+  const args: Array<string | number> = [];
+  if (f.before !== undefined) {
+    where.push("id < ?");
+    args.push(f.before);
+  }
+  if (f.tokenName !== undefined) {
+    where.push("token_name = ?");
+    args.push(f.tokenName);
+  }
+  if (f.action !== undefined) {
+    where.push("action = ?");
+    args.push(f.action);
+  }
+  const rows = db
+    .prepare(
+      `SELECT id, ts, token_name, action, space, project, section, note, result, detail, git_commit, client_ip
+       FROM audit_log ${where.length ? `WHERE ${where.join(" AND ")}` : ""} ORDER BY id DESC LIMIT ?`,
+    )
+    .all(...args, AUDIT_PAGE_SIZE + 1) as unknown as AuditRow[];
+  const more = rows.length > AUDIT_PAGE_SIZE;
+  const page = more ? rows.slice(0, AUDIT_PAGE_SIZE) : rows;
+  return { rows: page, nextBefore: more ? page[page.length - 1].id : null };
+}

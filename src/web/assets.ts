@@ -62,6 +62,8 @@ button.danger { color: var(--danger); border-color: var(--danger); }
 .token { word-break: break-all; font-size: 14px; padding: 12px; background: var(--code-bg); border-radius: 6px; user-select: all; }
 .md { overflow-wrap: anywhere; }
 .md img { max-width: 100%; }
+textarea.wide { max-width: 100%; min-height: 380px; }
+.crumbs { color: var(--muted); margin: -8px 0 16px; }
 .tabs { display: flex; gap: 8px; margin: 12px 0 8px; }
 .tabs a { text-decoration: none; padding: 4px 10px; border-radius: 6px; border: 1px solid var(--border); color: var(--text); }
 .tabs a[aria-current="page"] { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }

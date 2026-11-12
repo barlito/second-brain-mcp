@@ -76,7 +76,7 @@ export async function statNote(vaultRoot: string, parts: string[], name: string)
 export async function readFileNoFollow(
   file: string,
   maxBytes: number,
-): Promise<{ content: string; bytes: number } | undefined> {
+): Promise<{ content: string; bytes: number; raw: Buffer } | undefined> {
   const fh = await fsp.open(file, constants.O_RDONLY | constants.O_NOFOLLOW);
   try {
     const st = await fh.stat();
@@ -88,7 +88,8 @@ export async function readFileNoFollow(
       if (bytesRead === 0) break;
       off += bytesRead;
     }
-    return { content: buf.subarray(0, off).toString("utf8"), bytes: off };
+    const raw = buf.subarray(0, off);
+    return { content: raw.toString("utf8"), bytes: off, raw };
   } finally {
     await fh.close();
   }
