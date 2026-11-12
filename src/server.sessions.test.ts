@@ -42,7 +42,7 @@ interface Rpc {
 async function rpc(base: string, body: unknown, headers: Record<string, string> = {}): Promise<Rpc> {
   const res = await fetch(`${base}/mcp`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream", "X-SB-Connector-Key": KEY, ...headers },
+    headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream", "x-api-key": KEY, ...headers },
     body: JSON.stringify(body),
   });
   const text = await res.text();
@@ -154,7 +154,7 @@ test("notifications and ping work with a session", async () => {
   const sid = await connect();
   const n = await fetch(`${app.baseUrl}/mcp`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream", "mcp-session-id": sid, "X-SB-Connector-Key": KEY },
+    headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream", "mcp-session-id": sid, "x-api-key": KEY },
     body: JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }),
   });
   assert.equal(n.status, 202);
@@ -495,7 +495,7 @@ test("Bearer requests are unchanged: no session header issued, a stray session i
 test("a real MCP client without any auth: initialize, list tools, request access, poll status", async () => {
   const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
   const { StreamableHTTPClientTransport } = await import("@modelcontextprotocol/sdk/client/streamableHttp.js");
-  const transport = new StreamableHTTPClientTransport(new URL(`${app.baseUrl}/mcp`), { requestInit: { headers: { "X-SB-Connector-Key": KEY } } });
+  const transport = new StreamableHTTPClientTransport(new URL(`${app.baseUrl}/mcp`), { requestInit: { headers: { "x-api-key": KEY } } });
   const client = new Client({ name: "sdk-client", version: "9.9" });
   await client.connect(transport);
   try {
@@ -626,7 +626,7 @@ test("connector key gate: missing, invalid or revoked key is a generic 401 with 
   const sessionsBefore = count("SELECT COUNT(*) c FROM sessions");
   const auditBefore = count("SELECT COUNT(*) c FROM audit_log WHERE action != 'auth'");
   const authBefore = count("SELECT COUNT(*) c FROM audit_log WHERE action = 'auth'");
-  for (const headers of [{}, { "X-SB-Connector-Key": "" }, { "X-SB-Connector-Key": "sbk_nope" }, { "X-SB-Connector-Key": "x".repeat(300) }, { "X-SB-Connector-Key": KEY.toUpperCase() }]) {
+  for (const headers of [{}, { "x-api-key": "" }, { "x-api-key": "sbk_nope" }, { "x-api-key": "x".repeat(300) }, { "x-api-key": KEY.toUpperCase() }]) {
     const r = await raw(headers as Record<string, string>);
     assert.equal(r.status, 401, JSON.stringify(headers));
     assert.deepEqual(await r.json(), { error: "unauthorized" });
@@ -639,7 +639,7 @@ test("connector key gate: missing, invalid or revoked key is a generic 401 with 
   assert.equal((await raw({ "mcp-session-id": "f".repeat(64) }, list)).status, 401);
   // Revoked key: same 401, and it never counted as a valid one.
   assert.equal(keys.revokeConnectorKey(k2.id).revoked, true);
-  assert.equal((await raw({ "X-SB-Connector-Key": k2.key })).status, 401);
+  assert.equal((await raw({ "x-api-key": k2.key })).status, 401);
   assert.equal(count("SELECT COUNT(*) c FROM sessions") - sessionsBefore, 1, "only the legitimate connect() made a session");
   assert.equal(count("SELECT COUNT(*) c FROM audit_log WHERE action != 'auth'") - auditBefore, 1, "only its session_init row; refusals add nothing but the coalesced auth failure");
   // Refusals are coalesced into the auth-failure audit (at most one row per client per minute).
@@ -649,34 +649,34 @@ test("connector key gate: missing, invalid or revoked key is a generic 401 with 
 test("with no active key at all, token-less access is disabled (same 401); Bearer is unaffected", async () => {
   db.prepare("UPDATE connector_keys SET revoked_at = '2000-01-01T00:00:00.000Z' WHERE revoked_at IS NULL AND id IN (SELECT id FROM connector_keys WHERE name = 'test-key')").run();
   try {
-    assert.equal((await raw({ "X-SB-Connector-Key": KEY })).status, 401);
+    assert.equal((await raw({ "x-api-key": KEY })).status, 401);
     const b = await raw({ Authorization: `Bearer ${masterToken}` }, { jsonrpc: "2.0", id: 2, method: "tools/list" });
     assert.equal(b.status, 200);
   } finally {
     db.prepare("UPDATE connector_keys SET revoked_at = NULL WHERE name = 'test-key'").run();
   }
   // A Bearer client ignores a wrong connector key.
-  const b2 = await raw({ Authorization: `Bearer ${masterToken}`, "X-SB-Connector-Key": "garbage-key" }, { jsonrpc: "2.0", id: 2, method: "tools/list" });
+  const b2 = await raw({ Authorization: `Bearer ${masterToken}`, "x-api-key": "garbage-key" }, { jsonrpc: "2.0", id: 2, method: "tools/list" });
   assert.equal(b2.status, 200);
 });
 
 test("a session answers only to the key that opened it (mismatch is a 404); revoking a key ends its sessions and grants", async () => {
   const other = keys.createConnectorKey("other", "test-admin-secret");
   const sidA = await connect();
-  const sidB = (await rpc(app.baseUrl, INIT, { "X-SB-Connector-Key": other.key })).headers.get("mcp-session-id") as string;
+  const sidB = (await rpc(app.baseUrl, INIT, { "x-api-key": other.key })).headers.get("mcp-session-id") as string;
   assert.match(sidB, /^[0-9a-f]{64}$/);
   const list = { jsonrpc: "2.0", id: 2, method: "tools/list" };
   assert.equal((await rpc(app.baseUrl, list, { "mcp-session-id": sidB })).status, 404, "key A presenting B's session");
-  assert.equal((await rpc(app.baseUrl, list, { "mcp-session-id": sidA, "X-SB-Connector-Key": other.key })).status, 404);
-  assert.equal((await rpc(app.baseUrl, list, { "mcp-session-id": sidB, "X-SB-Connector-Key": other.key })).status, 200);
+  assert.equal((await rpc(app.baseUrl, list, { "mcp-session-id": sidA, "x-api-key": other.key })).status, 404);
+  assert.equal((await rpc(app.baseUrl, list, { "mcp-session-id": sidB, "x-api-key": other.key })).status, 200);
 
-  approve(reqId((await call(sidB, "kb_request_access", { space: "sp", project: "proj-a", access: "read", reason: "r" }, app.baseUrl, { "X-SB-Connector-Key": other.key })).text), { actor: "t" });
+  approve(reqId((await call(sidB, "kb_request_access", { space: "sp", project: "proj-a", access: "read", reason: "r" }, app.baseUrl, { "x-api-key": other.key })).text), { actor: "t" });
   const bid = sidRow(sidB)!.id;
   assert.equal(sessions.listGrants(bid).length, 1);
   assert.deepEqual(keys.revokeConnectorKey(other.id), { revoked: true, sessions: 1 });
   assert.equal(sidRow(sidB), undefined);
   assert.equal(count(`SELECT COUNT(*) c FROM tokens WHERE session_id = '${bid}' AND revoked_at IS NULL`), 0);
-  assert.equal((await rpc(app.baseUrl, list, { "mcp-session-id": sidB, "X-SB-Connector-Key": other.key })).status, 401);
+  assert.equal((await rpc(app.baseUrl, list, { "mcp-session-id": sidB, "x-api-key": other.key })).status, 401);
   assert.equal((await rpc(app.baseUrl, list, { "mcp-session-id": sidA })).status, 200, "the other key's sessions are untouched");
   assert.deepEqual(keys.revokeConnectorKey(other.id), { revoked: false, sessions: 0 });
 });
@@ -899,7 +899,7 @@ test("an attacker failing from the same address never blocks a valid key or a va
   try {
     const bad = (h: Record<string, string>) => fetch(`${lim.baseUrl}/mcp`, { method: "POST", headers: { "Content-Type": "application/json", ...h }, body: "{}" });
     // Wrong/missing connector keys: always a plain 401, never a block.
-    for (let i = 0; i < 40; i++) assert.equal((await bad({ "X-SB-Connector-Key": "sbk_wrong" + i })).status, 401);
+    for (let i = 0; i < 40; i++) assert.equal((await bad({ "x-api-key": "sbk_wrong" + i })).status, 401);
     // Bad Bearer tokens: throttled after 10 failures...
     for (let i = 0; i < 10; i++) assert.equal((await bad({ Authorization: "Bearer sb_bad" + i })).status, 401);
     assert.equal((await bad({ Authorization: "Bearer sb_bad_more" })).status, 429);
@@ -1005,7 +1005,7 @@ test("eviction order only considers live pending requests: an expired one no lon
 });
 
 test("anonymous body cap: 32 KB with a connector key", async () => {
-  const r = await raw({ "X-SB-Connector-Key": KEY }, { pad: "x".repeat(40_000) });
+  const r = await raw({ "x-api-key": KEY }, { pad: "x".repeat(40_000) });
   assert.equal(r.status, 413);
   assert.match(((await r.json()) as any).error.message, /32 KB/);
 });

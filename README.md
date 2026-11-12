@@ -248,14 +248,14 @@ make token-revoke id=<token id>
 
 ## Connecting without a token
 
-The MCP can be configured once, everywhere, without a per-project token: a claude.ai custom connector (set up once on claude.ai, it syncs to Claude web, mobile and desktop and Claude Code), or `claude mcp add --scope user`. To keep this surface closed to the internet, the client must send a fixed **connector key** in the `X-SB-Connector-Key` header (it grants nothing by itself, it only lets the client open a token-less session):
+The MCP can be configured once, everywhere, without a per-project token: a claude.ai custom connector (set up once on claude.ai, it syncs to Claude web, mobile and desktop and Claude Code), or `claude mcp add --scope user`. To keep this surface closed to the internet, the client must send a fixed **connector key** in the `x-api-key` header (it grants nothing by itself, it only lets the client open a token-less session):
 
 1. Create a key: web admin, Access page, "Connector keys", or `make connector-key-create name=claude-ai` (also `connector-key-list`, `connector-key-show name=...`, `connector-key-revoke id=<id>`). Lookup is by SHA-256 hash and the key is also stored encrypted (AES-256-GCM, key derived from `ADMIN_WEB_SECRET`), so "Reveal" in the admin (or `connector-key-show`) shows it again, audited as `connector_key_reveal`; the tradeoff is acceptable because the key only allows requesting access and reveal sits behind Authelia 2FA. If `ADMIN_WEB_SECRET` changes, old keys can no longer be revealed (they still authenticate): create a new one. Keys are revocable and show their last use.
-2. claude.ai: custom connector with the server URL, Authentication "No connection" (Aucune connexion), and a request header `X-SB-Connector-Key` with the key as value, marked required.
+2. claude.ai: custom connector with the server URL, Authentication "No connection" (Aucune connexion), and a request header `x-api-key` with the key as value, marked required.
 3. Claude Code:
 
 ```bash
-claude mcp add --scope user --transport http second-brain https://second-brain.barlito.fr/mcp --header "X-SB-Connector-Key: <key>"
+claude mcp add --scope user --transport http second-brain https://second-brain.barlito.fr/mcp --header "x-api-key: <key>"
 ```
 
 Without a valid, non-revoked key every token-less request gets a generic `401` before anything else happens (no session, no rate-limit bucket, only the coalesced auth-failure audit row), and with no key at all token-less access is disabled. The key is checked first and these failures never block anyone: a request with a valid key (or a valid Bearer token) is not refused because others fail from the same, possibly shared, address (e.g. a cloud egress IP). A session is bound to the key that opened it (another key gets `404`); revoking a key ends its sessions and their grants immediately. Requests with an `Authorization` header ignore the connector key entirely.
