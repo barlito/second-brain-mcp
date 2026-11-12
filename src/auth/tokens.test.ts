@@ -159,4 +159,31 @@ test("expiry: one SQL rule (julianday) for verify, list and count; unparseable f
   assert.equal(checkToken(r.token).status, "invalid", "revoked is not expired");
 });
 
+test("a locked DB during the last_used_at update does not fail authentication", async () => {
+  const { checkToken } = await import("./tokens");
+  const { db } = await import("../db");
+  const Database = (await import("better-sqlite3")).default;
+  const created = createToken("busy-db", [{ space: "sp", project: "proj", section: "sect", permission: "read" }]);
+  // Another connection (e.g. a CLI backup/prune) holds the write lock.
+  const other = new Database(process.env.DB_PATH as string);
+  const logged: string[] = [];
+  const orig = console.error;
+  console.error = (...a: unknown[]) => void logged.push(a.join(" "));
+  const timeout = db.pragma("busy_timeout", { simple: true }) as number;
+  db.pragma("busy_timeout = 0"); // fail fast instead of waiting 5 s
+  other.exec("BEGIN IMMEDIATE");
+  try {
+    const r = checkToken(created.token);
+    assert.equal(r.status, "ok");
+    assert.ok(logged.some((l) => l.includes("last_used_at update failed")));
+  } finally {
+    other.exec("ROLLBACK");
+    other.close();
+    db.pragma(`busy_timeout = ${timeout}`);
+    console.error = orig;
+  }
+  const row = db.prepare("SELECT last_used_at FROM tokens WHERE id = ?").get(created.id) as { last_used_at: string | null };
+  assert.equal(row.last_used_at, null);
+});
+
 after(cleanup);
