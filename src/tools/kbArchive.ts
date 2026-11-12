@@ -11,7 +11,7 @@ export const register: RegisterTool = (server, { vaultRoot }) => {
       description:
         "Archive a note instead of deleting it (there is no delete tool; history is kept in git). " +
         "Moves <space>/<project>/<section>/<note> to <space>/<project>/archive/<section>-<note> " +
-        "(suffix -2, -3... if that name is taken). Requires write on the source section AND write on " +
+        "(suffix -2, -3... if that name is taken). Requires read and write on the source section AND write on " +
         "<space>:<project>:archive, so section-scoped tokens cannot archive (project-wide `space:project:*` can). " +
         "Reading an archived note needs read on `archive`. Notes already in `archive`, the project " +
         "entry note overview/index, and notes with uncommitted changes in the vault cannot be archived. " +
@@ -35,8 +35,12 @@ export const register: RegisterTool = (server, { vaultRoot }) => {
             audit: { gitCommit: r.commitSha || undefined, detail: `-> archive/${r.name}` },
           };
         },
-        // Archiving also writes into <space>:<project>:archive, so it needs write there too.
-        [{ permission: "write", section: ARCHIVE_SECTION, detail: "no write on archive section" }],
+        // Read on the source too: otherwise write + read-on-archive would let a
+        // token archive a note it cannot read and then read it from `archive`.
+        [
+          { permission: "read", detail: "no read on source section" },
+          { permission: "write", section: ARCHIVE_SECTION, detail: "no write on archive section" },
+        ],
       ),
   );
 };
