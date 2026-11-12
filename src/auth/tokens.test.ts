@@ -129,12 +129,12 @@ test("expiry: one SQL rule (julianday) for verify, list and count; unparseable f
   const t = createToken("rule", sc, { expiresInDays: 30 });
   const before = countActiveTokens();
 
-  set(t.id, db.prepare("SELECT datetime('now','+7 days') AS d").get()!.d as string); // hand-edited, space-separated
+  set(t.id, (db.prepare("SELECT datetime('now','+7 days') AS d").get() as { d: string }).d); // hand-edited, space-separated
   assert.equal(checkToken(t.token).status, "ok");
   assert.equal(listTokens().find((x) => x.id === t.id)!.expired, false);
   assert.equal(countActiveTokens(), before);
 
-  set(t.id, db.prepare("SELECT datetime('now','-1 hours') AS d").get()!.d as string);
+  set(t.id, (db.prepare("SELECT datetime('now','-1 hours') AS d").get() as { d: string }).d);
   assert.equal(checkToken(t.token).status, "expired");
   assert.equal(listTokens().find((x) => x.id === t.id)!.expired, true);
   assert.equal(countActiveTokens(), before - 1);

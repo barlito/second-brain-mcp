@@ -6,6 +6,7 @@
   "main": "dist/server.js",
   "scripts": {
     "build": "tsc",
+    "typecheck": "tsc -p tsconfig.test.json --noEmit",
     "start": "node dist/server.js",
     "dev": "tsx watch src/server.ts",
     "test": "tsx --test $(find src -name '*.test.ts' | sort)"
@@ -20,7 +21,6 @@
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.12",
     "@types/express": "^5.0.0",
-    "@types/markdown-it": "^14.2.0",
     "@types/node": "^24.0.0",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2"

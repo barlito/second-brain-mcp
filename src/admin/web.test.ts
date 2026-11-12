@@ -299,7 +299,7 @@ test("tokens: wildcard scopes and presets need the explicit checkbox", async () 
     { name: "w2", preset: "master-ro" },
     { name: "w3", scopes: "sp:*:*:read" },
     { name: "w4", scopes: "*:*:*:write" },
-  ]) {
+  ] as Record<string, string>[]) {
     const r = await post("/tokens", f);
     assert.equal(r.status, 422, JSON.stringify(f));
     assert.match(r.body, /Allow wildcard/);

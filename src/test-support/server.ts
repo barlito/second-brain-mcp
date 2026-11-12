@@ -52,9 +52,26 @@ export async function callTool(
   }
 }
 
+/** A row of the audit_log table. */
+export interface AuditRow {
+  id: number;
+  ts: string;
+  token_id: string | null;
+  token_name: string | null;
+  action: string;
+  space: string | null;
+  project: string | null;
+  section: string | null;
+  note: string | null;
+  result: string;
+  detail: string | null;
+  git_commit: string | null;
+  client_ip: string | null;
+}
+
 export function lastAudit(
   db: import("better-sqlite3").Database,
   where = "1=1",
-): { action: string; result: string; detail: string | null; client_ip: string | null; token_name: string | null } {
-  return db.prepare(`SELECT * FROM audit_log WHERE ${where} ORDER BY id DESC LIMIT 1`).get() as never;
+): AuditRow {
+  return db.prepare(`SELECT * FROM audit_log WHERE ${where} ORDER BY id DESC LIMIT 1`).get() as AuditRow;
 }
