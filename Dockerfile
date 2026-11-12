@@ -1,7 +1,22 @@
 # Base image pinned by digest. To bump:
 #   docker pull node:24-alpine && docker inspect node:24-alpine --format '{{index .RepoDigests 0}}'
-# then replace the sha256 below (used by both stages).
+# then replace the sha256 below (used by all stages).
 ARG NODE_IMAGE=node:24-alpine@sha256:a34ab6d7f6f4813f4d0c5469d74685604b962fbdbf5793a7bc7b4998ecb867c8
+
+# ────────────────────────────────────────────────────────────────
+# prod-deps stage: production node_modules only. Depends solely on the
+# manifests, so source changes do not invalidate this layer.
+# better-sqlite3 ships N-API prebuilds inside the package (no toolchain).
+# ────────────────────────────────────────────────────────────────
+FROM ${NODE_IMAGE} AS prod-deps
+
+WORKDIR /app
+
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev --ignore-scripts \
+ && keep="linuxmusl-$(node -p process.arch).node" \
+ && find node_modules/better-sqlite3/prebuilds -type f ! -name "$keep" -delete \
+ && rm -rf node_modules/better-sqlite3/deps node_modules/better-sqlite3/src
 
 # ────────────────────────────────────────────────────────────────
 # Builder stage: install all deps and compile TypeScript
@@ -10,18 +25,13 @@ FROM ${NODE_IMAGE} AS builder
 
 WORKDIR /app
 
-# better-sqlite3 is a native module; no musl prebuilt is published for this
-# platform, so it compiles from source during npm ci.
-RUN apk add --no-cache python3 make g++
-
 COPY package.json package-lock.json ./
-RUN npm ci
+RUN npm ci --ignore-scripts
 
 COPY tsconfig.json ./
 COPY src ./src
 
 RUN npm run build
-RUN npm prune --omit=dev
 
 # ────────────────────────────────────────────────────────────────
 # Runtime stage: production deps only + compiled output
@@ -64,7 +74,7 @@ RUN rm -rf /usr/local/lib/node_modules /usr/local/bin/npm /usr/local/bin/npx \
       /usr/local/bin/corepack /usr/local/bin/yarn /usr/local/bin/yarnpkg /opt/yarn*
 
 # App code stays root-owned (world-readable, not writable by appuser).
-COPY --from=builder /app/node_modules ./node_modules
+COPY --from=prod-deps /app/node_modules ./node_modules
 COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/package.json ./package.json
 
