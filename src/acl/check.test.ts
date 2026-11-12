@@ -24,7 +24,8 @@ test("space:project:* covers every section of that project only", () => {
   assert.equal(checkScope(s, "pro", "x", "anything", "write"), true);
   assert.equal(checkScope(s, "pro", "other", "anything", "write"), false);
   assert.equal(checkScope(s, "perso", "x", "anything", "write"), false);
-  assert.equal(checkScope(s, "pro", "x", "anything", "read"), false); // write does not imply read
+  assert.equal(checkScope(s, "pro", "x", "anything", "read"), true); // write includes read
+  assert.equal(checkScope(s, "pro", "other", "anything", "read"), false);
 });
 
 test("space:*:* covers one whole space, not others", () => {
@@ -48,7 +49,7 @@ test("a token may hold scopes in several spaces; none leak into others", () => {
   const s = [sc("pro", "*", "*", "read"), sc("perso", "p", "s", "write")];
   assert.equal(checkScope(s, "pro", "a", "b", "read"), true);
   assert.equal(checkScope(s, "perso", "p", "s", "write"), true);
-  assert.equal(checkScope(s, "perso", "p", "s", "read"), false);
+  assert.equal(checkScope(s, "perso", "p", "s", "read"), true); // write includes read
   assert.equal(checkScope(s, "pro", "a", "b", "write"), false);
   assert.equal(checkScope(s, "idees", "p", "s", "read"), false);
 });
@@ -77,4 +78,14 @@ test("malformed stored wildcards (non-* after *) match nothing and warn once", (
 
 test("no scopes denies", () => {
   assert.equal(checkScope([], "pro", "x", "y", "read"), false);
+});
+
+test("write includes read, propose does not, read never implies write", () => {
+  const w = [sc("pro", "x", "y", "write")];
+  assert.equal(checkScope(w, "pro", "x", "y", "read"), true);
+  assert.equal(checkScope(w, "pro", "x", "z", "read"), false);
+  const p = [sc("pro", "x", "y", "propose")];
+  assert.equal(checkScope(p, "pro", "x", "y", "read"), false);
+  assert.equal(checkScope(p, "pro", "x", "y", "write"), false);
+  assert.equal(checkScope([sc("pro", "x", "y", "read")], "pro", "x", "y", "write"), false);
 });

@@ -21,7 +21,7 @@ Traefik -> bearer auth (+ per-IP failure limiter) or token-less session -> /mcp 
 1. Traefik terminates TLS (plain HTTP is redirected to HTTPS). Security headers apply in both local and prod; only the rate limit (20 avg / 40 burst per IP) is prod-only.
 2. Bearer auth looks the token up by SHA-256 hash (only hashes are stored). The token is validated first: a valid token is never refused because of other clients' failures. After 10 failed attempts from one client (IPv6 by /64) within 60 s, further failing attempts get `429` until the window ends (expired tokens get `401` but are not counted). Failure audit rows are coalesced per client and capped globally (`AUTH_AUDIT_MAX_PER_MIN`, default 30; the excess is counted in one summary row). The client IP comes from `X-Forwarded-For`, trusted only from the Traefik tasks (`TRUSTED_PROXY`).
 3. `/mcp` builds a fresh MCP server per request (stateless).
-4. The tool checks the token's scopes (space, project and section match exactly or via trailing `*` wildcards; `read`, `write` and `propose` are separate permissions). This runs before any filesystem access.
+4. The tool checks the token's scopes (space, project and section match exactly or via trailing `*` wildcards; `write` includes `read`; `propose` is separate). This runs before any filesystem access.
 5. The path is resolved from validated slugs, re-checked against the vault root, and symlinks are refused.
 6. Writes go through a single bounded queue: pull (rebase), atomic write, local commit; a background pusher then pushes (one push at a time, coalescing writes).
 7. One audit row is written per tool call (`ok`, `denied` or `error`), including calls whose arguments fail schema validation, plus rows for HTTP-level errors, (coalesced) auth failures, admin actions and asynchronous sync conflicts.
@@ -114,7 +114,7 @@ The `archive` section is excluded from all limits and is never purged.
 
 ## Tools
 
-All note-addressed tools take `space`, `project`, `section`, `note` (strings, max 64 chars each, slug rules above). Each call needs the permission listed on the matching scope (see [Token management](#token-management)); `read`, `write` and `propose` are separate.
+All note-addressed tools take `space`, `project`, `section`, `note` (strings, max 64 chars each, slug rules above). Each call needs the permission listed on the matching scope (see [Token management](#token-management)); `write` includes `read`; `propose` is separate.
 
 ### `kb_read`
 
@@ -143,7 +143,7 @@ All note-addressed tools take `space`, `project`, `section`, `note` (strings, ma
 ### `kb_archive`
 
 - Args: `space`, `project`, `section`, `note` (the note to archive).
-- Permission: `read` and `write` on the source section AND `write` on `<space>:<project>:archive` (read on the source is required so that archiving cannot be used to read a note through `archive`). A token scoped to a single section therefore cannot archive; a project-wide scope such as `space:project:*` can. If the archive write is missing the client gets `Permission denied.`. Reading an archived note afterwards needs `read` on `archive`.
+- Permission: `write` (which includes `read`) on the source section AND `write` on `<space>:<project>:archive` (write on the source includes read, so archiving cannot be used to read a note through `archive`). A token scoped to a single section therefore cannot archive; a project-wide scope such as `space:project:*` can. If the archive write is missing the client gets `Permission denied.`. Reading an archived note afterwards needs `read` on `archive`.
 - Moves `<space>/<project>/<section>/<note>` to `<space>/<project>/archive/<section>-<note>` (a `-2`, `-3`, ... suffix is appended if the name is taken, up to 50 tries; long names are truncated to stay a valid slug) and returns the new location, e.g. `pro/myproj/archive/notes-old-idea`. The move is a git commit, so history is kept.
 - There is no delete tool: archive instead.
 - Errors: `Note is already archived.` (section is `archive`); `The project entry note (overview/index) cannot be archived.`; `Note not found.`; `Note has uncommitted changes in the vault; commit or discard them first.`; `Too many archived notes with this name.`
@@ -233,7 +233,7 @@ make token-revoke id=<token id>
 
 - Scope format (4 parts): `space:project:section:permission`, comma-separated. `permission` is `read`, `write` or `propose`. `space`, `project` and `section` follow the slug rules.
 - Wildcards: `*` is allowed only as trailing levels: `*:*:*`, `<space>:*:*`, `<space>:<project>:*`, or fully explicit. Patterns like `*:proj:sec` or `space:*:sec` are rejected. A token may hold scopes in several spaces.
-- `read`, `write` and `propose` are separate: `write` does not imply `read`. Grant both if you want both. `propose` only allows `kb_propose` (which `write` also allows); a propose-only token cannot change notes.
+- `write` includes `read` on the same scope; `read` never implies `write`, and `propose` is independent (it does not include `read`). `propose` only allows `kb_propose` (which `write` also allows); a propose-only token cannot change notes.
 - Presets: `preset=master` (read+write on `*:*:*`) and `preset=master-ro` (read on `*:*:*`). Use either `preset=` or `scope=`, not both (the CLI rejects the combination).
 - Preset `agent`: `make token-create name=<agent-name> preset=agent` grants read+write on `agents:<agent-name>:*` (the name must be a slug). It is bounded to one project, so it needs no `allow_wildcard`; unlike the master presets it may be combined with `scope=` to add extra scopes. The web admin offers it in the preset list.
 - Preset `project` (one token per project, for a Claude Code instance working on it): `make token-create name=<n> preset=project project=<space>/<project>` grants `meta:*:*:read` (the shared memory), `<space>:<project>:*:read` and `<space>:<project>:*:write`. `project` must be exactly two slugs (`pro/second-brain`), otherwise the CLI/web refuses with an explicit message. Bounded, so no `allow_wildcard` for the preset's own scopes (including its `meta:*:*:read`); like `agent` it accepts extra `scope=` entries, and extra wildcards still need `allow_wildcard=1`. The web admin offers it with a project field (suggestions from the existing projects, free text allowed).

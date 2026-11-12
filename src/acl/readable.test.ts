@@ -34,12 +34,6 @@ test("space:project:* and explicit scopes narrow to their project", () => {
   }
 });
 
-test("write scopes grant nothing for reading", () => {
-  const s = [sc("*", "*", "*", "write")];
-  assert.equal(canReadUnderSpace(s, "pro"), false);
-  assert.equal(canReadUnderProject(s, "pro", "x"), false);
-});
-
 test("malformed stored scopes (mid-level '*') grant nothing", () => {
   for (const s of [sc("*", "x", "y"), sc("pro", "*", "y"), sc("*", "*", "y"), sc("*", "x", "*")]) {
     assert.equal(canReadUnderSpace([s], "pro"), false, JSON.stringify(s));
@@ -51,11 +45,21 @@ test("mixed scopes: any matching read scope is enough", () => {
   const s = [sc("pro", "x", "notes"), sc("perso", "*", "*"), sc("idees", "*", "*", "write")];
   assert.equal(canReadUnderSpace(s, "pro"), true);
   assert.equal(canReadUnderSpace(s, "perso"), true);
-  assert.equal(canReadUnderSpace(s, "idees"), false);
+  assert.equal(canReadUnderSpace(s, "idees"), true); // write includes read
   assert.equal(canReadUnderProject(s, "pro", "z"), false);
 });
 
 test("no scopes grants nothing", () => {
   assert.equal(canReadUnderSpace([], "pro"), false);
   assert.equal(canReadUnderProject([], "pro", "x"), false);
+});
+
+test("write scopes count as readable, propose does not", () => {
+  const w = [sc("pro", "x", "*", "write")];
+  assert.equal(canReadUnderSpace(w, "pro"), true);
+  assert.equal(canReadUnderProject(w, "pro", "x"), true);
+  assert.equal(canReadUnderProject(w, "pro", "z"), false);
+  const p = [sc("pro", "x", "*", "propose")];
+  assert.equal(canReadUnderSpace(p, "pro"), false);
+  assert.equal(canReadUnderProject(p, "pro", "x"), false);
 });
