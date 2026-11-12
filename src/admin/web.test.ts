@@ -54,14 +54,14 @@ const csrf = (user = "barlito", session = SESSION): string => web.csrfToken(SECR
 const get = (path: string, headers: Record<string, string> = ADMIN) => request(port, "GET", path, headers);
 // One-time nonce of the form posting to `action`, taken from the page that renders it.
 async function nonceFor(action: string): Promise<string> {
-  const page = action.startsWith("/inbox/") ? action.replace(/\/(accept|reject)$/, "") : "/tokens";
+  const page = action.startsWith("/inbox/") ? action.replace(/\/(accept|reject)$/, "") : action === "/tokens" ? "/tokens/new" : "/tokens";
   const r = await get(page);
   const m = new RegExp(`action="${action}"[^>]*>\\s*<input type="hidden" name="csrf" value="[^"]*"><input type="hidden" name="nonce" value="([0-9a-f]{32})"`).exec(r.body);
   assert.ok(m, `form ${action} on ${page}`);
   return m[1];
 }
 async function nonceForSession(headers: Record<string, string>): Promise<string> {
-  const m = /action="\/tokens"[^>]*>\s*<input type="hidden" name="csrf" value="[^"]*"><input type="hidden" name="nonce" value="([0-9a-f]{32})"/.exec((await get("/tokens", headers)).body);
+  const m = /action="\/tokens"[^>]*>\s*<input type="hidden" name="csrf" value="[^"]*"><input type="hidden" name="nonce" value="([0-9a-f]{32})"/.exec((await get("/tokens/new", headers)).body);
   assert.ok(m);
   return m[1];
 }
@@ -182,6 +182,11 @@ test("pages carry no inline style, inline script or inline event handlers (CSP)"
   const pages = [
     (await get("/")).body,
     (await get("/tokens")).body,
+    (await get("/tokens?status=all&q=csp")).body,
+    (await get("/tokens/new")).body,
+    (await get("/access")).body,
+    (await get("/audit")).body,
+    (await get("/vault")).body,
     (await get("/inbox")).body,
     (await get(`/inbox/${mid(70)}`)).body,
     (await get(`/inbox/${mid(70)}?view=raw`)).body,
@@ -189,11 +194,12 @@ test("pages carry no inline style, inline script or inline event handlers (CSP)"
     created.body,
   ];
   assert.match(pages[1], new RegExp(t.id), "tokens page rendered");
+  assert.match(pages[3], /id="sb-projects"/, "builder data block present");
   for (const body of pages) {
     assert.ok(body.length > 200);
     assert.doesNotMatch(body, /\sstyle\s*=/i);
     assert.doesNotMatch(body, /\son[a-z]+\s*=/i);
-    assert.doesNotMatch(body, /<script(?![^>]*\ssrc=)/i);
+    assert.doesNotMatch(body, /<script(?![^>]*(\ssrc=|\stype="application\/json"))/i);
     assert.doesNotMatch(body, /javascript:/i);
   }
   const rejected = await post(`/inbox/${mid(70)}/reject`, {});
@@ -205,8 +211,8 @@ test("dashboard renders health, sync, counts and the user", async () => {
   assert.equal(r.status, 200);
   assert.match(r.body, /Dashboard/);
   assert.match(r.body, /barlito/);
-  assert.match(r.body, /active tokens/);
-  assert.match(r.body, /pending proposals/);
+  assert.match(r.body, /Active tokens/);
+  assert.match(r.body, /Pending proposals/);
   assert.match(r.body, /Conflict branches/);
   assert.match(r.body, /Unpushed commits/);
 });
@@ -281,7 +287,7 @@ test("tokens: create shows plaintext once, never stored in audit or logs", async
   const list = await get("/tokens");
   assert.doesNotMatch(list.body, new RegExp(plaintext));
   assert.match(list.body, /web-tok/);
-  assert.match(list.body, /sp:pj:notes:write/);
+  assert.match(list.body, /<span class="scope-path">sp:pj:notes<\/span><span class="scope-perm p-write">read &amp; write<\/span>/);
   // Not in the audit DB nor the logs
   const rows = JSON.stringify(db.prepare("SELECT * FROM audit_log").all());
   assert.ok(!rows.includes(plaintext));
@@ -530,15 +536,15 @@ test("dashboard survives a broken database: unhealthy badge and n/a counts, no 5
   }
   assert.equal(db.prepare, orig);
   assert.equal(r.status, 200);
-  assert.match(r.body, /Database: <span class="badge err">error<\/span>/);
-  assert.equal((r.body.match(/<div class="n">n\/a<\/div>/g) ?? []).length, 3, "token, access and audit counts are n/a");
-  assert.match(r.body, /Vault: <span class="badge ok">/);
+  assert.match(r.body, /Database<\/span><span class="badge err"><span class="dot"><\/span>Error<\/span>/);
+  assert.equal((r.body.match(/<span class="n">n\/a<\/span>/g) ?? []).length, 3, "token, access and audit counts are n/a");
+  assert.match(r.body, /Vault<\/span><span class="badge ok">/);
   // Healthy again afterwards
-  assert.match((await get("/")).body, /Database: <span class="badge ok">/);
+  assert.match((await get("/")).body, /Database<\/span><span class="badge ok">/);
 });
 
 test("tokens: expiry field on create, expiry/expired in the table, dashboard counts only live tokens", async () => {
-  const stat = async (): Promise<number> => Number(/<div class="n">(\d+)<\/div><div class="l">active tokens/.exec((await get("/")).body)![1]);
+  const stat = async (): Promise<number> => Number(/Active tokens<\/span><span class="n">(\d+)<\/span>/.exec((await get("/")).body)![1]);
   const before = await stat();
 
   const bad = await post("/tokens", { name: "exp-bad", scopes: "sp:pj:notes:read", expires_in_days: "0" });
@@ -558,8 +564,9 @@ test("tokens: expiry field on create, expiry/expired in the table, dashboard cou
   assert.ok(list.body.includes(row.expires_at!), "table shows expiry");
 
   db.prepare("UPDATE tokens SET expires_at = ? WHERE id = ?").run(new Date(Date.now() - 1000).toISOString(), row.id);
-  const expired = await get("/tokens");
-  assert.match(expired.body, /<span class="badge err">expired<\/span>/);
+  assert.doesNotMatch((await get("/tokens")).body, new RegExp(row.id), "expired tokens are not in the default (Active) filter");
+  const expired = await get("/tokens?status=expired");
+  assert.match(expired.body, /<span class="badge err">Expired<\/span>/);
   assert.equal(await stat(), before, "expired token not counted as active");
   assert.match(expired.body, new RegExp(`/tokens/${row.id}/revoke`), "revoke still offered");
 });
@@ -609,7 +616,7 @@ test("tokens: preset project validation, extras and the dir field", async () => 
     assert.match(r.body, re);
   }
   assert.equal(tokens.listTokens().length, before);
-  assert.match((await get("/tokens")).body, /<datalist id="projects">/);
+  assert.match((await get("/tokens/new")).body, /<datalist id="projects">/);
   // Extras combine; confirmed wildcard extras are allowed.
   const ok = await post("/tokens", { name: "proj-extra", preset: "project", project: "pro/p", scopes: "sp:pj:notes:read\nsp:*:*:read", allow_wildcard: "1" });
   assert.equal(ok.status, 303);
@@ -628,4 +635,72 @@ test("tokens: preset project refuses meta; project field without the project pre
     assert.match(r.body, /only valid with the/);
   }
   assert.equal(tokens.listTokens().length, before);
+});
+
+test("static: theme.js is served (sync, no storage errors escape) and the CSS has both dark paths", async () => {
+  const t = await get("/static/theme.js");
+  assert.equal(t.status, 200);
+  assert.match(t.headers["content-type"] ?? "", /javascript/);
+  assert.match(t.body, /localStorage/);
+  assert.match(t.body, /try \{/);
+  assert.match(t.body, /data-theme/);
+  assert.equal((await get("/static/theme.js", {})).status, 401);
+  const css = await get("/static/style.css");
+  assert.match(css.body, /@media \(prefers-color-scheme: dark\) \{\s*:root:not\(\[data-theme="light"\]\)/);
+  assert.match(css.body, /:root\[data-theme="dark"\]/);
+  const page = (await get("/")).body;
+  assert.match(page, /<script src="\/static\/theme\.js"><\/script>/, "theme.js loads synchronously (no defer)");
+  assert.match(page, /<a href="\/access"[^>]*>[^]*?<span class="label">Access<\/span>/, "Access is in the sidebar");
+  assert.match(page, /aria-current="page"/);
+  assert.match(page, /data-theme-toggle/);
+});
+
+test("tokens list: ?status= and ?q= filter server-side, with counts", async () => {
+  const sc = [{ space: "sp", project: "flt", section: "notes", permission: "read" as const }];
+  const live = tokens.createToken("flt-live", sc);
+  const dead = tokens.createToken("flt-dead", [{ ...sc[0], project: "other" }]);
+  tokens.revokeToken(dead.id);
+  const old = tokens.createToken("flt-old", sc);
+  db.prepare("UPDATE tokens SET expires_at = ? WHERE id = ?").run(new Date(Date.now() - 1000).toISOString(), old.id);
+  const has = (body: string, t: { id: string }): boolean => body.includes(`<span class="mono muted small" title="${t.id}">`);
+
+  const def = (await get("/tokens")).body;
+  assert.ok(has(def, live) && !has(def, dead) && !has(def, old), "default = Active");
+  assert.match(def, /aria-current="true"[^>]*>Active /);
+  assert.match(def, /\d+ revoked tokens? hidden/);
+  const rev = (await get("/tokens?status=revoked")).body;
+  assert.ok(has(rev, dead) && !has(rev, live) && !has(rev, old));
+  const exp = (await get("/tokens?status=expired")).body;
+  assert.ok(has(exp, old) && !has(exp, live) && !has(exp, dead));
+  const all = (await get("/tokens?status=all")).body;
+  assert.ok(has(all, live) && has(all, dead) && has(all, old));
+  assert.match(all, /All <span class="n">\d+<\/span>/);
+  const byName = (await get("/tokens?status=all&q=FLT-DE")).body;
+  assert.ok(has(byName, dead) && !has(byName, live), "name search is case-insensitive");
+  const byScope = (await get("/tokens?status=all&q=sp:other")).body;
+  assert.ok(has(byScope, dead) && !has(byScope, live), "scope search");
+  assert.match((await get("/tokens?status=all&q=zzz-nothing")).body, /No token matches/);
+  assert.ok(has((await get("/tokens?status=bogus")).body, live), "unknown status falls back to Active");
+  assert.match((await get("/tokens?status=all&sessions=1")).body, /Hide them/, "sessions toggle kept");
+});
+
+test("GET /tokens/new renders the form (fields, presets, scope lines, projects data block)", async () => {
+  mkdirSync(join(vault, "pro", "form-proj", "notes"), { recursive: true });
+  const r = await get("/tokens/new");
+  assert.equal(r.status, 200);
+  assert.match(r.body, /<form method="post" action="\/tokens" id="tokform"/);
+  for (const v of ["", "project", "agent", "master-ro", "master"]) assert.match(r.body, new RegExp(`<input type="radio" name="preset" value="${v}"`));
+  for (const n of ["name", "scopes", "project", "dir", "allow_wildcard"]) assert.match(r.body, new RegExp(`name="${n}"`));
+  assert.match(r.body, /<input type="radio" name="expires_in_days" value="90" checked>/, "90 days preselected");
+  assert.match(r.body, /<script type="application\/json" id="sb-projects">\[[^\]]*pro\/form-proj[^\]]*\]<\/script>/);
+  assert.match(r.body, /Everything read allows, plus create, edit, append and archive notes/);
+  assert.doesNotMatch(r.body, /does not include read/);
+  assert.match(r.body, /<h1>New token<\/h1>/);
+  // A failed submit re-renders this page with the banner and the user's values.
+  const bad = await post("/tokens", { name: "keep-me", scopes: "", preset: "project", project: "", dir: "/tmp/d", expires_in_days: "30" });
+  assert.equal(bad.status, 422);
+  assert.match(bad.body, /<h1>New token<\/h1>/);
+  assert.match(bad.body, /value="keep-me"/);
+  assert.match(bad.body, /<input type="radio" name="preset" value="project" checked>/);
+  assert.match(bad.body, /<input type="radio" name="expires_in_days" value="30" checked>/);
 });

@@ -71,7 +71,7 @@ test("kb_list top level derives spaces from scopes and skips dotdirs, symlinks a
   assert.deepEqual(names((await list("pro-all")).text), ["pro"]);
   assert.deepEqual(names((await list("exact")).text), ["pro"]);
   assert.deepEqual(names((await list("mixed")).text), ["perso", "pro"]);
-  assert.deepEqual((await list("writer")).text, "(empty)");
+  assert.deepEqual(names((await list("writer")).text), ["pro"]); // write includes read
   assert.deepEqual((await list("malformed")).text, "(empty)");
 });
 
@@ -110,7 +110,7 @@ test("kb_list denies levels the token cannot read, with a generic message", asyn
     ["exact", { space: "perso" }],
     ["exact", { space: "pro", project: "b" }],
     ["exact", { space: "pro", project: "a", section: "journal" }],
-    ["writer", { space: "pro" }],
+    ["writer", { space: "pro", project: "b" }],
     ["malformed", { space: "pro" }],
   ] as const) {
     assert.deepEqual(await list(tok, args), { isError: true, text: "Permission denied." }, JSON.stringify(args));
@@ -193,7 +193,10 @@ test("kb_search narrowing args are ACL-checked and limit the scope", async () =>
     text: "Permission denied.",
   });
   assert.equal((await search("master", { query: "needle", project: "a" })).isError, true);
-  assert.deepEqual(await search("writer", { query: "needle" }), { isError: false, text: "No matches." });
+  const w = await search("writer", { query: "needle" });
+  assert.equal(w.isError, false);
+  assert.match(w.text, /pro\/a\/notes\/n1/);
+  assert.doesNotMatch(w.text, /journal|perso|pro\/b/);
 });
 
 test("kb_search query validation: 2..200 chars, plain substring (no regex)", async () => {
@@ -303,4 +306,15 @@ test("kb_search snippet is centred on a match deep in a long line", async () => 
   const res = await search("master", { query: "zzdeep", space: "pro", project: "snip" });
   assert.ok(res.text.includes("zzdeep"));
   assert.ok(res.text.includes("…"));
+});
+
+test("a write-only token can kb_read, kb_list and kb_search its section (write includes read)", async () => {
+  const rd = await callTool(app.baseUrl, tokens.writer, "kb_read", { space: "pro", project: "a", section: "notes", note: "n2" });
+  assert.equal(rd.isError, false);
+  assert.match(rd.text, /nothing here/);
+  assert.ok(names((await list("writer", { space: "pro", project: "a", section: "notes" })).text).includes("n1"));
+  assert.deepEqual(
+    await callTool(app.baseUrl, tokens.writer, "kb_read", { space: "pro", project: "a", section: "journal", note: "2026-01" }),
+    { isError: true, text: "Permission denied." },
+  );
 });

@@ -114,7 +114,7 @@ test("literal '*', empty and traversal values are rejected by slug validation be
 });
 
 test("a raw-inserted mid-level wildcard row grants nothing end to end", async () => {
-  const t = createToken("raw-wild", [{ space: "pro", project: "x", section: "y", permission: "write" }]).token;
+  const t = createToken("raw-wild", [{ space: "pro", project: "x", section: "y", permission: "propose" }]).token;
   db.prepare(
     "INSERT INTO scopes (token_id, space, project, section, permission) VALUES ((SELECT id FROM tokens WHERE name='raw-wild'),'pro','*','y','read')",
   ).run();

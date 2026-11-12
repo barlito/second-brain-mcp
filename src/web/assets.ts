@@ -1,77 +1,19 @@
 // Static assets served at /static/*. Kept as strings so the plain `tsc` build ships them.
-export const CSS = `
-:root {
-  --bg: #f6f7f9; --surface: #fff; --text: #1d2330; --muted: #5d6677; --border: #d9dde5;
-  --accent: #2456d3; --accent-text: #fff; --danger: #b42318; --ok: #14733a; --warn: #8a5a00;
-  --ok-bg: #e6f4ea; --err-bg: #fdecea; --warn-bg: #fff4d6; --code-bg: #eef0f4;
-}
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #14171d; --surface: #1c2029; --text: #e6e9ef; --muted: #9aa3b2; --border: #323846;
-    --accent: #6f9bff; --accent-text: #0c1220; --danger: #ff8a80; --ok: #6fd58f; --warn: #f0c36b;
-    --ok-bg: #16301f; --err-bg: #3a1c1a; --warn-bg: #3a2f14; --code-bg: #262b36;
-  }
-}
-* { box-sizing: border-box; }
-body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.5 system-ui, sans-serif; }
-header { background: var(--surface); border-bottom: 1px solid var(--border); }
-header .bar { max-width: 1000px; margin: 0 auto; padding: 0 16px; display: flex; gap: 20px; align-items: center; flex-wrap: wrap; }
-header .brand { font-weight: 700; padding: 12px 0; }
-header nav { display: flex; gap: 4px; flex: 1; }
-header nav a { padding: 12px 10px; color: var(--muted); text-decoration: none; border-bottom: 2px solid transparent; }
-header nav a[aria-current="page"] { color: var(--text); border-color: var(--accent); }
-header .who { color: var(--muted); font-size: 13px; }
-main { max-width: 1000px; margin: 0 auto; padding: 20px 16px 60px; }
-h1 { font-size: 22px; margin: 0 0 16px; }
-h2 { font-size: 17px; margin: 24px 0 8px; }
-a { color: var(--accent); }
-.card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px; margin-bottom: 16px; }
-.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; margin-bottom: 16px; }
-.stat { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; }
-.stat .n { font-size: 26px; font-weight: 700; }
-.stat .l { color: var(--muted); font-size: 13px; }
-table { width: 100%; border-collapse: collapse; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; }
-th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
-th { font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
-tr:last-child td { border-bottom: 0; }
-.scroll { overflow-x: auto; }
-code, pre, .mono { font-family: ui-monospace, monospace; font-size: 13px; }
-code { background: var(--code-bg); padding: 1px 5px; border-radius: 4px; }
-pre { background: var(--code-bg); padding: 12px; border-radius: 6px; overflow-x: auto; white-space: pre-wrap; word-break: break-word; }
-.muted { color: var(--muted); }
-.badge { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 12px; background: var(--code-bg); }
-.badge.ok { background: var(--ok-bg); color: var(--ok); }
-.badge.err { background: var(--err-bg); color: var(--danger); }
-.badge.warn { background: var(--warn-bg); color: var(--warn); }
-.banner { padding: 10px 14px; border-radius: 6px; margin-bottom: 16px; border: 1px solid var(--border); }
-.banner.ok { background: var(--ok-bg); color: var(--ok); }
-.banner.err { background: var(--err-bg); color: var(--danger); }
-.banner.warn { background: var(--warn-bg); color: var(--warn); }
-.banner ul { margin: 4px 0 0; padding-left: 20px; }
-form.stack label { display: block; margin: 12px 0 4px; font-weight: 600; }
-form.stack .hint { color: var(--muted); font-size: 13px; font-weight: 400; }
-input[type=text], textarea, select { width: 100%; max-width: 560px; padding: 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--text); font: inherit; }
-textarea { font-family: ui-monospace, monospace; font-size: 13px; min-height: 110px; }
-.check { display: flex; gap: 8px; align-items: center; margin: 12px 0; font-weight: 400 !important; }
-button { font: inherit; padding: 7px 14px; border-radius: 6px; border: 1px solid var(--border); background: var(--surface); color: var(--text); cursor: pointer; }
-button.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
-button.danger { color: var(--danger); border-color: var(--danger); }
-.actions { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-top: 12px; }
-.inline { display: inline; }
-.flush { margin-top: 0; }
-.token { word-break: break-all; font-size: 14px; padding: 12px; background: var(--code-bg); border-radius: 6px; user-select: all; }
-.md { overflow-wrap: anywhere; }
-.md img { max-width: 100%; }
-textarea.cmd { max-width: 100%; min-height: 0; }
-textarea.wide { max-width: 100%; min-height: 380px; }
-.crumbs { color: var(--muted); margin: -8px 0 16px; }
-.tabs { display: flex; gap: 8px; margin: 12px 0 8px; }
-.tabs a { text-decoration: none; padding: 4px 10px; border-radius: 6px; border: 1px solid var(--border); color: var(--text); }
-.tabs a[aria-current="page"] { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+// JS is vanilla and external (CSP: script-src 'self'); String.raw keeps backslashes literal.
+export { CSS } from "./css";
+
+// Loaded synchronously in <head> (no defer) so the stored theme applies before first paint.
+export const THEME_JS = String.raw`(function () {
+  var d = document.documentElement;
+  d.classList.add("js");
+  try {
+    var t = localStorage.getItem("sb-theme");
+    if (t === "light" || t === "dark") d.setAttribute("data-theme", t);
+  } catch (e) { /* storage blocked: stay on Auto */ }
+})();
 `;
 
-// Confirm dialogs for forms carrying data-confirm (CSP forbids inline handlers).
-export const JS = `document.addEventListener("submit", function (e) {
+export const JS = String.raw`document.addEventListener("submit", function (e) {
   var m = e.target && e.target.getAttribute && e.target.getAttribute("data-confirm");
   if (m && !window.confirm(m)) e.preventDefault();
 });
@@ -97,4 +39,280 @@ document.addEventListener("click", function (e) {
     fallback();
   }
 });
+
+// Theme toggle (Auto / Light / Dark). Hidden without JS; theme.js applies the stored choice early.
+(function () {
+  var box = document.querySelector("[data-theme-toggle]");
+  if (!box) return;
+  var root = document.documentElement;
+  function current() {
+    var t = root.getAttribute("data-theme");
+    return t === "light" || t === "dark" ? t : "auto";
+  }
+  function paint() {
+    var c = current();
+    box.querySelectorAll("button[data-theme-set]").forEach(function (b) {
+      b.setAttribute("aria-pressed", b.getAttribute("data-theme-set") === c ? "true" : "false");
+    });
+  }
+  box.hidden = false;
+  box.addEventListener("click", function (e) {
+    var b = e.target && e.target.closest ? e.target.closest("button[data-theme-set]") : null;
+    if (!b) return;
+    var v = b.getAttribute("data-theme-set");
+    if (v === "light" || v === "dark") root.setAttribute("data-theme", v);
+    else root.removeAttribute("data-theme");
+    try {
+      if (v === "auto") localStorage.removeItem("sb-theme");
+      else localStorage.setItem("sb-theme", v);
+    } catch (err) { /* storage blocked: applies to this page only */ }
+    paint();
+  });
+  paint();
+})();
+
+// Token created: "I've copied and stored this token" gates the Done link.
+(function () {
+  var cb = document.getElementById("stored");
+  var done = document.getElementById("done");
+  if (!cb || !done) return;
+  function sync() {
+    if (cb.checked) done.removeAttribute("aria-disabled");
+    else done.setAttribute("aria-disabled", "true");
+  }
+  done.addEventListener("click", function (e) { if (!cb.checked) e.preventDefault(); });
+  cb.addEventListener("change", sync);
+  sync();
+})();
+
+// New token form: scope builder + summary. The real field stays the "scopes" textarea; this only
+// keeps it in sync (rows <-> text). Without JS the form still works with the textarea alone.
+(function () {
+  var form = document.getElementById("tokform");
+  var area = document.getElementById("scopes");
+  var host = document.getElementById("builder");
+  if (!form || !area || !host) return;
+  var SECTIONS = ["overview", "decisions", "conventions", "notes", "journal", "archive"];
+  var PERMS = [["read", "Read"], ["write", "Read & write"], ["propose", "Propose"]];
+  var projects = [];
+  try { projects = JSON.parse(document.getElementById("sb-projects").textContent) || []; } catch (e) { projects = []; }
+  var tree = {};
+  projects.forEach(function (p) {
+    var i = String(p).indexOf("/");
+    if (i < 1) return;
+    var s = p.slice(0, i), n = p.slice(i + 1);
+    (tree[s] = tree[s] || []).indexOf(n) < 0 && tree[s].push(n);
+  });
+  var rows = [];
+
+  function el(tag, cls, text) {
+    var n = document.createElement(tag);
+    if (cls) n.className = cls;
+    if (text !== undefined) n.textContent = text;
+    return n;
+  }
+  function parse(text) {
+    var out = [];
+    text.split(/\r?\n/).forEach(function (l) {
+      l = l.trim();
+      if (!l) return;
+      var p = l.split(":");
+      if (p.length === 4 && (p[3] === "read" || p[3] === "write" || p[3] === "propose")) out.push({ s: p[0], p: p[1], sec: p[2], perm: p[3] });
+    });
+    return out;
+  }
+  var valid = function (r) { return !!(r.s && r.p && r.sec); };
+  var path = function (r) { return [r.s || "?", r.p || "?", r.sec || "?"].join(":"); };
+  function presetVal() {
+    var c = form.querySelector('input[name="preset"]:checked');
+    return c ? c.value : "";
+  }
+  var unbounded = function (pr) { return pr === "master" || pr === "master-ro"; };
+
+  function describe(r) {
+    if (!r.s) return "Choose a space.";
+    if (!r.p) return "Choose a project in " + r.s + ".";
+    var verb = r.perm === "read" ? "Read" : r.perm === "write" ? "Read & write" : "Propose changes to";
+    var where;
+    if (r.s === "*") where = "every note in the vault";
+    else if (r.p === "*") where = "every project in " + r.s;
+    else if (r.sec === "*") where = "every section of " + r.s + "/" + r.p;
+    else where = r.s + "/" + r.p + "/" + r.sec + " only";
+    return verb + " " + where + (path(r).indexOf("*") >= 0 ? ", including ones created later" : "") + ".";
+  }
+  function permLabel(p) { return p === "write" ? "read & write" : p; }
+
+  function sync() {
+    area.value = unbounded(presetVal()) ? "" : rows.filter(valid).map(function (r) { return path(r) + ":" + r.perm; }).join("\n");
+    summary();
+  }
+
+  function option(sel, v, l) {
+    var o = el("option", "", l);
+    o.value = v;
+    sel.appendChild(o);
+  }
+  function spaces() {
+    return Object.keys(tree).sort();
+  }
+  function select(label, value, opts, locked, on) {
+    var s = el("select", "field");
+    s.setAttribute("aria-label", label);
+    var seen = false;
+    opts.forEach(function (o) { if (o[0] === value) seen = true; option(s, o[0], o[1]); });
+    if (!seen && value) option(s, value, value);
+    s.value = value;
+    s.disabled = locked;
+    s.addEventListener("change", function () { on(s.value); });
+    return s;
+  }
+
+  function render() {
+    host.textContent = "";
+    var pr = presetVal();
+    var hideAll = unbounded(pr);
+    host.hidden = hideAll;
+    var cnt = document.getElementById("scope-count");
+    if (cnt) cnt.textContent = rows.length + (rows.length === 1 ? " scope" : " scopes");
+    var linesBox = document.getElementById("lines-details");
+    if (linesBox) linesBox.hidden = hideAll;
+    var list = el("div", "stack g12");
+    rows.forEach(function (r, i) {
+      var box = el("div", "srow");
+      var line = el("div", "line");
+      var sOpts = [["", "Choose a space..."], ["*", "* (all spaces)"]].concat(spaces().map(function (k) { return [k, k]; }));
+      line.appendChild(select("Space", r.s, sOpts, false, function (v) {
+        r.s = v; r.p = v === "*" ? "*" : ""; r.sec = "*"; change();
+      }));
+      line.appendChild(el("span", "sep", ":"));
+      var pOpts;
+      if (r.s === "*") pOpts = [["*", "* (all projects)"]];
+      else if (!r.s) pOpts = [["", "Project"]];
+      else pOpts = [["", "Choose a project..."], ["*", "* (all in " + r.s + ")"]].concat((tree[r.s] || []).map(function (k) { return [k, k]; }));
+      line.appendChild(select("Project", r.p, pOpts, r.s === "*" || !r.s, function (v) {
+        r.p = v; if (v === "*") r.sec = "*"; change();
+      }));
+      line.appendChild(el("span", "sep", ":"));
+      var secOpts = [["*", "* (all sections)"]];
+      if (r.p && r.p !== "*") SECTIONS.forEach(function (k) { secOpts.push([k, k]); });
+      line.appendChild(select("Section", r.sec, secOpts, r.p === "*" || !r.p, function (v) { r.sec = v; change(); }));
+      var seg = el("div", "seg");
+      seg.setAttribute("role", "group");
+      seg.setAttribute("aria-label", "Permission");
+      PERMS.forEach(function (pm) {
+        var b = el("button", "", pm[1]);
+        b.type = "button";
+        b.setAttribute("aria-pressed", r.perm === pm[0] ? "true" : "false");
+        b.addEventListener("click", function () { r.perm = pm[0]; change(); });
+        seg.appendChild(b);
+      });
+      line.appendChild(seg);
+      var rm = el("button", "btn btn-ghost btn-icon", "\u00d7");
+      rm.type = "button";
+      rm.setAttribute("aria-label", "Remove scope");
+      rm.disabled = rows.length === 1;
+      rm.addEventListener("click", function () { rows.splice(i, 1); change(); });
+      line.appendChild(rm);
+      box.appendChild(line);
+      var desc = el("div", "desc");
+      if (valid(r)) {
+        var chip = el("span", "scope");
+        chip.appendChild(el("span", "scope-path", path(r)));
+        chip.appendChild(el("span", "scope-perm p-" + r.perm, permLabel(r.perm)));
+        desc.appendChild(chip);
+      }
+      desc.appendChild(el("span", "", describe(r)));
+      if (valid(r) && (r.s === "*" || r.p === "*")) desc.appendChild(el("span", "badge " + (r.s === "*" ? "err" : "warn"), r.s === "*" ? "Whole vault, incl. future spaces" : "Includes future projects"));
+      box.appendChild(desc);
+      list.appendChild(box);
+    });
+    host.appendChild(list);
+    var add = el("button", "btn btn-sm", "Add scope");
+    add.type = "button";
+    add.addEventListener("click", function () { rows.push({ s: "", p: "", sec: "*", perm: "read" }); change(); });
+    host.appendChild(add);
+  }
+
+  function change() { render(); sync(); }
+
+  // ---- summary aside ----
+  function summary() {
+    var box = document.getElementById("sum");
+    if (!box) return;
+    var pr = presetVal();
+    var name = (document.getElementById("name").value || "").trim();
+    var proj = (document.getElementById("project").value || "").trim();
+    var items = [];
+    var risk = "Scoped", rcls = "ok", wild = false;
+    function add(perm, text) { items.push({ perm: perm, text: text }); }
+    if (pr === "master") { add("write", "Read & write everything in the vault, including spaces created later."); risk = "Whole vault"; rcls = "err"; wild = true; }
+    else if (pr === "master-ro") { add("read", "Read everything in the vault, including spaces created later."); risk = "Whole vault"; rcls = "err"; wild = true; }
+    else if (pr === "agent") add("write", "Read & write agents/" + (name || "<name>") + " (its own agent space).");
+    else if (pr === "project") { add("read", "Read the shared meta space."); add("write", "Read & write " + (proj || "<space/project>") + "."); }
+    if (!unbounded(pr)) {
+      rows.filter(valid).forEach(function (r) {
+        add(r.perm, describe(r));
+        if (r.s === "*") { risk = "Whole vault"; rcls = "err"; wild = true; }
+        else if (r.p === "*" || r.sec === "*") { if (risk === "Scoped" && r.p === "*") { risk = "Broad"; rcls = "warn"; } wild = wild || r.p === "*" || r.sec === "*"; }
+      });
+    }
+    box.textContent = "";
+    var head = el("div", "row between");
+    head.appendChild(el("h2", "", "Summary"));
+    head.appendChild(el("span", "badge " + rcls, risk));
+    box.appendChild(head);
+    var who = el("div", "stack g4");
+    who.appendChild(el("span", "hint", "Token"));
+    who.appendChild(el("b", "", name || "Not named yet"));
+    box.appendChild(who);
+    var can = el("div", "stack");
+    can.appendChild(el("span", "hint", "This token can"));
+    if (!items.length) can.appendChild(el("span", "muted", "Nothing yet: pick an access template or add a scope."));
+    items.forEach(function (it) {
+      var r = el("div", "sum-can");
+      r.appendChild(el("span", "permtag p-" + it.perm, permLabel(it.perm)));
+      r.appendChild(el("span", "", it.text));
+      can.appendChild(r);
+    });
+    box.appendChild(can);
+    var wb = document.getElementById("wild-box");
+    var wc = document.getElementById("allow-wildcard");
+    if (wb) wb.hidden = !wild;
+    var submit = document.getElementById("create-btn");
+    if (submit && wc) submit.disabled = wild && !wc.checked;
+    var hint = document.getElementById("wild-hint");
+    if (hint) hint.hidden = !(submit && submit.disabled);
+    var pf = document.getElementById("project-field");
+    if (pf) pf.hidden = pr !== "project";
+    var exp = form.querySelector('input[name="expires_in_days"]:checked');
+    var eb = document.getElementById("exp-hint");
+    if (eb) eb.textContent = exp && exp.value ? "Stops working after " + exp.value + " days. You can always revoke it earlier." : "The token stays valid until you revoke it.";
+    if (wild && exp && !exp.value) {
+      var w = el("div", "note", "Broad access that never expires is the riskiest combination. 90 days is a good default.");
+      box.appendChild(w);
+    }
+  }
+
+  rows = parse(area.value);
+  if (!rows.length) rows.push({ s: "", p: "", sec: "*", perm: "read" });
+  area.addEventListener("input", function () {
+    rows = parse(area.value);
+    if (!rows.length) rows.push({ s: "", p: "", sec: "*", perm: "read" });
+    render();
+    summary();
+  });
+  form.addEventListener("change", function (e) {
+    var t = e.target;
+    if (t && (t.name === "preset" || t.name === "expires_in_days" || t.id === "allow-wildcard")) { render(); sync(); }
+  });
+  ["name", "project"].forEach(function (id) {
+    var n = document.getElementById(id);
+    if (n) n.addEventListener("input", summary);
+  });
+  var details = document.getElementById("lines-details");
+  if (details) details.open = false;
+  host.hidden = false;
+  render();
+  summary();
+})();
 `;

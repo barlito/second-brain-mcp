@@ -82,7 +82,7 @@ Working rules:
 - Notes (except overview, journal, archive) carry a YAML frontmatter: type (decision|convention|note|guide|reference|gotcha; default from the section, fixed in decisions/conventions), sources, author, created, updated. Send content with or without it (without: the existing frontmatter is kept); the server fills author and dates. Recommended: set \`sources\` (list of URLs/refs, max 20) to where the knowledge comes from. kb_search accepts a \`type\` filter.
 - Add journal entries with kb_append (journal/YYYY-MM); it writes one timestamped line.
 - When you add an important note, update the Docs map in overview/index. Keep that note small; move detail elsewhere.
-- Archive instead of delete: kb_archive (needs read and write on the section, plus write on the archive section).
+- Archive instead of delete: kb_archive (needs write on the section (includes read), plus write on the archive section).
 - New project: kb_init_project creates overview/index from a template.
 - If unsure whether something deserves a note, prefer a short journal entry, or use \`kb_propose\` (needs propose or write); the user reviews proposals.
 - Space \`agents\` is per-agent scratch working memory (agents/<agent-name>). Its overview/index is the handover note another agent resumes from: keep it up to date. The server may cap notes and sizes there and auto-archive stale notes; a refused write says what to condense or kb_archive. Durable knowledge belongs in the real project (kb_propose or kb_write), not in agents.

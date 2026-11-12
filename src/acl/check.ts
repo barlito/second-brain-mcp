@@ -17,7 +17,7 @@ export function wellFormed(s: Scope): boolean {
   return ok;
 }
 
-// A scope level matches exactly or via a trailing "*". read, write and propose are independent.
+// A scope level matches exactly or via a trailing "*". write includes read (same space/project/section); propose is independent and read never implies write.
 export function checkScope(
   scopes: Scope[],
   space: string,
@@ -27,7 +27,7 @@ export function checkScope(
 ): boolean {
   return scopes.some(
     (s) =>
-      s.permission === permission &&
+      (s.permission === permission || (permission === "read" && s.permission === "write")) &&
       wellFormed(s) &&
       (s.space === "*" || s.space === space) &&
       (s.project === "*" || s.project === project) &&

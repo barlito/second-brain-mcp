@@ -133,7 +133,7 @@ test("view: rendered is escaped, raw view, size and last commit", async () => {
   assert.equal(r.status, 200);
   assert.match(r.body, /<h1>Foo<\/h1>/);
   assert.doesNotMatch(r.body, /<script>alert/);
-  assert.match(r.body, /last commit <a href="\/vault\/pro\/x\/notes\/foo\/at\/[0-9a-f]{40}\?path=/);
+  assert.match(r.body, /last commit <a class="mono small" href="\/vault\/pro\/x\/notes\/foo\/at\/[0-9a-f]{40}\?path=/);
   assert.match(r.body, /seed pro\/x\/notes\/foo\.md/);
   const raw = await get(`${NOTE}?view=raw`);
   assert.match(raw.body, /<pre># Foo/);
@@ -305,7 +305,7 @@ test("audit viewer: newest first, 50 per page, keyset pagination, filters, valid
   for (let i = 1; i <= 120; i++) {
     logAudit({ tokenId: "t", tokenName: i % 3 === 0 ? "tok-b" : "tok-a", action: i % 2 === 0 ? "kb_write" : "kb_read", result: "ok", detail: `row <${i}>` });
   }
-  const ids = (body: string): number[] => [...body.matchAll(/<td class="mono">(\d+)<\/td><td class="mono">\d{4}-/g)].map((m) => Number(m[1]));
+  const ids = (body: string): number[] => [...body.matchAll(/<tr data-id="(\d+)">/g)].map((m) => Number(m[1]));
   const p1 = await get("/audit");
   assert.equal(p1.status, 200);
   const a = ids(p1.body);
@@ -324,7 +324,7 @@ test("audit viewer: newest first, 50 per page, keyset pagination, filters, valid
 
   const tok = await get("/audit?token=tok-b");
   assert.equal(ids(tok.body).length, 40);
-  assert.doesNotMatch(tok.body, /tok-a<\/td>/);
+  assert.doesNotMatch(tok.body, /title="tok-a"/);
   assert.doesNotMatch(tok.body, /Older entries/);
   const tokA = await get("/audit?token=tok-a");
   assert.equal(ids(tokA.body).length, 50);

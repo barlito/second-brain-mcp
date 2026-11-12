@@ -5,15 +5,15 @@ import { Scope } from "../auth/types";
 import { wellFormed } from "./check";
 
 function readScopes(scopes: Scope[]): Scope[] {
-  return scopes.filter((s) => s.permission === "read" && wellFormed(s));
+  return scopes.filter((s) => (s.permission === "read" || s.permission === "write") && wellFormed(s));
 }
 
-// At least one read scope could match some section in this space.
+// At least one read-or-write scope could match some section in this space.
 export function canReadUnderSpace(scopes: Scope[], space: string): boolean {
   return readScopes(scopes).some((s) => s.space === "*" || s.space === space);
 }
 
-// At least one read scope could match some section in this project.
+// At least one read-or-write scope could match some section in this project.
 export function canReadUnderProject(scopes: Scope[], space: string, project: string): boolean {
   return readScopes(scopes).some(
     (s) => (s.space === "*" || s.space === space) && (s.project === "*" || s.project === project),

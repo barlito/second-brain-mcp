@@ -19,7 +19,7 @@ import { getSyncStatus, redact, refreshConflictBranches } from "../vault/git";
 import { listen } from "../listen";
 import type { Lifecycle, TrustedProxy } from "../server";
 import type { SafeHtml } from "../web/html";
-import { CSS, JS } from "../web/assets";
+import { CSS, JS, THEME_JS } from "../web/assets";
 import {
   Banner,
   Ctx,
@@ -30,10 +30,8 @@ import {
   errorView,
   inboxView,
   proposalView,
-  tokenCreatedView,
-  tokensView,
-  TokenForm,
 } from "../web/views";
+import { EMPTY_TOKEN_FORM, newTokenView, TOKEN_STATUSES, tokenCreatedView, TokenForm, tokensView, TokenStatus } from "../web/tokenViews";
 import { AccessError, approveRequest, auditSessionRevoke, countPendingRequests, denyRequest, listPendingRequests } from "../access";
 import { listActiveSessions, revokeSession } from "../auth/sessions";
 import { ConnectorKeyError, CONNECTOR_HEADER, createConnectorKey, listConnectorKeys, revealConnectorKey, revokeConnectorKey } from "../auth/connectorKeys";
@@ -41,6 +39,7 @@ import { OneTimeStore } from "./onetime";
 import { acceptProposal, AdminError, listInbox, rejectProposal, showProposal } from "./service";
 import { vaultRouter } from "./vaultRoutes";
 import { queryAudit } from "../audit";
+import { isWholeVault } from "../web/views";
 import { auditView } from "../web/auditView";
 
 export const DEFAULT_WEB_PORT = 3002;
@@ -121,7 +120,15 @@ const FLASH_RE = /^[0-9a-f]{32}$/;
 type Flash =
   | { kind: "banner"; banner: Banner }
   | { kind: "ckey"; created: { id: string; name: string; key: string } }
-  | { kind: "token"; created: { id: string; name: string; token: string; expires_at: string | null }; notes: string[]; dir: string };
+  | { kind: "token"; created: { id: string; name: string; token: string; expires_at: string | null }; notes: string[]; dir: string; scopes: Scope[] };
+
+function safeRows<T>(fn: () => T[]): T[] {
+  try {
+    return fn();
+  } catch {
+    return [];
+  }
+}
 
 async function dashboardData(vaultRoot: string): Promise<DashboardData> {
   const vault = vaultOk(vaultRoot);
@@ -164,6 +171,10 @@ async function dashboardData(vaultRoot: string): Promise<DashboardData> {
     pendingProposals: pending,
     pendingAccess: safeCount(countPendingRequests),
     audit24h: count("SELECT COUNT(*) AS n FROM audit_log WHERE ts >= ?", since),
+    denied24h: count("SELECT COUNT(*) AS n FROM audit_log WHERE ts >= ? AND result = 'denied'", since),
+    errors24h: count("SELECT COUNT(*) AS n FROM audit_log WHERE ts >= ? AND result = 'error'", since),
+    wholeVaultTokens: safeCount(() => listTokens().filter((t) => t.kind === "bearer" && !t.revoked_at && !t.expired && isWholeVault(t.scopes)).length),
+    recent: safeRows(() => queryAudit({}).rows.slice(0, 5)),
   };
 }
 
@@ -253,7 +264,12 @@ export function createWebAdminApp(opts: WebAdminOptions): Express {
   const userOf = (res: Response): string => res.locals.user as string;
   const ctxOf = (res: Response): Ctx => {
     const user = userOf(res);
-    return { user, csrf: csrfToken(secret, user, res.locals.session as string), nonce: () => nonces.put(true, user) };
+    return {
+      user,
+      csrf: csrfToken(secret, user, res.locals.session as string),
+      nonce: () => nonces.put(true, user),
+      counts: res.locals.counts as Ctx["counts"],
+    };
   };
   const send = (res: Response, view: SafeHtml, status = 200): void => void res.status(status).type("html").send(view.value);
 
@@ -268,6 +284,26 @@ export function createWebAdminApp(opts: WebAdminOptions): Express {
 
   app.get("/static/style.css", (_req, res) => void res.type("text/css").send(CSS));
   app.get("/static/app.js", (_req, res) => void res.type("application/javascript").send(JS));
+  app.get("/static/theme.js", (_req, res) => void res.type("application/javascript").send(THEME_JS));
+
+  // Sidebar badges (pending proposals / access requests), computed once per request. A failing
+  // source just shows no badge.
+  app.use(async (_req, res, next) => {
+    let inbox: number | null = null;
+    let access: number | null = null;
+    try {
+      inbox = (await listInboxIds(vaultRoot)).length;
+    } catch {
+      /* unsafe or unreadable inbox dir: no badge */
+    }
+    try {
+      access = countPendingRequests();
+    } catch {
+      /* DB trouble: no badge */
+    }
+    res.locals.counts = { inbox, access };
+    next();
+  });
 
   // State-changing requests: same-host Origin/Referer, session-bound CSRF token, then a
   // one-time form nonce (a replayed or duplicate POST is refused).
@@ -313,10 +349,21 @@ export function createWebAdminApp(opts: WebAdminOptions): Express {
   // Project suggestions for the preset field; a vault read error just means no suggestions.
   const knownProjects = (): Promise<string[]> => listAllProjects(vaultRoot).catch(() => []);
 
-  tokensRouter.get("/", async (req, res, next) => {
+  tokensRouter.get("/", (req, res, next) => {
     try {
       const withSessions = req.query.sessions === "1";
-      send(res, tokensView(ctxOf(res), listTokens().filter((t) => withSessions || t.kind !== "session"), takeBanner(req, res), undefined, await knownProjects(), withSessions));
+      const st = str(req.query.status);
+      const status = (TOKEN_STATUSES as string[]).includes(st) ? (st as TokenStatus) : "active";
+      const q = str(req.query.q).slice(0, 100);
+      send(res, tokensView(ctxOf(res), listTokens().filter((t) => withSessions || t.kind !== "session"), { status, q, showSessions: withSessions }, takeBanner(req, res)));
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  tokensRouter.get("/new", async (_req, res, next) => {
+    try {
+      send(res, newTokenView(ctxOf(res), EMPTY_TOKEN_FORM, await knownProjects()));
     } catch (err) {
       next(err);
     }
@@ -330,7 +377,7 @@ export function createWebAdminApp(opts: WebAdminOptions): Express {
       const msg = "This page was already shown or has expired. A token cannot be retrieved again; revoke it and create a new one if it was lost.";
       return void send(res, errorView(ctxOf(res), 404, msg), 404);
     }
-    send(res, tokenCreatedView(ctxOf(res), f.created, f.notes, claudeCommand(f.created.token, f.dir)));
+    send(res, tokenCreatedView(ctxOf(res), f.created, f.notes, claudeCommand(f.created.token, f.dir), f.scopes));
   });
 
   tokensRouter.post("/", async (req, res) => {
@@ -346,7 +393,7 @@ export function createWebAdminApp(opts: WebAdminOptions): Express {
     };
     // Project suggestions are only needed when the form is re-rendered.
     const fail = async (title: string, lines: string[] = []): Promise<void> =>
-      send(res, tokensView(ctxOf(res), listTokens().filter((t) => t.kind !== "session"), { kind: "err", title, lines }, form, await knownProjects()), 422);
+      send(res, newTokenView(ctxOf(res), form, await knownProjects(), { kind: "err", title, lines }), 422);
     try {
       let scopes: Scope[];
       if (form.preset && !isBoundedPreset(form.preset) && form.scopes.trim()) return fail("Use either a preset or explicit scopes, not both.");
@@ -380,7 +427,7 @@ export function createWebAdminApp(opts: WebAdminOptions): Express {
         ...dropped.map((s) => `Dropped redundant scope ${formatScope(s)} (already covered by a wildcard scope).`),
       ];
       // Flash first: nothing after the token exists may lose the one chance to show it.
-      const to = `/tokens/created/${flash.put({ kind: "token", created: { id: created.id, name: created.name, token: created.token, expires_at: created.expires_at ?? null }, notes, dir: form.dir }, userOf(res))}`;
+      const to = `/tokens/created/${flash.put({ kind: "token", created: { id: created.id, name: created.name, token: created.token, expires_at: created.expires_at ?? null }, notes, dir: form.dir, scopes: kept }, userOf(res))}`;
       auditAdmin(res, "admin_token_create", "ok", `${created.id} ${created.name} [${kept.map(formatScope).join(",")}]`);
       res.redirect(303, to);
     } catch (err) {
@@ -427,7 +474,8 @@ export function createWebAdminApp(opts: WebAdminOptions): Express {
       const banner = takeBanner(req, res);
       try {
         const p = await showProposal(vaultRoot, req.params.id as string);
-        send(res, proposalView(ctxOf(res), p, req.query.view === "raw" ? "raw" : "rendered", banner));
+        const list = await listInbox(vaultRoot).catch(() => undefined);
+        send(res, proposalView(ctxOf(res), p, req.query.view === "raw" ? "raw" : "rendered", banner, list));
       } catch (err) {
         if (!(err instanceof AdminError)) throw err;
         send(res, errorView(ctxOf(res), err.status, err.message), err.status);
