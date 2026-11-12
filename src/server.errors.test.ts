@@ -94,14 +94,34 @@ test("SyncConflictError -> conflict message naming the backup branch", async () 
     const r = await callTool(app.baseUrl, token, "kb_write", { ...args, note: "other", content: "x" });
     await drainWrites();
     assert.equal(r.isError, true);
+    // The conflict is on n.md (readable by the token), not on the note being written,
+    // and the caller's own write was never applied.
     assert.match(
       r.text,
-      /^Conflict: this note was changed remotely\. Your version was saved on branch conflict\/\S+\. Re-read the note and retry\.$/,
+      /^Conflict: sp\/proj\/sect\/n\.md was changed remotely while unsynced local changes to it were pending; those conflicting changes were saved on branch conflict\/\S+\. Your write was not applied: re-read the note and retry\.$/,
     );
     assert.doesNotMatch(r.text, /\/tmp|sb-server/);
+    assert.equal(existsSync(join(vault, "sp", "proj", "sect", "other.md")), false);
   } finally {
     await app.close();
   }
+});
+
+test("clientMessage for sync conflicts: own note, unreadable paths counted not named, stash case", async () => {
+  const { clientMessage } = await import("./tools/common");
+  const { SyncConflictError } = await import("./vault/git");
+  const canSee = (p: string): boolean => p.startsWith("sp/");
+  const e = new SyncConflictError("internal", "conflict/x", ["sp/p/s/n.md", "sp/p/s/m.md", "secret/p/s/z.md"], 2);
+  const own = clientMessage(e, { notePath: "sp/p/s/n.md", canSee });
+  assert.match(own, /^Conflict: this note, sp\/p\/s\/m\.md, 1 other note\(s\) was changed remotely/);
+  assert.match(own, /saved on branch conflict\/x\. Other unsynced changes were kept\. Your write was not applied/);
+  assert.doesNotMatch(own, /secret/);
+  const stash = clientMessage(new SyncConflictError("internal", null, ["sp/p/s/n.md"]), { notePath: "sp/p/s/n.md", canSee });
+  assert.equal(
+    stash,
+    "Conflict: uncommitted changes in the vault (this note) conflict with remote changes; they were kept in git stash. Your write was not applied; retry it.",
+  );
+  assert.doesNotMatch(stash, /\(none\)/);
 });
 
 test("anything else -> 'Internal error.' with the real reason (credentials stripped) in audit and log", async () => {

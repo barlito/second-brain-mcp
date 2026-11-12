@@ -63,7 +63,8 @@ export const register: RegisterTool = (server, { vaultRoot }) => {
             mustNotExist: true,
             precheck: () => assertInboxQuota(vaultRoot, ctx.name),
           });
-          return { toolResult: toolText(id), audit: { gitCommit: commitSha, detail: `proposal ${id}` } };
+          // A fresh proposal file always commits; null (nothing committed) must not borrow HEAD's sha.
+          return { toolResult: toolText(id), audit: { gitCommit: commitSha || undefined, detail: `proposal ${id}` } };
         } catch (err) {
           if (err instanceof InboxFullError) return { toolResult: toolError(err.message), audit: { detail: "inbox full" } };
           throw err;

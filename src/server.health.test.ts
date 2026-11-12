@@ -181,9 +181,12 @@ async function conflictedVault(subjects: string[]): Promise<{ vault: string; rem
   await syncWrite(vault, join(vault, "note.md"), "base\n", "base");
   await drainWrites();
   const other = cloneRepo(remote, "other");
-  writeFileSync(join(vault, "note.md"), "local\n");
-  git(["commit", "-am", subjects[0]], vault);
-  for (const subj of subjects.slice(1)) git(["commit", "--allow-empty", "-m", subj], vault);
+  // Every local commit edits note.md, so each one conflicts and stays parked
+  // (non-conflicting commits would be re-applied instead).
+  subjects.forEach((subj, i) => {
+    writeFileSync(join(vault, "note.md"), `local ${i}\n`);
+    git(["commit", "-am", subj], vault);
+  });
   writeFileSync(join(other, "note.md"), "remote\n");
   git(["commit", "-am", "remote edit"], other);
   git(["push"], other);
@@ -223,17 +226,24 @@ test("syncConflictDetail: compact JSON, important fields first, always within th
   assert.deepEqual(small, { origin: "push-retry", branch: "b", ok: false, error: "boom", tokens: [], paths: [], commits: 0 });
 });
 
-test("auditSyncConflict: write-path origin writes no row; background origins do", async () => {
+// Every origin writes a row: on the write path the caller's own audit row only covers
+// its (unapplied) write, while the parked commits may belong to other tokens.
+test("auditSyncConflict: every origin (write path included) writes a row", async () => {
   const { auditSyncConflict } = await import("./server");
   const { db } = await import("./db");
   const count = (): number => (db.prepare("SELECT COUNT(*) AS n FROM audit_log WHERE action = 'sync_conflict'").get() as { n: number }).n;
-  const base = { vaultRoot: "/v", backupBranch: "conflict/x", ok: true, commits: ["a".repeat(40)], tokens: [], paths: [] };
+  const base = { vaultRoot: "/v", backupBranch: "conflict/x", ok: true, commits: ["a".repeat(40)], tokens: ["bob"], paths: [] };
   const n0 = count();
-  auditSyncConflict({ ...base, origin: "write" });
-  assert.equal(count(), n0);
+  auditSyncConflict({ ...base, origin: "write", reapplied: 2 });
+  assert.equal(count(), n0 + 1);
+  const row = lastAudit(db, "action = 'sync_conflict'");
+  const detail = JSON.parse(row.detail!);
+  assert.equal(detail.origin, "write");
+  assert.deepEqual(detail.tokens, ["bob"]);
+  assert.equal(detail.reapplied, 2);
   auditSyncConflict({ ...base, origin: "push-retry" });
   auditSyncConflict({ ...base, origin: "periodic" });
-  assert.equal(count(), n0 + 2);
+  assert.equal(count(), n0 + 3);
 });
 
 test("write-path conflict: event has origin=write, only exact server subjects attribute tokens, emitted before the backup push", async () => {

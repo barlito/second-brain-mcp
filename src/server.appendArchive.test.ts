@@ -195,6 +195,39 @@ test("kb_append enforces the note size limit at the boundary", async () => {
   assert.equal(git(["status", "--porcelain"], vault), "");
 });
 
+test("kb_append refuses a note that is not valid UTF-8 and leaves its bytes alone", async () => {
+  const args = { ...base, section: "journal", note: "latin1" };
+  const rel = "pro/proj/journal/latin1.md";
+  const bytes = Buffer.from("caf\xe9\n", "latin1");
+  writeFileSync(join(vault, rel), bytes);
+  git(["add", rel], vault);
+  git(["commit", "-m", "latin1 seed"], vault);
+  const r = await call(rw, "kb_append", { ...args, entry: "x" });
+  assert.equal(r.isError, true);
+  assert.equal(r.text, "Note is not valid UTF-8; edit it in git.");
+  assert.ok(readFileSync(join(vault, rel)).equals(bytes));
+  assert.equal(lastAudit(db, "token_name = 'agent-rw'").detail, "note not utf-8");
+});
+
+test("kb_write with identical content reports no change, never someone else's commit", async () => {
+  const args = { ...base, section: "notes", note: "same" };
+  const first = await call(rw, "kb_write", { ...args, content: "same\n" });
+  assert.match(first.text, /^[0-9a-f]{40}$/);
+  // Someone else commits after us: HEAD is now their commit.
+  writeFileSync(join(vault, "unrelated.md"), "u\n");
+  git(["add", "unrelated.md"], vault);
+  git(["commit", "-m", "human"], vault);
+  const head = git(["rev-parse", "HEAD"], vault).trim();
+  const again = await call(rw, "kb_write", { ...args, content: "same\n" });
+  assert.equal(again.isError, false);
+  assert.equal(again.text, "No changes (content identical).");
+  assert.equal(git(["rev-parse", "HEAD"], vault).trim(), head);
+  const row = lastAudit(db, "token_name = 'agent-rw'") as ReturnType<typeof lastAudit> & { git_commit: string | null };
+  assert.equal(row.action, "kb_write");
+  assert.equal(row.git_commit, null);
+  assert.equal(row.detail, "no changes (content identical)");
+});
+
 test("kb_append: concurrent entries land in non-decreasing timestamp order", async () => {
   const args = { ...base, section: "journal", note: "order" };
   await Promise.all(Array.from({ length: 12 }, (_, i) => call(rw, "kb_append", { ...args, entry: `e${i}` })));

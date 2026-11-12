@@ -106,13 +106,17 @@ function errText(err: unknown): string {
 
 // ---- errors --------------------------------------------------------------
 
-// The remote changed the same notes as local unpushed work. The local work was
-// moved to a backup branch and the working branch reset to the remote.
+// The remote changed the same notes as local unpushed work. The full local state
+// was saved on a backup branch, the working branch reset to the remote, and the
+// local commits that still applied cleanly were re-applied on top (`reapplied`).
+// Only the conflicting ones are left parked on the backup branch. `paths` are
+// the conflicting paths. The write that hit the conflict was NOT applied.
 export class SyncConflictError extends Error {
   constructor(
     message: string,
     readonly backupBranch: string | null,
     readonly paths: string[],
+    readonly reapplied = 0,
   ) {
     super(message);
     this.name = "SyncConflictError";
@@ -159,9 +163,16 @@ export interface SyncConflictEvent {
   backupBranch: string;
   ok: boolean; // false when recovery failed part-way after the backup branch was created
   error?: string;
-  commits: string[]; // moved commit SHAs, newest first
-  tokens: string[]; // token names parsed from the server's own commit subjects
-  paths: string[];
+  commits: string[]; // parked (not re-applied) commit SHAs, newest first
+  tokens: string[]; // token names parsed from the parked commits' subjects (server's own subjects only)
+  paths: string[]; // conflicting paths
+  parked?: ParkedCommit[]; // parked commits, oldest first
+  reapplied?: number; // local commits that applied cleanly and stay on the branch
+}
+export interface ParkedCommit {
+  sha: string;
+  subject: string;
+  paths: string[]; // paths the commit changed
 }
 type SyncEventHandler = (e: SyncConflictEvent) => void | Promise<void>;
 let syncEventHandler: SyncEventHandler | null = null;
@@ -355,6 +366,11 @@ async function selfHeal(vaultRoot: string): Promise<void> {
     if (!existsSync(marker)) throw new VaultBusyError("vault busy (rebase in progress); try again shortly");
     await abortRebase(vaultRoot);
   }
+  // A cherry-pick left by conflict recovery (we died mid re-apply).
+  if (cherryPickInProgress(vaultRoot)) {
+    if (!existsSync(marker)) throw new VaultBusyError("vault busy (cherry-pick in progress); try again shortly");
+    await runGit(["cherry-pick", "--abort"], vaultRoot).catch(() => undefined);
+  }
   rmSync(marker, { force: true });
 
   const lock = path.join(gitDir(vaultRoot), "index.lock");
@@ -374,29 +390,122 @@ function conflictBranchName(): string {
   return `conflict/${new Date().toISOString().replace(/\.\d+Z$/, "Z").replace(/:/g, "")}`;
 }
 
-// Saves local unpushed commits on a backup branch (pushed best-effort so a
-// human sees it), then resets the working branch to the remote. Never loses
-// uncommitted human changes: --keep, else stash around a hard reset.
+function cherryPickInProgress(vaultRoot: string): boolean {
+  return ["CHERRY_PICK_HEAD", "sequencer"].some((f) => existsSync(path.join(gitDir(vaultRoot), f)));
+}
+
+interface LocalCommit {
+  sha: string;
+  parents: number;
+  subject: string;
+}
+
+// Resets the working branch to `target`. Never loses uncommitted human changes:
+// --keep, else stash around a hard reset.
+async function resetKeepingLocalChanges(vaultRoot: string, target: string): Promise<void> {
+  try {
+    await runGit(["reset", "--keep", target], vaultRoot);
+    return;
+  } catch {
+    /* overlapping local changes: stash around a hard reset */
+  }
+  let stashed = false;
+  try {
+    stashed = !/No local changes/.test(
+      await runGit(["stash", "push", "--include-untracked", "-m", "second-brain conflict recovery"], vaultRoot),
+    );
+  } catch {
+    /* nothing to stash */
+  }
+  await runGit(["reset", "--hard", target], vaultRoot);
+  if (stashed) {
+    try {
+      await runGit(["stash", "pop"], vaultRoot);
+    } catch {
+      await runGit(["reset", "--hard", "HEAD"], vaultRoot).catch(() => undefined);
+      console.error("uncommitted changes could not be re-applied after conflict recovery; kept in git stash");
+    }
+  }
+}
+
+// Re-applies the previously unpushed local commits (oldest first) on the freshly
+// reset branch. A commit that conflicts is aborted and parked; the others stay.
+// On any unexpected failure it falls back to parking everything (branch reset to
+// `target` again); if even that reset fails, what was picked so far stays.
+async function reapplyLocalCommits(
+  vaultRoot: string,
+  target: string,
+  commits: LocalCommit[],
+): Promise<{ parked: Set<string>; conflictPaths: string[] }> {
+  const parked = new Set<string>();
+  const conflictPaths = new Set<string>();
+  const picked: string[] = [];
+  try {
+    // A merge commit cannot be replayed linearly: keep the old behaviour.
+    if (commits.some((c) => c.parents !== 1)) throw new Error("local history contains merge commits");
+    for (const c of commits) {
+      try {
+        // --keep-redundant-commits: a commit the remote already contains still lands
+        // (empty) instead of stopping the pick; --allow-empty: same for empty ones.
+        await runGit(["cherry-pick", "--allow-empty", "--keep-redundant-commits", c.sha], vaultRoot);
+        picked.push(c.sha);
+      } catch (err) {
+        // Refused before starting (dirty index, overlapping local changes...): unexpected.
+        if (!cherryPickInProgress(vaultRoot)) throw err;
+        const unmerged = await unmergedPaths(vaultRoot);
+        await runGit(["cherry-pick", "--abort"], vaultRoot);
+        if (unmerged.length === 0) throw err;
+        parked.add(c.sha);
+        for (const p of unmerged) conflictPaths.add(p);
+      }
+    }
+  } catch (err) {
+    console.error(`conflict recovery: could not re-apply local commits, keeping them all on the backup branch: ${errText(err)}`);
+    if (cherryPickInProgress(vaultRoot)) await runGit(["cherry-pick", "--abort"], vaultRoot).catch(() => undefined);
+    try {
+      await resetKeepingLocalChanges(vaultRoot, target);
+      return { parked: new Set(commits.map((c) => c.sha)), conflictPaths: [] };
+    } catch (resetErr) {
+      console.error(`conflict recovery: reset after failed re-apply failed: ${errText(resetErr)}`);
+      return { parked: new Set(commits.filter((c) => !picked.includes(c.sha)).map((c) => c.sha)), conflictPaths: [] };
+    }
+  }
+  return { parked, conflictPaths: [...conflictPaths] };
+}
+
+async function changedPaths(vaultRoot: string, sha: string): Promise<string[]> {
+  try {
+    return (await runGit(["diff-tree", "--no-commit-id", "--name-only", "-r", "--root", sha], vaultRoot)).split("\n").filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+// Saves the full local state on a backup branch (safety net, pushed best-effort
+// so a human sees it), resets the working branch to the remote, then re-applies
+// the local commits that still apply cleanly. Only the conflicting ones stay
+// parked on the backup branch. Returns null when nothing ended up parked (the
+// backup branch is then deleted again).
 async function recoverFromRebaseConflict(
   vaultRoot: string,
   branch: string,
   paths: string[],
   origin: SyncConflictOrigin,
-): Promise<SyncConflictError> {
+): Promise<SyncConflictError | null> {
   let backup = conflictBranchName();
-  // Commits about to be moved off the branch, for the sync event.
-  let commits: string[] = [];
-  const tokens = new Set<string>();
+  let local: LocalCommit[] = []; // previously unpushed commits, oldest first
+  // False when the local commits could not be listed: nothing is re-applied and
+  // the backup branch is kept (it is then the only copy of that work).
+  let listed = true;
   try {
-    const out = await runGit(["log", "--format=%H%x09%s", `origin/${branch}..HEAD`], vaultRoot);
+    const out = await runGit(["log", "--reverse", "--format=%H%x09%P%x09%s", `origin/${branch}..HEAD`], vaultRoot);
     for (const line of out.split("\n").filter(Boolean)) {
-      const [sha, subject = ""] = line.split("\t");
-      commits.push(sha);
-      const m = TOKEN_SUBJECT_RE.exec(subject);
-      if (m) tokens.add(m[1]);
+      const [sha, parents = "", ...rest] = line.split("\t");
+      local.push({ sha, parents: parents.split(" ").filter(Boolean).length, subject: rest.join("\t") });
     }
   } catch {
-    commits = [];
+    local = [];
+    listed = false;
   }
   try {
     await runGit(["branch", backup, "HEAD"], vaultRoot);
@@ -407,40 +516,62 @@ async function recoverFromRebaseConflict(
   const target = `origin/${branch}`;
   let ok = false;
   let failure: string | undefined;
+  // Until the re-apply ran, everything counts as parked (the old, safe behaviour).
+  let parkedShas = new Set(local.map((c) => c.sha));
+  let conflictPaths = paths;
+  const parkedNow = (): LocalCommit[] => local.filter((c) => parkedShas.has(c.sha));
+  const keepBackup = (): boolean => !ok || !listed || parkedNow().length > 0;
   try {
-    try {
-      await runGit(["reset", "--keep", target], vaultRoot);
-    } catch {
-      let stashed = false;
-      try {
-        stashed = !/No local changes/.test(
-          await runGit(["stash", "push", "--include-untracked", "-m", "second-brain conflict recovery"], vaultRoot),
-        );
-      } catch {
-        /* nothing to stash */
-      }
-      await runGit(["reset", "--hard", target], vaultRoot);
-      if (stashed) {
-        try {
-          await runGit(["stash", "pop"], vaultRoot);
-        } catch {
-          await runGit(["reset", "--hard", "HEAD"], vaultRoot).catch(() => undefined);
-          console.error("uncommitted changes could not be re-applied after conflict recovery; kept in git stash");
-        }
-      }
-    }
+    await resetKeepingLocalChanges(vaultRoot, target);
     ok = true;
+    if (listed) {
+      const r = await reapplyLocalCommits(vaultRoot, target, local);
+      parkedShas = r.parked;
+      if (r.conflictPaths.length > 0) conflictPaths = r.conflictPaths;
+    }
   } catch (err) {
     failure = errText(err);
     throw err;
   } finally {
-    // Backup branch exists: always track it and emit, before any network push.
-    addConflictBranch(vaultRoot, backup);
-    if (ok) st(vaultRoot).unpushed = false;
-    emitSyncEvent({ vaultRoot, origin, backupBranch: backup, ok, error: failure, commits, tokens: [...tokens], paths });
+    const parked = parkedNow();
+    const reapplied = local.length - parked.length;
+    if (ok) st(vaultRoot).unpushed = reapplied > 0;
+    if (keepBackup()) {
+      // Backup branch holds parked work: always track it and emit, before any network push.
+      addConflictBranch(vaultRoot, backup);
+      const details: ParkedCommit[] = [];
+      for (const c of parked) details.push({ sha: c.sha, subject: c.subject, paths: await changedPaths(vaultRoot, c.sha) });
+      const tokens = new Set<string>();
+      for (const c of parked) {
+        const m = TOKEN_SUBJECT_RE.exec(c.subject);
+        if (m) tokens.add(m[1]);
+      }
+      emitSyncEvent({
+        vaultRoot,
+        origin,
+        backupBranch: backup,
+        ok,
+        error: failure,
+        commits: parked.map((c) => c.sha).reverse(),
+        tokens: [...tokens],
+        paths: conflictPaths,
+        parked: details,
+        reapplied,
+      });
+    }
   }
+  const parked = parkedNow();
+  const reapplied = local.length - parked.length;
+  if (!keepBackup()) {
+    // Every local commit re-applied cleanly: nothing is parked, nothing to report.
+    await runGit(["branch", "-D", backup], vaultRoot).catch(() => undefined);
+    console.error(`sync: rebase conflicted but all ${reapplied} local commit(s) re-applied cleanly on ${target}`);
+    return null;
+  }
+  const what = listed ? `${parked.length} conflicting local commit(s)` : "the unpushed local commits";
   console.error(
-    `SYNC CONFLICT: remote changed ${paths.join(", ") || "(unknown paths)"}; local commits saved on branch ${backup}, ${branch} reset to ${target}`,
+    `SYNC CONFLICT: remote changed ${conflictPaths.join(", ") || "(unknown paths)"}; ${what} parked on branch ${backup}` +
+      ` (${parked.map((c) => c.subject).join("; ")}), ${reapplied} re-applied on ${target}`,
   );
   try {
     await runGit(["push", "origin", backup], vaultRoot, NETWORK_TIMEOUT_MS);
@@ -448,9 +579,12 @@ async function recoverFromRebaseConflict(
     console.error(`could not push backup branch ${backup}: ${errText(err)}`);
   }
   return new SyncConflictError(
-    `The remote changed the same note(s) as unsynced changes (${paths.join(", ")}). Your version was saved to branch ${backup}; retry the write.`,
+    `The remote changed ${conflictPaths.join(", ") || "note(s)"} while unsynced local changes to it were pending: ` +
+      `${what} parked on branch ${backup}` +
+      `${reapplied > 0 ? `, ${reapplied} other local commit(s) kept` : ""}. This write was not applied; retry it.`,
     backup,
-    paths,
+    conflictPaths,
+    reapplied,
   );
 }
 
@@ -460,7 +594,7 @@ async function recoverFromStashConflict(vaultRoot: string, paths: string[]): Pro
   await runGit(["reset", "--hard", "HEAD"], vaultRoot);
   console.error(`SYNC CONFLICT: uncommitted changes to ${paths.join(", ")} conflict with the remote; kept in git stash`);
   return new SyncConflictError(
-    `Uncommitted changes in the vault conflict with remote changes (${paths.join(", ")}); they were kept in git stash. Retry the write.`,
+    `Uncommitted changes in the vault (${paths.join(", ")}) conflict with remote changes; they were kept in git stash. This write was not applied; retry it.`,
     null,
     paths,
   );
@@ -490,8 +624,13 @@ export async function pullRebase(
         await abortRebase(vaultRoot); // also restores the autostash
         if (paths.length > 0) {
           const e = await recoverFromRebaseConflict(vaultRoot, branch, paths, origin);
-          recordError(vaultRoot, e);
-          throw e;
+          if (e) {
+            recordError(vaultRoot, e);
+            throw e;
+          }
+          // Everything re-applied cleanly on the remote: a successful pull after all.
+          st(vaultRoot).lastPullAt = new Date().toISOString();
+          return;
         }
       }
       throw err;
@@ -510,7 +649,7 @@ export async function pullRebase(
 // Write-then-rename so a crash mid-write never leaves a half-written note.
 // The temp name is random and opened O_EXCL|O_NOFOLLOW so a planted symlink
 // can't redirect the write.
-export function writeNoteAtomic(vaultRoot: string, absolutePath: string, content: string): void {
+export function writeNoteAtomic(vaultRoot: string, absolutePath: string, content: string | Buffer): void {
   assertSafePath(vaultRoot, absolutePath);
   const dir = path.dirname(absolutePath);
   mkdirSync(dir, { recursive: true });
@@ -525,7 +664,7 @@ export function writeNoteAtomic(vaultRoot: string, absolutePath: string, content
       fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW,
       0o644,
     );
-    writeSync(fd, content);
+    writeSync(fd, typeof content === "string" ? Buffer.from(content, "utf8") : content);
     fsyncSync(fd);
     closeSync(fd);
     fd = undefined;
@@ -537,11 +676,14 @@ export function writeNoteAtomic(vaultRoot: string, absolutePath: string, content
   }
 }
 
+// Returns the new commit's sha, or null when nothing was staged for the path
+// (identical re-write): no commit is made, and HEAD (possibly someone else's
+// commit) is deliberately not reported as ours.
 export async function commitFile(
   vaultRoot: string,
   relativePath: string,
   message: string,
-): Promise<string> {
+): Promise<string | null> {
   await runGit(["add", "--", relativePath], vaultRoot);
   let staged = true;
   try {
@@ -551,10 +693,9 @@ export async function commitFile(
   } catch (err) {
     if ((err as { code?: unknown }).code !== 1) throw err;
   }
-  if (staged) {
-    // Pathspec: never sweep in other staged changes (e.g. a human's drafts).
-    await runGit(["commit", "-m", message, "--", relativePath], vaultRoot);
-  }
+  if (!staged) return null;
+  // Pathspec: never sweep in other staged changes (e.g. a human's drafts).
+  await runGit(["commit", "-m", message, "--", relativePath], vaultRoot);
   return (await runGit(["rev-parse", "HEAD"], vaultRoot)).trim();
 }
 
@@ -769,7 +910,7 @@ export function syncWrite(
   content: string,
   commitMessage: string,
   opts: WriteOptions = {},
-): Promise<{ commitSha: string }> {
+): Promise<WriteResult> {
   return lockedWrite(vaultRoot, absolutePath, () => content, commitMessage, opts);
 }
 
@@ -778,6 +919,21 @@ export class NoteTooLargeError extends Error {
     super(message);
     this.name = "NoteTooLargeError";
   }
+}
+
+// The existing note is not valid UTF-8: appending would have to decode it and
+// would corrupt the invalid bytes (U+FFFD). Such a note must be edited in git.
+export class NoteNotUtf8Error extends Error {
+  constructor() {
+    super("note is not valid UTF-8");
+    this.name = "NoteNotUtf8Error";
+  }
+}
+
+// commitSha is null when the content was identical and nothing was committed.
+// It is "" in the rare case where the commit landed but its sha could not be read back.
+export interface WriteResult {
+  commitSha: string | null;
 }
 
 // Read-modify-write inside the write lock, so concurrent appends never lose
@@ -792,11 +948,13 @@ export function syncAppend(
   maxChars?: number,
   // Validates the resulting content inside the lock; throws to refuse.
   check?: (next: string) => void,
-): Promise<{ commitSha: string }> {
+): Promise<WriteResult> {
   return lockedWrite(
     vaultRoot,
     absolutePath,
-    (prev) => {
+    (raw) => {
+      const prev = raw ? raw.toString("utf8") : "";
+      if (raw && !Buffer.from(prev, "utf8").equals(raw)) throw new NoteNotUtf8Error();
       const t = typeof text === "function" ? text() : text;
       const next = (prev === "" || prev.endsWith("\n") ? prev : prev + "\n") + t.replace(/\n+$/, "") + "\n";
       if (maxChars !== undefined && next.length > maxChars) throw new NoteTooLargeError("note would exceed the size limit");
@@ -854,13 +1012,18 @@ function finishLocked<T>(vaultRoot: string, remote: boolean, value: T): LockedRe
   return { value, push: remote };
 }
 
+async function headOrEmpty(vaultRoot: string): Promise<string> {
+  return (await runGit(["rev-parse", "HEAD"], vaultRoot).catch(() => "")).trim();
+}
+
 function lockedWrite(
   vaultRoot: string,
   absolutePath: string,
-  build: (previous: string) => string,
+  // Gets the note's current raw bytes (null when missing); throws to refuse.
+  build: (previous: Buffer | null) => string,
   commitMessage: string,
   opts: WriteOptions = {},
-): Promise<{ commitSha: string }> {
+): Promise<WriteResult> {
   return withLock(vaultRoot, async () => {
     assertSafePath(vaultRoot, absolutePath);
     const remote = await prepareLocked(vaultRoot);
@@ -869,11 +1032,23 @@ function lockedWrite(
 
     const relativePath = path.relative(vaultRoot, absolutePath);
     const previous = existsSync(absolutePath) ? readFileSync(absolutePath) : null;
-    let commitSha: string;
+    // Built and validated before anything is touched: a refusal leaves the file
+    // (mtime) and the index (a human's staged state) exactly as they were.
+    const next = build(previous);
+    const headBefore = await headOrEmpty(vaultRoot);
+    let commitSha: string | null;
     try {
-      writeNoteAtomic(vaultRoot, absolutePath, build(previous ? previous.toString("utf8") : ""));
+      writeNoteAtomic(vaultRoot, absolutePath, next);
       commitSha = await commitFile(vaultRoot, relativePath, commitMessage);
     } catch (err) {
+      // Roll back only if the commit did not land (git may report an error after
+      // it did, e.g. a failing post-commit hook or a timeout): otherwise the working
+      // tree would disagree with HEAD and the next append would silently revert this write.
+      const headNow = await headOrEmpty(vaultRoot);
+      if (headNow !== headBefore) {
+        console.error(`git write: error after commit landed, keeping it: ${errText(err)}`);
+        return finishLocked(vaultRoot, remote, { commitSha: headNow });
+      }
       await restoreNote(vaultRoot, absolutePath, relativePath, previous);
       throw err;
     }
@@ -956,7 +1131,8 @@ async function restoreNote(
     if (previous === null) {
       if (existsSync(absolutePath) || lstatOrNull(absolutePath)) unlinkSync(absolutePath);
     } else {
-      writeNoteAtomic(vaultRoot, absolutePath, previous.toString("utf8"));
+      // Raw bytes: a note that is not valid UTF-8 must come back byte for byte.
+      writeNoteAtomic(vaultRoot, absolutePath, previous);
     }
   } catch {
     /* best effort */

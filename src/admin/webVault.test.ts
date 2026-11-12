@@ -156,6 +156,21 @@ test("edit: success commits through the write path with a web: message, audited"
   assert.equal(row.git_commit, git(["rev-parse", "HEAD"], vault).trim());
 });
 
+test("edit: identical content -> 'no changes', no commit, audit carries no sha", async () => {
+  const f = await form(`${NOTE}/edit`, `${NOTE}/edit`);
+  const current = read("pro/x/notes/foo.md");
+  const head = git(["rev-parse", "HEAD"], vault).trim();
+  const r = await post(`${NOTE}/edit`, { content: current, base: f.base! }, { nonce: f.nonce });
+  const page = await follow(r);
+  assert.match(page.body, /No changes to foo \(content identical\)/);
+  assert.doesNotMatch(page.body, /Commit [0-9a-f]{7}/);
+  assert.equal(git(["rev-parse", "HEAD"], vault).trim(), head);
+  const row = db.prepare("SELECT * FROM audit_log WHERE action = 'web_note_edit' ORDER BY id DESC LIMIT 1").get() as Record<string, string | null>;
+  assert.equal(row.result, "ok");
+  assert.equal(row.git_commit, null);
+  assert.equal(row.detail, "no changes (content identical)");
+});
+
 test("edit: stale base hash -> 409, nothing overwritten", async () => {
   const a = await form(`${NOTE}/edit`, `${NOTE}/edit`);
   const b = await form(`${NOTE}/edit`, `${NOTE}/edit`);

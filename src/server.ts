@@ -266,6 +266,7 @@ export function syncConflictDetail(e: SyncConflictEvent): string {
       d.first = shortSha(e.commits[e.commits.length - 1]);
       d.last = shortSha(e.commits[0]);
     }
+    if (e.reapplied) d.reapplied = e.reapplied;
     if (more > 0) d.more = more;
     return JSON.stringify(d);
   };
@@ -278,12 +279,11 @@ export function syncConflictDetail(e: SyncConflictEvent): string {
   return out;
 }
 
-// Records an async sync conflict (acknowledged commits moved to a backup
-// branch) in the audit log under a fixed system identity. Synchronous write-path
-// conflicts are already audited by the tool's own row, so only background
-// origins are written here.
+// Records a sync conflict (acknowledged commits parked on a backup branch) in the
+// audit log under a fixed system identity, whatever the origin: on the write path
+// the caller's own row only covers the caller's (unapplied) write, while the parked
+// commits may belong to other tokens.
 export function auditSyncConflict(e: SyncConflictEvent): void {
-  if (e.origin === "write") return;
   try {
     logAudit({
       tokenId: "system",

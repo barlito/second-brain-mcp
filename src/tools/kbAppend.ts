@@ -1,9 +1,18 @@
 import { z } from "zod";
 import { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { resolveNotePath } from "../vault/paths";
-import { NoteTooLargeError, syncAppend } from "../vault/git";
+import { NoteNotUtf8Error, NoteTooLargeError, syncAppend } from "../vault/git";
 import { NoteRuleError, validateNoteContent } from "./conventions";
-import { kbArgsShape, MAX_CONTENT_CHARS, RegisterTool, toolError, toolText, withAclAndAudit } from "./common";
+import {
+  kbArgsShape,
+  MAX_CONTENT_CHARS,
+  NO_CHANGES_MESSAGE,
+  NOTE_NOT_UTF8_MESSAGE,
+  RegisterTool,
+  toolError,
+  toolText,
+  withAclAndAudit,
+} from "./common";
 import { rejectReservedSection } from "./reserved";
 
 export const MAX_ENTRY_CHARS = 1000;
@@ -52,8 +61,12 @@ export const register: RegisterTool = (server, { vaultRoot }) => {
             MAX_CONTENT_CHARS,
             (next) => validateNoteContent({ section, note }, next),
           );
-          return { toolResult: toolText(commitSha), audit: { gitCommit: commitSha } };
+          if (commitSha === null) return { toolResult: toolText(NO_CHANGES_MESSAGE), audit: { detail: "no changes" } };
+          return { toolResult: toolText(commitSha), audit: { gitCommit: commitSha || undefined } };
         } catch (err) {
+          if (err instanceof NoteNotUtf8Error) {
+            return { toolResult: toolError(NOTE_NOT_UTF8_MESSAGE), audit: { detail: "note not utf-8" } };
+          }
           if (err instanceof NoteRuleError) {
             return { toolResult: toolError(err.message), audit: { detail: err.detail } };
           }

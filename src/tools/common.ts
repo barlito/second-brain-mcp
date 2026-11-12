@@ -11,6 +11,11 @@ import { redact, SyncConflictError, VaultBusyError } from "../vault/git";
 
 export const MAX_CONTENT_CHARS = 512 * 1024;
 
+// A write whose content was identical: nothing committed, so no sha to report.
+export const NO_CHANGES_MESSAGE = "No changes (content identical).";
+// Same rule as the web editor (admin/vault NOT_UTF8_MESSAGE): never decode and rewrite such a note.
+export const NOTE_NOT_UTF8_MESSAGE = "Note is not valid UTF-8; edit it in git.";
+
 // Dependencies handed to every tool's register().
 export interface ToolDeps {
   vaultRoot: string;
@@ -71,14 +76,44 @@ export function safeAudit(entry: AuditEntry, tokenName: string): void {
 
 // Maps an internal failure to the message the client may see. The real reason
 // only goes to the audit row and the server log.
-export function clientMessage(err: unknown): string {
+// `notePath` (vault-relative, e.g. "sp/p/s/n.md") is the note the caller targeted;
+// `canSee` decides which conflicting paths may be named (others are only counted).
+export function clientMessage(
+  err: unknown,
+  opts: { notePath?: string; canSee?: (relPath: string) => boolean } = {},
+): string {
   if (err instanceof InvalidSlugError) return "Invalid space/project/section/note name.";
   if (err instanceof UnsafePathError) return "Path not allowed.";
-  if (err instanceof SyncConflictError) {
-    return `Conflict: this note was changed remotely. Your version was saved on branch ${err.backupBranch ?? "(none)"}. Re-read the note and retry.`;
-  }
+  if (err instanceof SyncConflictError) return conflictMessage(err, opts.notePath, opts.canSee ?? (() => true));
   if (err instanceof VaultBusyError) return "Vault is busy, retry in a moment.";
   return "Internal error.";
+}
+
+// A sync conflict is detected while pulling, before the caller's write: that write
+// was never applied. The conflict itself concerns earlier unsynced changes.
+function conflictMessage(err: SyncConflictError, notePath: string | undefined, canSee: (relPath: string) => boolean): string {
+  const own = notePath !== undefined && err.paths.includes(notePath);
+  const others = err.paths.filter((p) => p !== notePath);
+  const shown = others.filter(canSee);
+  const hidden = others.length - shown.length;
+  const named = [...(own ? ["this note"] : []), ...shown, ...(hidden > 0 ? [`${hidden} other note(s)`] : [])];
+  const which = named.length > 0 ? named.join(", ") : "a note";
+  if (err.backupBranch === null) {
+    return `Conflict: uncommitted changes in the vault (${which}) conflict with remote changes; they were kept in git stash. Your write was not applied; retry it.`;
+  }
+  const kept = err.reapplied > 0 ? " Other unsynced changes were kept." : "";
+  return (
+    `Conflict: ${which} was changed remotely while unsynced local changes to it were pending; ` +
+    `those conflicting changes were saved on branch ${err.backupBranch}.${kept} ` +
+    `Your write was not applied: re-read the note and retry.`
+  );
+}
+
+// Vault-relative note path "space/project/section/note.md" -> readable by these scopes?
+export function canReadNotePath(scopes: TokenContext["scopes"], relPath: string): boolean {
+  const parts = relPath.split("/");
+  if (parts.length !== 4 || !parts[3].endsWith(".md")) return false;
+  return checkScope(scopes, parts[0], parts[1], parts[2], "read");
 }
 
 export interface Target {
@@ -135,7 +170,8 @@ export async function withAclAndAudit(
       const reason = redact(errorMessage(err));
       console.error(`tool ${action} failed (token=${ctx.name}): ${reason}`);
       safeAudit({ ...base, result: "error", detail: reason }, ctx.name);
-      return toolError(clientMessage(err));
+      const notePath = `${target.space}/${target.project}/${target.section}/${target.note}.md`;
+      return toolError(clientMessage(err, { notePath, canSee: (p) => canReadNotePath(ctx!.scopes, p) }));
     }
   } catch (err) {
     // Missing token context or similar wiring bug: log it, never leak it.

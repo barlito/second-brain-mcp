@@ -1,6 +1,6 @@
 import { resolveNotePath } from "../vault/paths";
 import { NoteExistsError, syncWrite } from "../vault/git";
-import { toolError, toolText, ToolRunResult } from "./common";
+import { NO_CHANGES_MESSAGE, toolError, toolText, ToolRunResult } from "./common";
 import { NoteRuleError, validateNoteContent } from "./conventions";
 
 // Shared write path (kb_write, kb_init_project): content rules, then path
@@ -16,7 +16,9 @@ export async function writeNote(
     validateNoteContent(target, content);
     const absolutePath = resolveNotePath(vaultRoot, target.space, target.project, target.section, target.note);
     const { commitSha } = await syncWrite(vaultRoot, absolutePath, content, commitMessage, opts);
-    return { toolResult: toolText(commitSha), audit: { gitCommit: commitSha } };
+    // Identical content: nothing was committed; never report HEAD (someone else's commit) as ours.
+    if (commitSha === null) return { toolResult: toolText(NO_CHANGES_MESSAGE), audit: { detail: "no changes (content identical)" } };
+    return { toolResult: toolText(commitSha), audit: { gitCommit: commitSha || undefined } };
   } catch (err) {
     if (err instanceof NoteRuleError) {
       return { toolResult: toolError(err.message), audit: { detail: err.detail } };

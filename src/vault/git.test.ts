@@ -33,6 +33,7 @@ import {
   MoveSourceDirtyError,
   MoveSourceMissingError,
   NoteTooLargeError,
+  NoteNotUtf8Error,
   MoveTargetExistsError,
   writeNoteAtomic,
 } from "./git";
@@ -61,9 +62,9 @@ test("writeNoteAtomic + commitFile produce a real commit", async () => {
   assert.equal(readFileSync(abs, "utf8"), "# hello\n");
   assert.equal(sha, git(["rev-parse", "HEAD"], repo).trim());
   assert.match(git(["log", "--oneline", "-1"], repo), /add note/);
-  // identical content again: nothing to commit, returns HEAD
+  // identical content again: nothing to commit, reports no commit (not HEAD)
   writeNoteAtomic(repo, abs, "# hello\n");
-  assert.equal(await commitFile(repo, "note.md", "noop"), sha);
+  assert.equal(await commitFile(repo, "note.md", "noop"), null);
   assert.deepEqual(readdirSync(repo).filter((f) => f.includes(".tmp-")), []);
 });
 
@@ -100,7 +101,7 @@ test("a failing locked operation does not wedge the queue", async () => {
   const failing = syncWrite(repo, join(outside, "x.md"), "x", "bad");
   const ok = syncWrite(repo, join(repo, "ok.md"), "ok\n", "good");
   await assert.rejects(failing);
-  assert.match((await ok).commitSha, /^[0-9a-f]{40}$/);
+  assert.match((await ok).commitSha ?? "", /^[0-9a-f]{40}$/);
   await drainWrites();
 });
 
@@ -231,12 +232,113 @@ test("conflicting diverged remote: backup branch keeps local commit, branch rese
   assert.equal(git(["show", "main:other.md"], remote), "o\n");
 });
 
+test("conflict recovery parks only the conflicting local commits; clean ones are re-applied and pushed", async () => {
+  const { vault, remote } = newVaultWithRemote();
+  await syncWrite(vault, join(vault, "note.md"), "base\n", "base");
+  await drainWrites();
+  const other = otherClone(remote);
+  // Unpushed local commits: clean, conflicting, clean.
+  writeFileSync(join(vault, "b1.md"), "b1\n");
+  git(["add", "b1.md"], vault);
+  git(["commit", "-m", "kb_write: sp/p/s/b1 via alice"], vault);
+  writeFileSync(join(vault, "note.md"), "local\n");
+  git(["commit", "-am", "kb_write: sp/p/s/note via bob"], vault);
+  const conflicting = git(["rev-parse", "HEAD"], vault).trim();
+  writeFileSync(join(vault, "b2.md"), "b2\n");
+  git(["add", "b2.md"], vault);
+  git(["commit", "-m", "kb_write: sp/p/s/b2 via carol"], vault);
+  const before = git(["rev-parse", "HEAD"], vault).trim();
+  writeFileSync(join(other, "note.md"), "remote\n");
+  git(["commit", "-am", "remote edit"], other);
+  git(["push"], other);
+
+  const { setSyncEventHandler } = await import("./git");
+  const events: import("./git").SyncConflictEvent[] = [];
+  setSyncEventHandler((e) => void events.push(e));
+  const orig = console.error;
+  console.error = () => undefined;
+  let err: unknown;
+  try {
+    err = await syncWrite(vault, join(vault, "x.md"), "x\n", "x").catch((e) => e);
+  } finally {
+    console.error = orig;
+    setSyncEventHandler(null);
+  }
+  await drainWrites();
+  assert.ok(err instanceof SyncConflictError);
+  const e = err as SyncConflictError;
+  assert.deepEqual(e.paths, ["note.md"]);
+  assert.equal(e.reapplied, 2);
+  assert.match(e.message, /1 conflicting local commit\(s\) parked.*2 other local commit\(s\) kept.*not applied/);
+  // Safety net: the backup branch holds the full pre-reset state.
+  assert.equal(git(["rev-parse", e.backupBranch!], vault).trim(), before);
+  // Branch: remote + the two clean commits, in order; the conflicting one is not there.
+  assert.deepEqual(git(["log", "--format=%s", "origin/main..HEAD"], vault).trim().split("\n"), [
+    "kb_write: sp/p/s/b2 via carol",
+    "kb_write: sp/p/s/b1 via alice",
+  ]);
+  assert.equal(readFileSync(join(vault, "note.md"), "utf8"), "remote\n");
+  assert.equal(readFileSync(join(vault, "b1.md"), "utf8"), "b1\n");
+  assert.equal(git(["status", "--porcelain"], vault), "");
+  assert.equal(existsSync(join(vault, "x.md")), false, "the triggering write was not applied");
+  assert.equal(getSyncStatus(vault).unpushed, true);
+  // Event lists only the parked commit.
+  assert.equal(events.length, 1);
+  assert.deepEqual(events[0].commits, [conflicting]);
+  assert.deepEqual(events[0].tokens, ["bob"]);
+  assert.equal(events[0].reapplied, 2);
+  assert.deepEqual(events[0].parked, [{ sha: conflicting, subject: "kb_write: sp/p/s/note via bob", paths: ["note.md"] }]);
+
+  // The retry lands and pushes the re-applied commits too.
+  await syncWrite(vault, join(vault, "x.md"), "x\n", "x");
+  await drainWrites();
+  assert.equal(git(["show", "main:b1.md"], remote), "b1\n");
+  assert.equal(git(["show", "main:b2.md"], remote), "b2\n");
+  assert.equal(git(["show", "main:note.md"], remote), "remote\n");
+});
+
+test("conflict recovery falls back to parking everything when local history cannot be replayed (merge)", async () => {
+  const { vault, remote } = newVaultWithRemote();
+  await syncWrite(vault, join(vault, "note.md"), "base\n", "base");
+  await drainWrites();
+  const other = otherClone(remote);
+  git(["checkout", "-q", "-b", "side"], vault);
+  writeFileSync(join(vault, "side.md"), "s\n");
+  git(["add", "side.md"], vault);
+  git(["commit", "-m", "side"], vault);
+  git(["checkout", "-q", "main"], vault);
+  writeFileSync(join(vault, "note.md"), "local\n");
+  git(["commit", "-am", "local edit"], vault);
+  git(["merge", "-q", "--no-ff", "-m", "merge side", "side"], vault);
+  const before = git(["rev-parse", "HEAD"], vault).trim();
+  writeFileSync(join(other, "note.md"), "remote\n");
+  git(["commit", "-am", "remote edit"], other);
+  git(["push"], other);
+
+  const orig = console.error;
+  console.error = () => undefined;
+  let err: unknown;
+  try {
+    err = await syncWrite(vault, join(vault, "x.md"), "x\n", "x").catch((e) => e);
+  } finally {
+    console.error = orig;
+  }
+  await drainWrites();
+  assert.ok(err instanceof SyncConflictError);
+  assert.equal((err as SyncConflictError).reapplied, 0);
+  assert.equal(git(["rev-parse", (err as SyncConflictError).backupBranch!], vault).trim(), before);
+  assert.equal(git(["rev-parse", "HEAD"], vault).trim(), git(["rev-parse", "origin/main"], vault).trim());
+  assert.equal(existsSync(join(vault, ".git", "CHERRY_PICK_HEAD")), false);
+  assert.equal(git(["status", "--porcelain"], vault), "");
+});
+
 test("identical re-write succeeds even with untracked files present", async () => {
   const repo = newRepo();
   const { commitSha } = await syncWrite(repo, join(repo, "a.md"), "a\n", "a");
   writeFileSync(join(repo, "untracked.txt"), "u\n");
   const again = await syncWrite(repo, join(repo, "a.md"), "a\n", "a again");
-  assert.equal(again.commitSha, commitSha);
+  assert.ok(commitSha);
+  assert.equal(again.commitSha, null); // nothing committed: HEAD is not reported as ours
   assert.equal(git(["rev-list", "--count", "HEAD"], repo).trim(), "1");
 });
 
@@ -762,5 +864,76 @@ test("syncMove: a failed commit (hook) rolls the move back", async () => {
   await assert.rejects(syncMove(repo, a, join(repo, "z", "a.md"), "mv"));
   assert.equal(readFileSync(a, "utf8"), "A\n");
   assert.equal(existsSync(join(repo, "z", "a.md")), false);
+  assert.equal(git(["status", "--porcelain"], repo), "");
+});
+
+// ---- write path: commit-landed guard, validation before touching, raw bytes ----
+
+test("lockedWrite: an error reported after the commit landed keeps the write (no silent revert)", async () => {
+  const repo = newRepo();
+  const abs = join(repo, "j.md");
+  await syncAppend(repo, abs, "- one", "a1");
+  // `git commit` succeeds but then reports a failure (as a post-commit hook timeout would).
+  const cp = require("node:child_process");
+  const real = cp.execFile;
+  cp.execFile = (file: string, args: string[], opts: unknown, cb: (...a: unknown[]) => void) =>
+    real(file, args, opts, (err: unknown, stdout: string, stderr: string) =>
+      args[0] === "commit" && !err
+        ? cb(Object.assign(new Error("post-commit timed out"), { stdout, stderr }), stdout, stderr)
+        : cb(err, stdout, stderr),
+    );
+  const orig = console.error;
+  console.error = () => undefined;
+  let r: { commitSha: string | null };
+  try {
+    r = await syncAppend(repo, abs, "- two", "a2");
+  } finally {
+    cp.execFile = real;
+    console.error = orig;
+  }
+  const head = git(["rev-parse", "HEAD"], repo).trim();
+  assert.equal(r.commitSha, head);
+  assert.equal(git(["show", "HEAD:j.md"], repo), "- one\n- two\n");
+  assert.equal(readFileSync(abs, "utf8"), "- one\n- two\n", "working tree matches HEAD");
+  assert.equal(git(["status", "--porcelain"], repo), "");
+  await syncAppend(repo, abs, "- three", "a3");
+  assert.equal(git(["show", "HEAD:j.md"], repo), "- one\n- two\n- three\n", "next append does not revert");
+});
+
+test("syncAppend: a refused append (size/check) leaves the file and a human's staged state untouched", async () => {
+  const repo = newRepo();
+  const abs = join(repo, "n.md");
+  await syncWrite(repo, abs, "a\n", "a");
+  writeFileSync(abs, "a\nstaged by a human\n");
+  git(["add", "n.md"], repo);
+  const old = new Date(Date.now() - 3600_000);
+  utimesSync(abs, old, old);
+  const mtime = lstatSync(abs).mtimeMs;
+  await assert.rejects(syncAppend(repo, abs, "y".repeat(50), "a", 20), NoteTooLargeError);
+  await assert.rejects(
+    syncAppend(repo, abs, "z", "a", undefined, () => {
+      throw new Error("rule");
+    }),
+    /rule/,
+  );
+  assert.equal(lstatSync(abs).mtimeMs, mtime);
+  assert.equal(git(["diff", "--cached", "--name-only"], repo).trim(), "n.md", "staged change kept");
+  assert.equal(git(["show", ":n.md"], repo), "a\nstaged by a human\n");
+});
+
+test("non-UTF-8 note: append is refused and bytes kept; a failed overwrite restores the raw bytes", async () => {
+  const repo = newRepo();
+  const abs = join(repo, "bin.md");
+  const bytes = Buffer.from([0x68, 0x69, 0xff, 0xfe, 0x0a, 0xc3, 0x28, 0x0a]);
+  writeFileSync(abs, bytes);
+  git(["add", "."], repo);
+  git(["commit", "-m", "seed"], repo);
+  await assert.rejects(syncAppend(repo, abs, "x", "a"), NoteNotUtf8Error);
+  assert.ok(readFileSync(abs).equals(bytes));
+  // Failed commit (hook) on an overwrite: restore must write the original bytes back.
+  const hook = join(repo, ".git", "hooks", "pre-commit");
+  writeFileSync(hook, "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+  await assert.rejects(syncWrite(repo, abs, "replaced\n", "w"));
+  assert.ok(readFileSync(abs).equals(bytes), "raw bytes restored, no U+FFFD");
   assert.equal(git(["status", "--porcelain"], repo), "");
 });
