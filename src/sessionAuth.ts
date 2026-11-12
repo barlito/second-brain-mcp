@@ -4,8 +4,10 @@
 //    token-less clients into OAuth discovery);
 //  - a small body cap, parsed before anything else happens;
 //  - an allowlist of JSON-RPC methods; the rest is refused before a session is even looked up;
-//  - no vault access beyond the read-only baseline scopes (default meta read, auth/baseline.ts): tools/call is
-//    fenced centrally (tools/common auditedCall) until a grant or a baseline scope exists.
+//  - no vault access beyond the read-only baseline scopes (default meta read, auth/baseline.ts): until a
+//    grant exists, tools/call is fenced centrally (tools/common auditedCall) to the access tools and the
+//    read-only tools. A session with only the baseline still follows the grantless expiry (1 h idle,
+//    ANON_SESSION_MAX_HOURS); the client re-initializes on 404.
 import express, { NextFunction, Request, Response } from "express";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { TokenContext, tokenContextStorage } from "./auth/context";
@@ -33,7 +35,7 @@ function contextFor(s: LiveSession, ip: string | undefined, requests: RateLimite
     name: last?.name ?? `session-${clientSlug(s.clientName)}`,
     scopes: [...baseline, ...s.grants.flatMap((g) => g.scopes)],
     clientIp: ip,
-    session: { id: s.id, clientName: s.clientName, grants: s.grants, allowRequest: () => requests.hit(ipKey(ip)) },
+    session: { id: s.id, clientName: s.clientName, grants: s.grants, baselineName: `session-${clientSlug(s.clientName)}`, allowRequest: () => requests.hit(ipKey(ip)) },
   };
 }
 

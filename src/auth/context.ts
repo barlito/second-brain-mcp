@@ -12,6 +12,8 @@ export interface SessionInfo {
   id: string; // internal row id, safe to log (NOT the secret Mcp-Session-Id)
   clientName: string;
   grants: SessionGrant[];
+  // Audit name of the session itself (`session-<client>`), used when no grant covers a call.
+  baselineName?: string;
   // Per-IP budget for access requests; false = over the limit.
   allowRequest?: () => boolean;
 }
@@ -52,6 +54,8 @@ export function attribute(ctx: TokenContext, target: { space?: string; project?:
   if (!grants || grants.length === 0) return ctx;
   const covers = (g: SessionGrant, specific: boolean): boolean =>
     g.scopes.some((s) => lvl(s.space, target.space) && lvl(s.project, target.project) && lvl(s.section, target.section) && (!specific || s.project !== "*"));
-  const g = grants.find((x) => covers(x, true)) ?? grants.find((x) => covers(x, false)) ?? grants[0];
+  const g = grants.find((x) => covers(x, true)) ?? grants.find((x) => covers(x, false));
+  // No grant covers it (e.g. a meta read allowed by the baseline only): sign with the session itself.
+  if (!g) return { ...ctx, tokenId: `session:${ctx.session!.id}`, name: ctx.session!.baselineName ?? ctx.name };
   return g.tokenId === ctx.tokenId ? ctx : { ...ctx, tokenId: g.tokenId, name: g.name };
 }

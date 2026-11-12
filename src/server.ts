@@ -387,12 +387,14 @@ export function createApp(opts: AppOptions): Express {
       const uc = await buildUserContext(vaultRoot, ctx.scopes);
       userContext = uc.text;
       if (uc.notes.length) safeAudit({ tokenId: ctx.tokenId, tokenName: ctx.name, action: "user_context", result: "ok", space: "meta", detail: uc.notes.join(" ").slice(0, 200), clientIp: ctx.clientIp }, ctx.name);
+      // The client may have gone away during the read: nothing to answer, nothing to clean up yet.
+      if (res.destroyed || req.socket.destroyed) return;
     }
     const server = createMcpServer(vaultRoot, userContext);
     let transport: StreamableHTTPServerTransport | undefined;
     let cleanedUp = false;
 
-    // Registered right after transport creation (before any await) so a client
+    // Registered right after transport creation (before any await after the user context) so a client
     // disconnect while handleRequest is pending is never missed; also reachable
     // from the catch block. Guarded so it is safe to run from both places.
     const cleanup = () => {

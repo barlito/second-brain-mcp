@@ -240,9 +240,12 @@ export async function auditedCall(
       clientIp: c.clientIp,
     };
 
-    // Central fence for token-less sessions: until a grant exists only the two access tools run, so a
-    // future tool can never serve an unauthenticated session by forgetting its own gate.
-    const refused = c.session && c.scopes.length === 0 && !SESSION_ONLY_ACTIONS.has(action) ? NO_ACCESS : gate(c);
+    // Central fence for token-less sessions: until a grant exists only the two access tools run, plus the
+    // read-only tools when a baseline (auth/baseline.ts) gives scopes. Keyed on grants, not scopes, so a
+    // future tool can never serve an unapproved session by forgetting its own gate.
+    const noGrant = c.session !== undefined && c.session.grants.length === 0;
+    const fenced = noGrant && !SESSION_ONLY_ACTIONS.has(action) && !(c.scopes.length > 0 && BASELINE_READ_ACTIONS.has(action));
+    const refused = fenced ? NO_ACCESS : gate(c);
     if (refused) {
       // Repeated no-grant refusals of one session are one audit row per minute (with a count), so a
       // token-less client cannot grow the audit log by hammering tools.
@@ -279,6 +282,9 @@ const NO_ACCESS: GateRefusal = { result: "denied", message: NO_ACCESS_MESSAGE, d
 const noAccessAudit = new Coalescer();
 // Tools a session without any grant may call.
 export const SESSION_ONLY_ACTIONS: ReadonlySet<string> = new Set(["kb_request_access", "kb_access_status"]);
+// Read-only tools a session without any grant may also call when it holds baseline scopes (each still
+// applies its own ACL gate). A new tool is refused to such sessions until it is listed here.
+export const BASELINE_READ_ACTIONS: ReadonlySet<string> = new Set(["kb_read", "kb_list", "kb_search", "kb_history"]);
 
 export const INVALID_NAME = "Invalid space/project/section/note name.";
 export const PERMISSION_DENIED = "Permission denied.";

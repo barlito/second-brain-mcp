@@ -2,6 +2,8 @@
 // "User context" (meta entry notes) appended to the instructions on initialize.
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
+import { mkdirSync, symlinkSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { cleanup, makeTempDb, makeTempVault } from "./test-support/fixtures";
 import { listen } from "./test-support/server";
 
@@ -110,8 +112,24 @@ test("with a baseline, a session without any grant reads meta but nothing else, 
   const other = await call(base, h, "kb_read", { space: "sp", project: "proj-a", section: "notes", note: "n1" });
   assert.equal(other.isError, true);
   assert.match(other.text, /Permission denied\. For another project, call kb_request_access\./);
-  const write = await call(base, h, "kb_write", { space: "meta", project: "profil", section: "notes", note: "outils", content: "x" });
-  assert.equal(write.isError, true);
+  // Writing tools are fenced before their own gate (no grant): the access hint, never a write.
+  const target = { space: "meta", project: "profil", section: "notes", note: "outils" };
+  for (const [name, args] of [
+    ["kb_write", { ...target, content: "x" }],
+    ["kb_append", { ...target, entry: "x" }],
+    ["kb_propose", { ...target, content: "x" }],
+    ["kb_archive", target],
+    ["kb_init_project", { space: "meta", project: "neuf", summary: "x" }],
+  ] as const) {
+    const r = await call(base, h, name, args);
+    assert.equal(r.isError, true, name);
+    assert.match(r.text, /No access for this session/, name);
+  }
+  // Read-only tools work under the baseline.
+  const found = await call(base, h, "kb_search", { query: "tooling" });
+  assert.equal(found.isError, false, found.text);
+  assert.match(found.text, /meta\/profil\/notes\/outils/);
+  assert.doesNotMatch(found.text, /proj-a/);
   const spaces = await call(base, h, "kb_list", {});
   assert.equal(spaces.text.trim(), "meta");
   // The access tools still work alongside the baseline.
@@ -133,7 +151,11 @@ test("initialize appends the readable meta entry notes as a User context, for se
   const { instructions } = await connect(withBaseline.baseUrl);
   assert.match(instructions, /kb_request_access/);
   assert.match(instructions, /User context: /);
-  assert.match(instructions, /### meta\/profil\/overview\/index\n\n# profil\n\nRéponses en français, commits en anglais\./);
+  const m = /\[note meta\/profil\/overview\/index ([0-9a-f]{12})\]\n# profil\n\nRéponses en français, commits en anglais\.\n\[end ([0-9a-f]{12})\]/.exec(instructions);
+  assert.ok(m, instructions);
+  assert.equal(m[1], m[2]);
+  // The marker is drawn per response, so a note cannot guess it.
+  assert.doesNotMatch((await connect(withBaseline.baseUrl)).instructions, new RegExp(m[1]));
   assert.doesNotMatch(instructions, /tooling prefs|secret of proj-a/, "only entry notes, only meta");
   const b = await rpc(without.baseUrl, INIT, bearer());
   assert.match(b.json.result.instructions, /Réponses en français/);
@@ -164,6 +186,41 @@ test("the User context stays within its size budget and names the entry notes it
   const { instructions } = await connect(withBaseline.baseUrl);
   const ctx = instructions.slice(instructions.indexOf("User context: "));
   assert.ok(Buffer.byteLength(ctx) < USER_CONTEXT_MAX_BYTES + 1024, `context too large: ${Buffer.byteLength(ctx)}`);
-  assert.match(ctx, /### meta\/profil\/overview\/index/);
-  assert.match(ctx, /Not included \(size budget\), read them with kb_read: meta\/z3\/overview\/index\./);
+  assert.match(ctx, /\[note meta\/profil\/overview\/index /);
+  assert.match(ctx, /Not included \(size budget\), read them with kb_read if needed: meta\/z3\/overview\/index\./);
+});
+
+test("symlinked meta projects or entry notes never reach the User context; a non-meta baseline gives none", async () => {
+  const { buildUserContext } = await import("./userContext");
+  writeFileSync(join(vault, "secret.md"), "outside secret\n");
+  symlinkSync(join(vault, "sp", "proj-a"), join(vault, "meta", "lien"));
+  mkdirSync(join(vault, "meta", "fichier-lien", "overview"), { recursive: true });
+  symlinkSync(join(vault, "secret.md"), join(vault, "meta", "fichier-lien", "overview", "index.md"));
+  const meta = [{ space: "meta", project: "*", section: "*", permission: "read" as const }];
+  const uc = await buildUserContext(vault, meta);
+  assert.ok(uc.notes.includes("meta/profil/overview/index"));
+  assert.doesNotMatch(uc.text, /outside secret|lien/);
+  assert.deepEqual(await buildUserContext(vault, [{ space: "idees", project: "x", section: "*", permission: "read" }]), { text: "", notes: [] });
+});
+
+test("baseline + grant: scopes add up, and a meta read the grant does not cover is signed by the session itself", async () => {
+  const access = await import("./access");
+  const base = withBaseline.baseUrl;
+  const { sid } = await connect(base);
+  const h = anon(base, sid);
+  const req = await call(base, h, "kb_request_access", { space: "sp", project: "proj-a", access: "read", reason: "work" });
+  const code = /Code: ([A-Z0-9]{6})/.exec(req.text)![1];
+  access.approveRequest(code, { actor: "admin:test", scopes: [{ space: "sp", project: "proj-a", section: "*", permission: "read" }] });
+  const a = await call(base, h, "kb_read", { space: "sp", project: "proj-a", section: "notes", note: "n1" });
+  assert.equal(a.isError, false, a.text);
+  const m = await call(base, h, "kb_read", { space: "meta", project: "profil", section: "notes", note: "outils" });
+  assert.equal(m.isError, false, m.text);
+  const rows = db.prepare("SELECT token_name, space FROM audit_log WHERE action = 'kb_read' ORDER BY rowid DESC LIMIT 2").all() as Array<{ token_name: string; space: string }>;
+  assert.equal(rows[0].space, "meta");
+  assert.equal(rows[0].token_name, "session-claude-code");
+  assert.equal(rows[1].space, "sp");
+  assert.match(rows[1].token_name, /^session-claude-code-sp-proj-a/);
+  // Writes stay refused: the grant is read-only and the baseline never writes.
+  const w = await call(base, h, "kb_write", { space: "meta", project: "profil", section: "notes", note: "outils", content: "x" });
+  assert.equal(w.isError, true);
 });
