@@ -72,7 +72,7 @@ All note-addressed tools take `space`, `project`, `section`, `note` (strings, ma
 
 ### `kb_write`
 
-- Args: the four names plus `content` (string, max 512 x 1024 = 524288 characters, not bytes; more is rejected with ``Invalid argument `content`: too large (max 512 KB).`` (every argument that fails validation gets an `Invalid argument `<name>`: ...` message and an audit row)). Written verbatim.
+- Args: the four names plus `content` (string, max 512 x 1024 = 524288 characters, not bytes; more is rejected with ``Invalid argument `content`: too large (max 512 KB).`` (every argument that fails validation gets an ``Invalid argument `<name>`: ...`` message and an audit row)). Written verbatim.
 - Permission: `write` on the section.
 - Creates or overwrites the note and returns the git commit SHA. Rewriting identical content makes no commit and returns `No changes (content identical).` Commit message: `kb_write: <space>/<project>/<section>/<note> via <token name>`.
 - Errors: ``Section `archive` is managed by kb_archive and cannot be written directly.``; for `overview/index` over 3 KB: `overview/index is too large (<n> bytes, max 3072). The entry note must stay small: move detail into other sections (decisions, conventions, notes) and link to those notes from the Docs map.`
