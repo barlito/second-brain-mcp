@@ -27,7 +27,7 @@ const NETWORK_TIMEOUT_MS = 30_000;
 // Env override exists for tests.
 const DEFAULT_PUSH_DEADLINE_MS = 150_000;
 const PUSH_RETRIES = 3;
-const PUSH_BACKOFF_MS = 1000;
+const DEFAULT_PUSH_BACKOFF_MS = 1000;
 // After a network error, writes skip their pre-write pull for this long so a
 // dead remote does not cost every write a network timeout. Env override for tests.
 const DEFAULT_NET_COOLDOWN_MS = 60_000;
@@ -41,6 +41,12 @@ const REBASE_MARKER = "second-brain-rebase";
 // index.lock. If it is still there at startup, the previous process died
 // mid-operation and any index.lock is ours to remove.
 const OP_MARKER = "second-brain-op";
+
+// Env override for tests (keeps retry tests fast).
+function pushBackoffMs(): number {
+  const n = Number(process.env.SB_PUSH_BACKOFF_MS);
+  return Number.isFinite(n) && n > 0 ? n : DEFAULT_PUSH_BACKOFF_MS;
+}
 
 function pushDeadlineMs(): number {
   return Number(process.env.SB_PUSH_DEADLINE_MS) || DEFAULT_PUSH_DEADLINE_MS;
@@ -762,7 +768,7 @@ async function pushWithRetry(vaultRoot: string): Promise<boolean> {
     } catch (err) {
       lastErr = err;
       if (classify(err) === "network") markNetDown(vaultRoot);
-      if (attempt < PUSH_RETRIES) await sleep(PUSH_BACKOFF_MS * attempt, signal);
+      if (attempt < PUSH_RETRIES) await sleep(pushBackoffMs() * attempt, signal);
     }
   }
   if (signal.aborted && !lastErr) lastErr = new Error(pushAbort.signal.aborted ? "push aborted (shutdown)" : "push deadline exceeded");
