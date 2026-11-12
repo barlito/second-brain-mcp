@@ -4,8 +4,28 @@ on:
   release:
     types: [published]
 
+permissions:
+  contents: read
+
+# One build per tag; never cancel a push half-way
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
 jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      # Same rule as deploy.yaml/rollback.yaml: only vX.Y.Z[-suffix] tags are deployable
+      - name: Require a semver tag
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-.][A-Za-z0-9.]+)?$ ]] \
+            || { echo "::error::invalid release tag '$TAG' (expected vX.Y.Z[-suffix])"; exit 1; }
+
   test:
+    needs: validate
     uses: ./.github/workflows/ci.yml
 
   release:

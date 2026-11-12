@@ -37,7 +37,7 @@ before(async () => {
     .token;
 
   await new Promise<void>((resolve) => {
-    server = createApp({ vaultRoot }).listen(0, resolve);
+    server = createApp({ vaultRoot }).listen(0, () => resolve());
   });
   port = (server.address() as AddressInfo).port;
 });

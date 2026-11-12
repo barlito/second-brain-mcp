@@ -154,3 +154,43 @@ test("CLI: --expires-in-days is stored, shown by list, and validated", () => {
     assert.match(r.stderr, /1 and 3650/);
   }
 });
+
+test("CLI: create and revoke are audited as cli; revoking an unknown id exits 1", async () => {
+  const { db } = await import("../db");
+  const run = (...args: string[]) =>
+    spawnSync(process.execPath, ["--import", "tsx", join(__dirname, "token.ts"), ...args], {
+      env: { ...process.env, DB_PATH: dbPath },
+      encoding: "utf8",
+    });
+  const lastRow = (action: string) =>
+    db.prepare("SELECT * FROM audit_log WHERE action = ? ORDER BY id DESC LIMIT 1").get(action) as {
+      token_id: string;
+      token_name: string;
+      result: string;
+      detail: string;
+    };
+
+  const created = run("create", "--name", "audited", "--scope", "pro:x:y:read");
+  assert.equal(created.status, 0, created.stderr);
+  const id = /id:\s+(\S+)/.exec(created.stdout)![1];
+  const c = lastRow("admin_token_create");
+  assert.equal(c.token_id, "cli");
+  assert.equal(c.token_name, "cli");
+  assert.equal(c.result, "ok");
+  assert.equal(c.detail, `${id} audited [pro:x:y:read]`);
+
+  const revoked = run("revoke", "--id", id);
+  assert.equal(revoked.status, 0, revoked.stderr);
+  assert.match(revoked.stdout, /revoked/);
+  const ok = lastRow("admin_token_revoke");
+  assert.equal(ok.result, "ok");
+  assert.equal(ok.detail, id);
+
+  const again = run("revoke", "--id", id);
+  assert.equal(again.status, 1);
+  assert.match(again.stderr, /not found \(or already revoked\)/);
+  const err = lastRow("admin_token_revoke");
+  assert.equal(err.result, "error");
+  assert.equal(err.token_name, "cli");
+  assert.match(err.detail, /not found or already revoked/);
+});

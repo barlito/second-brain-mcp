@@ -1,11 +1,11 @@
-// Client-facing error mapping in withAclAndAudit: each internal failure maps
+// Client-facing error mapping in the audited tool wrapper: each internal failure maps
 // to a fixed message while the real reason lands in the audit detail.
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { cleanup, cloneRepo, git, makeBareRemote, makeTempDb, newRepo, tmp } from "./test-support/fixtures";
-import { callTool, lastAudit, listen } from "./test-support/server";
+import { callTool, connectClient, lastAudit, listen } from "./test-support/server";
 
 makeTempDb();
 
@@ -29,13 +29,63 @@ after(cleanup);
 
 const args = { space: "sp", project: "proj", section: "sect", note: "n" };
 
-test("invalid slug (and over-long slug via the audited handler) maps to the name message", async () => {
+test("invalid slug syntax maps to the name message, audited", async () => {
   const vault = newRepo();
   const app = await listen(createApp({ vaultRoot: vault }));
   try {
     const r = await callTool(app.baseUrl, token, "kb_read", { ...args, note: "Bad Name" });
     assert.deepEqual(r, { isError: true, text: "Invalid space/project/section/note name." });
-    assert.match(lastAudit(db, "token_name = 'err-token'").detail ?? "", /invalid/);
+    const row = lastAudit(db, "token_name = 'err-token'");
+    assert.equal(row.result, "error");
+    assert.match(row.detail ?? "", /invalid note slug/);
+  } finally {
+    await app.close();
+  }
+});
+
+test("schema-rejected arguments get exactly one audited error row and a clear message", async () => {
+  const vault = newRepo();
+  const app = await listen(createApp({ vaultRoot: vault }));
+  const count = (): number =>
+    (db.prepare("SELECT COUNT(*) AS n FROM audit_log WHERE token_name = 'err-token'").get() as { n: number }).n;
+  const cases: Array<[string, Record<string, unknown>, RegExp]> = [
+    ["kb_read", { ...args, note: "n".repeat(65) }, /^Invalid argument `note`: must be at most 64 characters\.$/],
+    ["kb_read", { ...args, tail: 0 }, /^Invalid argument `tail`: .+\.$/],
+    ["kb_read", { ...args, tail: "x" }, /^Invalid argument `tail`: .+\.$/],
+    ["kb_read", { space: "sp", project: "proj", section: "sect" }, /^Invalid argument `note`: required\.$/],
+    ["kb_write", { ...args, content: "x".repeat(512 * 1024 + 1) }, /^Invalid argument `content`: too large \(max 512 KB\)\.$/],
+    ["kb_write", { ...args }, /^Invalid argument `content`: required\.$/],
+    ["kb_list", { space: "s".repeat(65) }, /^Invalid argument `space`: must be at most 64 characters\.$/],
+    ["kb_search", { query: "q".repeat(201) }, /^Invalid argument `query`: must be at most 200 characters\.$/],
+  ];
+  try {
+    for (const [tool, a, msg] of cases) {
+      const before = count();
+      const r = await callTool(app.baseUrl, token, tool, a);
+      assert.equal(r.isError, true, tool);
+      assert.match(r.text, msg);
+      assert.doesNotMatch(r.text, /-32602|MCP error/);
+      assert.equal(count(), before + 1, `${tool} ${JSON.stringify(a).slice(0, 80)}: one audit row`);
+      const row = lastAudit(db, "token_name = 'err-token'");
+      assert.equal(row.action, tool);
+      assert.equal(row.result, "error");
+      assert.match(row.detail ?? "", /^invalid arguments: /);
+    }
+    // The schema published in tools/list is unchanged: limits and required fields stay visible.
+    const { client, transport } = await connectClient(app.baseUrl, token);
+    try {
+      const { tools } = await client.listTools();
+      const read = tools.find((t) => t.name === "kb_read")!.inputSchema as {
+        required?: string[];
+        properties: Record<string, { maxLength?: number; minimum?: number; maximum?: number }>;
+      };
+      assert.deepEqual([...(read.required ?? [])].sort(), ["note", "project", "section", "space"]);
+      assert.equal(read.properties.note.maxLength, 64);
+      assert.equal(read.properties.tail.minimum, 1);
+      assert.equal(read.properties.tail.maximum, 500);
+    } finally {
+      await transport.close();
+    }
   } finally {
     await app.close();
   }
@@ -94,14 +144,34 @@ test("SyncConflictError -> conflict message naming the backup branch", async () 
     const r = await callTool(app.baseUrl, token, "kb_write", { ...args, note: "other", content: "x" });
     await drainWrites();
     assert.equal(r.isError, true);
+    // The conflict is on n.md (readable by the token), not on the note being written,
+    // and the caller's own write was never applied.
     assert.match(
       r.text,
-      /^Conflict: this note was changed remotely\. Your version was saved on branch conflict\/\S+\. Re-read the note and retry\.$/,
+      /^Conflict: sp\/proj\/sect\/n\.md was changed remotely while unsynced local changes to it were pending; those conflicting changes were saved on branch conflict\/\S+\. Your write was not applied: re-read the note and retry\.$/,
     );
     assert.doesNotMatch(r.text, /\/tmp|sb-server/);
+    assert.equal(existsSync(join(vault, "sp", "proj", "sect", "other.md")), false);
   } finally {
     await app.close();
   }
+});
+
+test("clientMessage for sync conflicts: own note, unreadable paths counted not named, stash case", async () => {
+  const { clientMessage } = await import("./tools/common");
+  const { SyncConflictError } = await import("./vault/git");
+  const canSee = (p: string): boolean => p.startsWith("sp/");
+  const e = new SyncConflictError("internal", "conflict/x", ["sp/p/s/n.md", "sp/p/s/m.md", "secret/p/s/z.md"], 2);
+  const own = clientMessage(e, { notePath: "sp/p/s/n.md", canSee });
+  assert.match(own, /^Conflict: this note, sp\/p\/s\/m\.md, 1 other note\(s\) was changed remotely/);
+  assert.match(own, /saved on branch conflict\/x\. Other unsynced changes were kept\. Your write was not applied/);
+  assert.doesNotMatch(own, /secret/);
+  const stash = clientMessage(new SyncConflictError("internal", null, ["sp/p/s/n.md"]), { notePath: "sp/p/s/n.md", canSee });
+  assert.equal(
+    stash,
+    "Conflict: uncommitted changes in the vault (this note) conflict with remote changes; they were kept in git stash. Your write was not applied; retry it.",
+  );
+  assert.doesNotMatch(stash, /\(none\)/);
 });
 
 test("anything else -> 'Internal error.' with the real reason (credentials stripped) in audit and log", async () => {

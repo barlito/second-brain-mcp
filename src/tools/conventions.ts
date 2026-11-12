@@ -71,7 +71,7 @@ Working rules:
 - Keep notes short and focused: one topic per note, link to related notes.
 - Add journal entries with kb_append (journal/YYYY-MM); it writes one timestamped line.
 - When you add an important note, update the Docs map in overview/index. Keep that note small; move detail elsewhere.
-- Archive instead of delete: kb_archive (needs write on the archive section too).
+- Archive instead of delete: kb_archive (needs read and write on the section, plus write on the archive section).
 - New project: kb_init_project creates overview/index from a template.
 - If unsure whether something deserves a note, prefer a short journal entry, or use \`kb_propose\` (needs propose or write); the user reviews proposals.
 - Writes (kb_write) are direct and committed to git; re-read before overwriting a note you did not just read.`;

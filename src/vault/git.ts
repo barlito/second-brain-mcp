@@ -28,6 +28,12 @@ const NETWORK_TIMEOUT_MS = 30_000;
 const DEFAULT_PUSH_DEADLINE_MS = 150_000;
 const PUSH_RETRIES = 3;
 const PUSH_BACKOFF_MS = 1000;
+// After a network error, writes skip their pre-write pull for this long so a
+// dead remote does not cost every write a network timeout. Env override for tests.
+const DEFAULT_NET_COOLDOWN_MS = 60_000;
+// Max write operations waiting for (or holding) the lock before new ones are
+// refused as busy. Internal jobs (periodic sync, push-retry pulls) are exempt.
+const DEFAULT_WRITE_QUEUE_MAX = 50;
 // An index.lock younger than this may belong to a live human git process.
 const STALE_LOCK_MS = 10 * 60_000;
 const REBASE_MARKER = "second-brain-rebase";
@@ -38,6 +44,16 @@ const OP_MARKER = "second-brain-op";
 
 function pushDeadlineMs(): number {
   return Number(process.env.SB_PUSH_DEADLINE_MS) || DEFAULT_PUSH_DEADLINE_MS;
+}
+
+function netCooldownMs(): number {
+  const v = process.env.SB_NET_COOLDOWN_MS;
+  return v !== undefined && v !== "" && Number.isFinite(Number(v)) ? Number(v) : DEFAULT_NET_COOLDOWN_MS;
+}
+
+export function writeQueueMax(): number {
+  const n = Number(process.env.VAULT_WRITE_QUEUE_MAX);
+  return Number.isInteger(n) && n > 0 ? n : DEFAULT_WRITE_QUEUE_MAX;
 }
 
 // LANG/LC_ALL=C: error-message matching must not depend on the locale.
@@ -90,13 +106,17 @@ function errText(err: unknown): string {
 
 // ---- errors --------------------------------------------------------------
 
-// The remote changed the same notes as local unpushed work. The local work was
-// moved to a backup branch and the working branch reset to the remote.
+// The remote changed the same notes as local unpushed work. The full local state
+// was saved on a backup branch, the working branch reset to the remote, and the
+// local commits that still applied cleanly were re-applied on top (`reapplied`).
+// Only the conflicting ones are left parked on the backup branch. `paths` are
+// the conflicting paths. The write that hit the conflict was NOT applied.
 export class SyncConflictError extends Error {
   constructor(
     message: string,
     readonly backupBranch: string | null,
     readonly paths: string[],
+    readonly reapplied = 0,
   ) {
     super(message);
     this.name = "SyncConflictError";
@@ -143,9 +163,16 @@ export interface SyncConflictEvent {
   backupBranch: string;
   ok: boolean; // false when recovery failed part-way after the backup branch was created
   error?: string;
-  commits: string[]; // moved commit SHAs, newest first
-  tokens: string[]; // token names parsed from the server's own commit subjects
-  paths: string[];
+  commits: string[]; // parked (not re-applied) commit SHAs, newest first
+  tokens: string[]; // token names parsed from the parked commits' subjects (server's own subjects only)
+  paths: string[]; // conflicting paths
+  parked?: ParkedCommit[]; // parked commits, oldest first
+  reapplied?: number; // local commits that applied cleanly and stay on the branch
+}
+export interface ParkedCommit {
+  sha: string;
+  subject: string;
+  paths: string[]; // paths the commit changed
 }
 type SyncEventHandler = (e: SyncConflictEvent) => void | Promise<void>;
 let syncEventHandler: SyncEventHandler | null = null;
@@ -255,7 +282,29 @@ function classify(err: unknown): SyncErrorKind {
 }
 
 function recordError(vaultRoot: string, err: unknown): void {
-  st(vaultRoot).lastError = { kind: classify(err), message: errText(err), at: new Date().toISOString() };
+  const kind = classify(err);
+  if (kind === "network") markNetDown(vaultRoot);
+  st(vaultRoot).lastError = { kind, message: errText(err), at: new Date().toISOString() };
+}
+
+// ---- remote reachability ---------------------------------------------------
+
+// Time of the last network failure talking to the remote, per vault; cleared by
+// any successful pull or push.
+const netDownAt = new Map<string, number>();
+
+function markNetDown(vaultRoot: string): void {
+  netDownAt.set(path.resolve(vaultRoot), Date.now());
+}
+
+function markNetUp(vaultRoot: string): void {
+  netDownAt.delete(path.resolve(vaultRoot));
+}
+
+// True while the last network error is recent: skip optional network calls.
+function remoteRecentlyDown(vaultRoot: string): boolean {
+  const at = netDownAt.get(path.resolve(vaultRoot));
+  return at !== undefined && Date.now() - at < netCooldownMs();
 }
 
 // ---- git primitives ------------------------------------------------------
@@ -317,6 +366,11 @@ async function selfHeal(vaultRoot: string): Promise<void> {
     if (!existsSync(marker)) throw new VaultBusyError("vault busy (rebase in progress); try again shortly");
     await abortRebase(vaultRoot);
   }
+  // A cherry-pick left by conflict recovery (we died mid re-apply).
+  if (cherryPickInProgress(vaultRoot)) {
+    if (!existsSync(marker)) throw new VaultBusyError("vault busy (cherry-pick in progress); try again shortly");
+    await runGit(["cherry-pick", "--abort"], vaultRoot).catch(() => undefined);
+  }
   rmSync(marker, { force: true });
 
   const lock = path.join(gitDir(vaultRoot), "index.lock");
@@ -336,29 +390,122 @@ function conflictBranchName(): string {
   return `conflict/${new Date().toISOString().replace(/\.\d+Z$/, "Z").replace(/:/g, "")}`;
 }
 
-// Saves local unpushed commits on a backup branch (pushed best-effort so a
-// human sees it), then resets the working branch to the remote. Never loses
-// uncommitted human changes: --keep, else stash around a hard reset.
+function cherryPickInProgress(vaultRoot: string): boolean {
+  return ["CHERRY_PICK_HEAD", "sequencer"].some((f) => existsSync(path.join(gitDir(vaultRoot), f)));
+}
+
+interface LocalCommit {
+  sha: string;
+  parents: number;
+  subject: string;
+}
+
+// Resets the working branch to `target`. Never loses uncommitted human changes:
+// --keep, else stash around a hard reset.
+async function resetKeepingLocalChanges(vaultRoot: string, target: string): Promise<void> {
+  try {
+    await runGit(["reset", "--keep", target], vaultRoot);
+    return;
+  } catch {
+    /* overlapping local changes: stash around a hard reset */
+  }
+  let stashed = false;
+  try {
+    stashed = !/No local changes/.test(
+      await runGit(["stash", "push", "--include-untracked", "-m", "second-brain conflict recovery"], vaultRoot),
+    );
+  } catch {
+    /* nothing to stash */
+  }
+  await runGit(["reset", "--hard", target], vaultRoot);
+  if (stashed) {
+    try {
+      await runGit(["stash", "pop"], vaultRoot);
+    } catch {
+      await runGit(["reset", "--hard", "HEAD"], vaultRoot).catch(() => undefined);
+      console.error("uncommitted changes could not be re-applied after conflict recovery; kept in git stash");
+    }
+  }
+}
+
+// Re-applies the previously unpushed local commits (oldest first) on the freshly
+// reset branch. A commit that conflicts is aborted and parked; the others stay.
+// On any unexpected failure it falls back to parking everything (branch reset to
+// `target` again); if even that reset fails, what was picked so far stays.
+async function reapplyLocalCommits(
+  vaultRoot: string,
+  target: string,
+  commits: LocalCommit[],
+): Promise<{ parked: Set<string>; conflictPaths: string[] }> {
+  const parked = new Set<string>();
+  const conflictPaths = new Set<string>();
+  const picked: string[] = [];
+  try {
+    // A merge commit cannot be replayed linearly: keep the old behaviour.
+    if (commits.some((c) => c.parents !== 1)) throw new Error("local history contains merge commits");
+    for (const c of commits) {
+      try {
+        // --keep-redundant-commits: a commit the remote already contains still lands
+        // (empty) instead of stopping the pick; --allow-empty: same for empty ones.
+        await runGit(["cherry-pick", "--allow-empty", "--keep-redundant-commits", c.sha], vaultRoot);
+        picked.push(c.sha);
+      } catch (err) {
+        // Refused before starting (dirty index, overlapping local changes...): unexpected.
+        if (!cherryPickInProgress(vaultRoot)) throw err;
+        const unmerged = await unmergedPaths(vaultRoot);
+        await runGit(["cherry-pick", "--abort"], vaultRoot);
+        if (unmerged.length === 0) throw err;
+        parked.add(c.sha);
+        for (const p of unmerged) conflictPaths.add(p);
+      }
+    }
+  } catch (err) {
+    console.error(`conflict recovery: could not re-apply local commits, keeping them all on the backup branch: ${errText(err)}`);
+    if (cherryPickInProgress(vaultRoot)) await runGit(["cherry-pick", "--abort"], vaultRoot).catch(() => undefined);
+    try {
+      await resetKeepingLocalChanges(vaultRoot, target);
+      return { parked: new Set(commits.map((c) => c.sha)), conflictPaths: [] };
+    } catch (resetErr) {
+      console.error(`conflict recovery: reset after failed re-apply failed: ${errText(resetErr)}`);
+      return { parked: new Set(commits.filter((c) => !picked.includes(c.sha)).map((c) => c.sha)), conflictPaths: [] };
+    }
+  }
+  return { parked, conflictPaths: [...conflictPaths] };
+}
+
+async function changedPaths(vaultRoot: string, sha: string): Promise<string[]> {
+  try {
+    return (await runGit(["diff-tree", "--no-commit-id", "--name-only", "-r", "--root", sha], vaultRoot)).split("\n").filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+// Saves the full local state on a backup branch (safety net, pushed best-effort
+// so a human sees it), resets the working branch to the remote, then re-applies
+// the local commits that still apply cleanly. Only the conflicting ones stay
+// parked on the backup branch. Returns null when nothing ended up parked (the
+// backup branch is then deleted again).
 async function recoverFromRebaseConflict(
   vaultRoot: string,
   branch: string,
   paths: string[],
   origin: SyncConflictOrigin,
-): Promise<SyncConflictError> {
+): Promise<SyncConflictError | null> {
   let backup = conflictBranchName();
-  // Commits about to be moved off the branch, for the sync event.
-  let commits: string[] = [];
-  const tokens = new Set<string>();
+  let local: LocalCommit[] = []; // previously unpushed commits, oldest first
+  // False when the local commits could not be listed: nothing is re-applied and
+  // the backup branch is kept (it is then the only copy of that work).
+  let listed = true;
   try {
-    const out = await runGit(["log", "--format=%H%x09%s", `origin/${branch}..HEAD`], vaultRoot);
+    const out = await runGit(["log", "--reverse", "--format=%H%x09%P%x09%s", `origin/${branch}..HEAD`], vaultRoot);
     for (const line of out.split("\n").filter(Boolean)) {
-      const [sha, subject = ""] = line.split("\t");
-      commits.push(sha);
-      const m = TOKEN_SUBJECT_RE.exec(subject);
-      if (m) tokens.add(m[1]);
+      const [sha, parents = "", ...rest] = line.split("\t");
+      local.push({ sha, parents: parents.split(" ").filter(Boolean).length, subject: rest.join("\t") });
     }
   } catch {
-    commits = [];
+    local = [];
+    listed = false;
   }
   try {
     await runGit(["branch", backup, "HEAD"], vaultRoot);
@@ -369,40 +516,62 @@ async function recoverFromRebaseConflict(
   const target = `origin/${branch}`;
   let ok = false;
   let failure: string | undefined;
+  // Until the re-apply ran, everything counts as parked (the old, safe behaviour).
+  let parkedShas = new Set(local.map((c) => c.sha));
+  let conflictPaths = paths;
+  const parkedNow = (): LocalCommit[] => local.filter((c) => parkedShas.has(c.sha));
+  const keepBackup = (): boolean => !ok || !listed || parkedNow().length > 0;
   try {
-    try {
-      await runGit(["reset", "--keep", target], vaultRoot);
-    } catch {
-      let stashed = false;
-      try {
-        stashed = !/No local changes/.test(
-          await runGit(["stash", "push", "--include-untracked", "-m", "second-brain conflict recovery"], vaultRoot),
-        );
-      } catch {
-        /* nothing to stash */
-      }
-      await runGit(["reset", "--hard", target], vaultRoot);
-      if (stashed) {
-        try {
-          await runGit(["stash", "pop"], vaultRoot);
-        } catch {
-          await runGit(["reset", "--hard", "HEAD"], vaultRoot).catch(() => undefined);
-          console.error("uncommitted changes could not be re-applied after conflict recovery; kept in git stash");
-        }
-      }
-    }
+    await resetKeepingLocalChanges(vaultRoot, target);
     ok = true;
+    if (listed) {
+      const r = await reapplyLocalCommits(vaultRoot, target, local);
+      parkedShas = r.parked;
+      if (r.conflictPaths.length > 0) conflictPaths = r.conflictPaths;
+    }
   } catch (err) {
     failure = errText(err);
     throw err;
   } finally {
-    // Backup branch exists: always track it and emit, before any network push.
-    addConflictBranch(vaultRoot, backup);
-    if (ok) st(vaultRoot).unpushed = false;
-    emitSyncEvent({ vaultRoot, origin, backupBranch: backup, ok, error: failure, commits, tokens: [...tokens], paths });
+    const parked = parkedNow();
+    const reapplied = local.length - parked.length;
+    if (ok) st(vaultRoot).unpushed = reapplied > 0;
+    if (keepBackup()) {
+      // Backup branch holds parked work: always track it and emit, before any network push.
+      addConflictBranch(vaultRoot, backup);
+      const details: ParkedCommit[] = [];
+      for (const c of parked) details.push({ sha: c.sha, subject: c.subject, paths: await changedPaths(vaultRoot, c.sha) });
+      const tokens = new Set<string>();
+      for (const c of parked) {
+        const m = TOKEN_SUBJECT_RE.exec(c.subject);
+        if (m) tokens.add(m[1]);
+      }
+      emitSyncEvent({
+        vaultRoot,
+        origin,
+        backupBranch: backup,
+        ok,
+        error: failure,
+        commits: parked.map((c) => c.sha).reverse(),
+        tokens: [...tokens],
+        paths: conflictPaths,
+        parked: details,
+        reapplied,
+      });
+    }
   }
+  const parked = parkedNow();
+  const reapplied = local.length - parked.length;
+  if (!keepBackup()) {
+    // Every local commit re-applied cleanly: nothing is parked, nothing to report.
+    await runGit(["branch", "-D", backup], vaultRoot).catch(() => undefined);
+    console.error(`sync: rebase conflicted but all ${reapplied} local commit(s) re-applied cleanly on ${target}`);
+    return null;
+  }
+  const what = listed ? `${parked.length} conflicting local commit(s)` : "the unpushed local commits";
   console.error(
-    `SYNC CONFLICT: remote changed ${paths.join(", ") || "(unknown paths)"}; local commits saved on branch ${backup}, ${branch} reset to ${target}`,
+    `SYNC CONFLICT: remote changed ${conflictPaths.join(", ") || "(unknown paths)"}; ${what} parked on branch ${backup}` +
+      ` (${parked.map((c) => c.subject).join("; ")}), ${reapplied} re-applied on ${target}`,
   );
   try {
     await runGit(["push", "origin", backup], vaultRoot, NETWORK_TIMEOUT_MS);
@@ -410,9 +579,12 @@ async function recoverFromRebaseConflict(
     console.error(`could not push backup branch ${backup}: ${errText(err)}`);
   }
   return new SyncConflictError(
-    `The remote changed the same note(s) as unsynced changes (${paths.join(", ")}). Your version was saved to branch ${backup}; retry the write.`,
+    `The remote changed ${conflictPaths.join(", ") || "note(s)"} while unsynced local changes to it were pending: ` +
+      `${what} parked on branch ${backup}` +
+      `${reapplied > 0 ? `, ${reapplied} other local commit(s) kept` : ""}. This write was not applied; retry it.`,
     backup,
-    paths,
+    conflictPaths,
+    reapplied,
   );
 }
 
@@ -422,7 +594,7 @@ async function recoverFromStashConflict(vaultRoot: string, paths: string[]): Pro
   await runGit(["reset", "--hard", "HEAD"], vaultRoot);
   console.error(`SYNC CONFLICT: uncommitted changes to ${paths.join(", ")} conflict with the remote; kept in git stash`);
   return new SyncConflictError(
-    `Uncommitted changes in the vault conflict with remote changes (${paths.join(", ")}); they were kept in git stash. Retry the write.`,
+    `Uncommitted changes in the vault (${paths.join(", ")}) conflict with remote changes; they were kept in git stash. This write was not applied; retry it.`,
     null,
     paths,
   );
@@ -443,6 +615,7 @@ export async function pullRebase(
     try {
       await runGit(["pull", "--rebase", "--autostash", "origin", branch], vaultRoot, NETWORK_TIMEOUT_MS, signal);
       st(vaultRoot).lastPullAt = new Date().toISOString();
+      markNetUp(vaultRoot);
     } catch (err) {
       // A brand-new remote has no such branch yet: nothing to pull.
       if (/couldn't find remote ref/i.test(errText(err))) return;
@@ -451,8 +624,13 @@ export async function pullRebase(
         await abortRebase(vaultRoot); // also restores the autostash
         if (paths.length > 0) {
           const e = await recoverFromRebaseConflict(vaultRoot, branch, paths, origin);
-          recordError(vaultRoot, e);
-          throw e;
+          if (e) {
+            recordError(vaultRoot, e);
+            throw e;
+          }
+          // Everything re-applied cleanly on the remote: a successful pull after all.
+          st(vaultRoot).lastPullAt = new Date().toISOString();
+          return;
         }
       }
       throw err;
@@ -471,7 +649,7 @@ export async function pullRebase(
 // Write-then-rename so a crash mid-write never leaves a half-written note.
 // The temp name is random and opened O_EXCL|O_NOFOLLOW so a planted symlink
 // can't redirect the write.
-export function writeNoteAtomic(vaultRoot: string, absolutePath: string, content: string): void {
+export function writeNoteAtomic(vaultRoot: string, absolutePath: string, content: string | Buffer): void {
   assertSafePath(vaultRoot, absolutePath);
   const dir = path.dirname(absolutePath);
   mkdirSync(dir, { recursive: true });
@@ -486,7 +664,7 @@ export function writeNoteAtomic(vaultRoot: string, absolutePath: string, content
       fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW,
       0o644,
     );
-    writeSync(fd, content);
+    writeSync(fd, typeof content === "string" ? Buffer.from(content, "utf8") : content);
     fsyncSync(fd);
     closeSync(fd);
     fd = undefined;
@@ -498,11 +676,14 @@ export function writeNoteAtomic(vaultRoot: string, absolutePath: string, content
   }
 }
 
+// Returns the new commit's sha, or null when nothing was staged for the path
+// (identical re-write): no commit is made, and HEAD (possibly someone else's
+// commit) is deliberately not reported as ours.
 export async function commitFile(
   vaultRoot: string,
   relativePath: string,
   message: string,
-): Promise<string> {
+): Promise<string | null> {
   await runGit(["add", "--", relativePath], vaultRoot);
   let staged = true;
   try {
@@ -512,17 +693,17 @@ export async function commitFile(
   } catch (err) {
     if ((err as { code?: unknown }).code !== 1) throw err;
   }
-  if (staged) {
-    // Pathspec: never sweep in other staged changes (e.g. a human's drafts).
-    await runGit(["commit", "-m", message, "--", relativePath], vaultRoot);
-  }
+  if (!staged) return null;
+  // Pathspec: never sweep in other staged changes (e.g. a human's drafts).
+  await runGit(["commit", "-m", message, "--", relativePath], vaultRoot);
   return (await runGit(["rev-parse", "HEAD"], vaultRoot)).trim();
 }
 
 // ---- push ----------------------------------------------------------------
 
-// Shutdown aborts pending pushes: they are network-only and the next periodic
-// sync retries them. Stays aborted until resetPushAbort() (tests only).
+// Aborts pushes in flight (and their retry pulls); used when the shutdown drain
+// budget runs out. The next start's periodic sync retries them. Stays aborted
+// until resetPushAbort() (tests only).
 let pushAbort = new AbortController();
 
 export function abortPendingPushes(): void {
@@ -538,18 +719,34 @@ async function pushOnce(vaultRoot: string, signal: AbortSignal): Promise<void> {
   await runGit(["push", "origin", branch], vaultRoot, NETWORK_TIMEOUT_MS, signal);
 }
 
-// Never rejects. Retries pull first (a rejected push is usually non-fast-forward).
-// Bounded by one overall deadline; every child is killed when it expires, so
-// by the time this settles no git process of ours is left running.
-async function pushWithRetry(vaultRoot: string): Promise<void> {
+// The push-retry pull rewrites HEAD and the working tree, so it takes the lock
+// like a write (exempt from the queue bound: at most one pusher per vault).
+function lockedPull(vaultRoot: string, signal: AbortSignal): Promise<void> {
+  return withLock(
+    vaultRoot,
+    async () => {
+      await selfHeal(vaultRoot);
+      await pullRebase(vaultRoot, signal, "push-retry");
+      return { value: undefined, push: false };
+    },
+    false,
+  );
+}
+
+// Never rejects; true on success. Runs outside the lock: `git push` only reads
+// local refs/objects, so it is safe next to a commit. A rejected push (usually
+// non-fast-forward) is retried after a locked pull; a network failure is
+// retried without one, so a dead remote never holds the lock. Bounded by one
+// overall deadline; every child is killed when it expires.
+async function pushWithRetry(vaultRoot: string): Promise<boolean> {
   const s = st(vaultRoot);
   const signal = AbortSignal.any([AbortSignal.timeout(pushDeadlineMs()), pushAbort.signal]);
   let lastErr: unknown;
   for (let attempt = 1; attempt <= PUSH_RETRIES && !signal.aborted; attempt++) {
     try {
-      if (attempt > 1) {
+      if (attempt > 1 && classify(lastErr) !== "network") {
         try {
-          await pullRebase(vaultRoot, signal, "push-retry");
+          await lockedPull(vaultRoot, signal);
         } catch (pullErr) {
           lastErr = pullErr;
           if (pullErr instanceof SyncConflictError) break; // retrying can't help
@@ -560,9 +757,11 @@ async function pushWithRetry(vaultRoot: string): Promise<void> {
       s.lastPushOk = true;
       s.lastPushAt = new Date().toISOString();
       s.lastError = null;
-      return;
+      markNetUp(vaultRoot);
+      return true;
     } catch (err) {
       lastErr = err;
+      if (classify(err) === "network") markNetDown(vaultRoot);
       if (attempt < PUSH_RETRIES) await sleep(PUSH_BACKOFF_MS * attempt, signal);
     }
   }
@@ -571,23 +770,64 @@ async function pushWithRetry(vaultRoot: string): Promise<void> {
   s.lastPushAt = new Date().toISOString();
   recordError(vaultRoot, lastErr);
   console.error(`git push failed: ${s.lastError?.message}`);
+  return false;
+}
+
+// One background pusher per vault: at most one push cycle in flight; commits
+// landing meanwhile set `again` and are pushed by one follow-up cycle (only if
+// the cycle succeeded: after a failure the next write, periodic sync or
+// shutdown retries, so a dead remote is not hammered).
+interface Pusher {
+  vaultRoot: string;
+  running: Promise<void> | null;
+  again: boolean;
+}
+const pushers = new Map<string, Pusher>();
+
+function schedulePush(vaultRoot: string): void {
+  const key = path.resolve(vaultRoot);
+  let p = pushers.get(key);
+  if (!p) {
+    p = { vaultRoot, running: null, again: false };
+    pushers.set(key, p);
+  }
+  st(vaultRoot).unpushed = true;
+  if (p.running) {
+    p.again = true;
+    return;
+  }
+  const pusher = p;
+  pusher.running = (async () => {
+    try {
+      let ok: boolean;
+      do {
+        pusher.again = false;
+        ok = await pushWithRetry(vaultRoot);
+        // A commit landed while pushing: it may not be on the remote yet.
+        if (pusher.again) st(vaultRoot).unpushed = true;
+      } while (ok && pusher.again && !pushAbort.signal.aborted);
+    } catch (err) {
+      console.error(`background push failed: ${errText(err)}`);
+    } finally {
+      pusher.running = null;
+    }
+  })();
 }
 
 // ---- lock ----------------------------------------------------------------
 
 // Single in-process mutex so concurrent calls serialize instead of interleaving
-// git operations on the same working tree.
-//
-// The queue only advances once the *push* from the previous turn has settled.
-// That is safe because pushWithRetry has a hard overall deadline and kills its
-// children, so it always settles in bounded time.
+// git operations on the same working tree. A turn ends with the local commit;
+// pushing happens in the background pusher (above), never inside a write's turn.
 interface LockedResult<T> {
   value: T;
-  // Resolves when background work (the push) kicked off by this turn settles.
-  settle: Promise<unknown>;
+  // Hand the new commit(s) to the background pusher once the turn ends.
+  push: boolean;
 }
 
 let queue: Promise<unknown> = Promise.resolve();
+// Bounded turns waiting for or holding the lock.
+let queuedWrites = 0;
 
 function opMarkerPath(vaultRoot: string): string {
   return path.join(gitDir(vaultRoot), OP_MARKER);
@@ -606,37 +846,46 @@ function clearOpMarker(vaultRoot: string): void {
   rmSync(opMarkerPath(vaultRoot), { force: true });
 }
 
-// The op marker covers the whole turn, including the background push.
-function withLock<T>(vaultRoot: string, fn: () => Promise<LockedResult<T>>): Promise<T> {
+// `bounded` turns (client-driven writes) are refused with VaultBusyError once
+// writeQueueMax() of them are pending, so one client cannot queue unbounded work.
+function withLock<T>(vaultRoot: string, fn: () => Promise<LockedResult<T>>, bounded = true): Promise<T> {
+  if (bounded) {
+    if (queuedWrites >= writeQueueMax()) {
+      return Promise.reject(new VaultBusyError("vault busy (too many queued writes); try again shortly"));
+    }
+    queuedWrites++;
+  }
   const scheduled = queue.then(async () => {
     setOpMarker(vaultRoot);
     try {
-      return await fn();
-    } catch (err) {
+      const r = await fn();
+      if (r.push) schedulePush(vaultRoot);
+      return r.value;
+    } finally {
       clearOpMarker(vaultRoot);
-      throw err;
+      if (bounded) queuedWrites--;
     }
   });
-  queue = scheduled.then(
-    async (r) => {
-      try {
-        await r.settle.catch(() => undefined);
-      } finally {
-        clearOpMarker(vaultRoot);
-      }
-    },
-    () => undefined,
-  );
-  return scheduled.then((r) => r.value);
+  queue = scheduled.catch(() => undefined);
+  return scheduled;
 }
 
-// Resolves once the lock queue is idle (including in-flight pushes).
-export async function drainWrites(): Promise<void> {
-  let q: Promise<unknown>;
-  do {
-    q = queue;
+// Resolves once the lock queue and every background push are idle. With
+// finalPush (shutdown), first retries vaults left unpushed by an earlier failed
+// cycle, unless their remote just failed with a network error.
+export async function drainWrites(opts: { finalPush?: boolean } = {}): Promise<void> {
+  if (opts.finalPush) {
+    for (const p of pushers.values()) {
+      if (!p.running && st(p.vaultRoot).unpushed && !remoteRecentlyDown(p.vaultRoot)) schedulePush(p.vaultRoot);
+    }
+  }
+  for (;;) {
+    const q = queue;
     await q;
-  } while (q !== queue);
+    const running = [...pushers.values()].flatMap((p) => (p.running ? [p.running] : []));
+    if (running.length === 0 && q === queue) return;
+    await Promise.all(running);
+  }
 }
 
 // A create-only write found the note already there.
@@ -661,7 +910,7 @@ export function syncWrite(
   content: string,
   commitMessage: string,
   opts: WriteOptions = {},
-): Promise<{ commitSha: string }> {
+): Promise<WriteResult> {
   return lockedWrite(vaultRoot, absolutePath, () => content, commitMessage, opts);
 }
 
@@ -670,6 +919,21 @@ export class NoteTooLargeError extends Error {
     super(message);
     this.name = "NoteTooLargeError";
   }
+}
+
+// The existing note is not valid UTF-8: appending would have to decode it and
+// would corrupt the invalid bytes (U+FFFD). Such a note must be edited in git.
+export class NoteNotUtf8Error extends Error {
+  constructor() {
+    super("note is not valid UTF-8");
+    this.name = "NoteNotUtf8Error";
+  }
+}
+
+// commitSha is null when the content was identical and nothing was committed.
+// It is "" in the rare case where the commit landed but its sha could not be read back.
+export interface WriteResult {
+  commitSha: string | null;
 }
 
 // Read-modify-write inside the write lock, so concurrent appends never lose
@@ -684,11 +948,13 @@ export function syncAppend(
   maxChars?: number,
   // Validates the resulting content inside the lock; throws to refuse.
   check?: (next: string) => void,
-): Promise<{ commitSha: string }> {
+): Promise<WriteResult> {
   return lockedWrite(
     vaultRoot,
     absolutePath,
-    (prev) => {
+    (raw) => {
+      const prev = raw ? raw.toString("utf8") : "";
+      if (raw && !Buffer.from(prev, "utf8").equals(raw)) throw new NoteNotUtf8Error();
       const t = typeof text === "function" ? text() : text;
       const next = (prev === "" || prev.endsWith("\n") ? prev : prev + "\n") + t.replace(/\n+$/, "") + "\n";
       if (maxChars !== undefined && next.length > maxChars) throw new NoteTooLargeError("note would exceed the size limit");
@@ -721,11 +987,13 @@ export class MoveTargetExistsError extends Error {
   }
 }
 
-// Pull (best effort) under the lock; shared by every write operation.
+// Pull (best effort) under the lock; shared by every write operation. Skipped
+// while the remote recently failed with a network error: the write commits
+// locally and the background pusher rebases onto the remote once it is back.
 async function prepareLocked(vaultRoot: string): Promise<boolean> {
   await selfHeal(vaultRoot);
   const remote = await hasRemote(vaultRoot);
-  if (remote) {
+  if (remote && !remoteRecentlyDown(vaultRoot)) {
     try {
       await pullRebase(vaultRoot);
     } catch (err) {
@@ -738,23 +1006,24 @@ async function prepareLocked(vaultRoot: string): Promise<boolean> {
   return remote;
 }
 
-// Resolve the caller now; the lock queue (settle) waits on the push instead.
+// The turn ends here; with a remote, withLock hands the push to the background pusher.
 function finishLocked<T>(vaultRoot: string, remote: boolean, value: T): LockedResult<T> {
-  let settle: Promise<unknown> = Promise.resolve();
-  if (remote) {
-    st(vaultRoot).unpushed = true;
-    settle = pushWithRetry(vaultRoot);
-  }
-  return { value, settle };
+  if (remote) st(vaultRoot).unpushed = true;
+  return { value, push: remote };
+}
+
+async function headOrEmpty(vaultRoot: string): Promise<string> {
+  return (await runGit(["rev-parse", "HEAD"], vaultRoot).catch(() => "")).trim();
 }
 
 function lockedWrite(
   vaultRoot: string,
   absolutePath: string,
-  build: (previous: string) => string,
+  // Gets the note's current raw bytes (null when missing); throws to refuse.
+  build: (previous: Buffer | null) => string,
   commitMessage: string,
   opts: WriteOptions = {},
-): Promise<{ commitSha: string }> {
+): Promise<WriteResult> {
   return withLock(vaultRoot, async () => {
     assertSafePath(vaultRoot, absolutePath);
     const remote = await prepareLocked(vaultRoot);
@@ -763,11 +1032,23 @@ function lockedWrite(
 
     const relativePath = path.relative(vaultRoot, absolutePath);
     const previous = existsSync(absolutePath) ? readFileSync(absolutePath) : null;
-    let commitSha: string;
+    // Built and validated before anything is touched: a refusal leaves the file
+    // (mtime) and the index (a human's staged state) exactly as they were.
+    const next = build(previous);
+    const headBefore = await headOrEmpty(vaultRoot);
+    let commitSha: string | null;
     try {
-      writeNoteAtomic(vaultRoot, absolutePath, build(previous ? previous.toString("utf8") : ""));
+      writeNoteAtomic(vaultRoot, absolutePath, next);
       commitSha = await commitFile(vaultRoot, relativePath, commitMessage);
     } catch (err) {
+      // Roll back only if the commit did not land (git may report an error after
+      // it did, e.g. a failing post-commit hook or a timeout): otherwise the working
+      // tree would disagree with HEAD and the next append would silently revert this write.
+      const headNow = await headOrEmpty(vaultRoot);
+      if (headNow !== headBefore) {
+        console.error(`git write: error after commit landed, keeping it: ${errText(err)}`);
+        return finishLocked(vaultRoot, remote, { commitSha: headNow });
+      }
       await restoreNote(vaultRoot, absolutePath, relativePath, previous);
       throw err;
     }
@@ -850,7 +1131,8 @@ async function restoreNote(
     if (previous === null) {
       if (existsSync(absolutePath) || lstatOrNull(absolutePath)) unlinkSync(absolutePath);
     } else {
-      writeNoteAtomic(vaultRoot, absolutePath, previous.toString("utf8"));
+      // Raw bytes: a note that is not valid UTF-8 must come back byte for byte.
+      writeNoteAtomic(vaultRoot, absolutePath, previous);
     }
   } catch {
     /* best effort */
@@ -879,30 +1161,37 @@ function lstatOrNull(p: string): boolean {
 
 // ---- periodic sync -------------------------------------------------------
 
-// Pulls remote changes and pushes leftover local commits under the same lock
-// as writes. Errors are logged, never thrown.
+// Pulls remote changes under the same lock as writes, then hands leftover local
+// commits to the background pusher. While the remote recently failed with a
+// network error the pull is skipped (the push then doubles as the probe), so a
+// dead remote does not hold the lock every tick. Errors are logged, never thrown.
 export function startPeriodicSync(vaultRoot: string, intervalMs: number): () => void {
   let running = false;
-  const idle = { value: undefined, settle: Promise.resolve() };
+  const idle = { value: undefined, push: false };
   const tick = async (): Promise<void> => {
     if (running) return;
     running = true;
     try {
-      await withLock(vaultRoot, async () => {
-        await selfHeal(vaultRoot);
-        if (!(await hasRemote(vaultRoot))) return idle;
-        try {
-          await pullRebase(vaultRoot, undefined, "periodic");
-        } catch (err) {
-          recordError(vaultRoot, err);
-          console.error(`periodic sync pull failed: ${errText(err)}`);
-          return idle;
-        }
-        const s = st(vaultRoot);
-        if (!s.unpushed && !(await hasLocalOnlyCommits(vaultRoot))) return idle;
-        s.unpushed = true;
-        return { value: undefined, settle: pushWithRetry(vaultRoot) };
-      });
+      await withLock(
+        vaultRoot,
+        async () => {
+          await selfHeal(vaultRoot);
+          if (!(await hasRemote(vaultRoot))) return idle;
+          if (!remoteRecentlyDown(vaultRoot)) {
+            try {
+              await pullRebase(vaultRoot, undefined, "periodic");
+            } catch (err) {
+              recordError(vaultRoot, err);
+              console.error(`periodic sync pull failed: ${errText(err)}`);
+              return idle;
+            }
+          }
+          const s = st(vaultRoot);
+          if (!s.unpushed && !(await hasLocalOnlyCommits(vaultRoot))) return idle;
+          return { value: undefined, push: true };
+        },
+        false,
+      );
     } catch (err) {
       console.error(`periodic sync failed: ${errText(err)}`);
     } finally {
@@ -1169,15 +1458,20 @@ export async function noteHistory(
     const status = statusLines.find((l) => l.includes("\t"));
     const parts = status?.split("\t");
     const atCommit = parts ? parts[parts.length - 1] : current;
-    // After a rename/copy line, older commits know the file by its old path.
-    if (parts && /^[RC]/.test(parts[0]) && parts.length >= 3) current = parts[1];
+    // --follow also detects copies: a note created from a template (or with the same content as
+    // another note) shows up as C<score> from that other note, and an inbox accept as a rename
+    // from _inbox/<id>.md. Both are this note's creation: keep that commit, stop the walk there.
+    const isMove = parts !== undefined && parts.length >= 3 && /^[RC]/.test(parts[0]);
+    const created = isMove && (parts[0].startsWith("C") || parts[1].startsWith("_inbox/"));
+    // After a genuine rename line, older commits know the file by its old path.
+    if (isMove && !created) current = parts[1];
     if (!canRead(atCommit)) {
       restricted = true;
       break;
     }
     const [sha, hash, date, author, ...rest] = header.split("\t");
     entries.push({ sha, hash, path: atCommit, date, author, subject: rest.join("\t") });
-    if (entries.length >= limit) break;
+    if (created || entries.length >= limit) break;
   }
   return { path: rel, entries, restricted };
 }

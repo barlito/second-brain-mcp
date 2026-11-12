@@ -53,7 +53,7 @@ before(async () => {
   ]).token;
 
   await new Promise<void>((resolve) => {
-    server = createApp({ vaultRoot }).listen(0, resolve);
+    server = createApp({ vaultRoot }).listen(0, () => resolve());
   });
   const { port } = server.address() as AddressInfo;
   baseUrl = `http://127.0.0.1:${port}/mcp`;

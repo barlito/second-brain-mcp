@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import { projectArg, RegisterTool, spaceArg, withAclAndAudit } from "./common";
+import { projectArg, RegisterTool, registerKbTool, spaceArg, withAclAndAudit } from "./common";
 import {
   ENTRY_NOTE,
   entryNoteTemplate,
@@ -11,7 +11,8 @@ import {
 import { writeNote } from "./writeNote";
 
 export const register: RegisterTool = (server, { vaultRoot }) => {
-  server.registerTool(
+  registerKbTool(
+    server,
     "kb_init_project",
     {
       description:
@@ -23,8 +24,8 @@ export const register: RegisterTool = (server, { vaultRoot }) => {
         summary: z
           .string()
           .trim()
-          .min(1, "summary must not be empty")
-          .max(SUMMARY_MAX_CHARS, `summary too long (max ${SUMMARY_MAX_CHARS} characters)`)
+          .min(1, "must not be empty")
+          .max(SUMMARY_MAX_CHARS, `too long (max ${SUMMARY_MAX_CHARS} characters)`)
           .describe("What the project is, in a few sentences"),
       },
     },

@@ -22,7 +22,7 @@ const LIST_CONCURRENCY = 8;
 
 export class InboxFullError extends Error {
   constructor() {
-    super("too many pending proposals; ask the user to review the inbox");
+    super("Too many pending proposals. Ask the user to review the inbox.");
     this.name = "InboxFullError";
   }
 }

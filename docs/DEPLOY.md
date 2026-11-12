@@ -7,7 +7,7 @@ Releases are cut with GitHub Releases and deployed with GitHub Actions (same flo
 ## Release, deploy, rollback (GitHub Actions)
 
 1. **Release**: create a GitHub Release `vX.Y.Z`. `release.yaml` runs the tests, then builds and pushes `barlito/second-brain-mcp:vX.Y.Z` (and `:latest` unless the release is a prerelease) to Docker Hub (buildcache on ghcr). Tags are immutable: never reuse one.
-2. **Deploy**: run the Deploy workflow on that tag (the job refuses a non-tag ref):
+2. **Deploy**: run the Deploy workflow on that tag (the job refuses a non-tag ref, a tag that is not `vX.Y.Z[-suffix]`, and a tag whose image is not on Docker Hub (`docker manifest inspect`), before touching the service):
    ```bash
    gh workflow run deploy.yaml --ref vX.Y.Z                    # image-only update
    gh workflow run deploy.yaml --ref vX.Y.Z -f re-deploy=true  # full stack deploy
@@ -18,8 +18,10 @@ Releases are cut with GitHub Releases and deployed with GitHub Actions (same flo
 
 Required repo config:
 
-- Secrets: `SSH_PRIVATE_KEY`, `DOCKER_HUB_USERNAME`, `DOCKER_HUB_READ_WRITE_DELETE_ACCESS_TOKEN`, `ADMIN_PROXY_SECRET`, `ADMIN_WEB_SECRET`, `VAULT_DEPLOY_KEY` (private half of the vault deploy key).
-- Variables: `SERVER_HOST`, `SERVER_PORT`, `SERVER_USERNAME`, and optionally `SERVER_HOST_KEY` (full `known_hosts` line to pin the host; without it the jobs fall back to `ssh-keyscan` and warn).
+- Secrets: `SSH_PRIVATE_KEY`, `DOCKER_HUB_USERNAME`, `DOCKER_HUB_READ_WRITE_DELETE_ACCESS_TOKEN` (release only), `DOCKER_HUB_READ_ONLY_ACCESS_TOKEN` (deploy/rollback, required, no fallback), `ADMIN_PROXY_SECRET`, `ADMIN_WEB_SECRET`, `VAULT_DEPLOY_KEY` (private half of the vault deploy key).
+- Variables: `SERVER_HOST`, `SERVER_PORT`, `SERVER_USERNAME`, `SERVER_HOST_KEY` (required: full `known_hosts` line pinning the host, e.g. `[1.2.3.4]:3333 ssh-ed25519 AAAA...`; the jobs fail without it, there is no `ssh-keyscan` fallback), and optionally `VAULT_DEPLOY_KEY_SECRET` (Swarm secret name, default `vault_deploy_key`, see Secret rotation) and `AUTHELIA_SESSION_COOKIE` (only if not `authelia_session`).
+
+Docker Hub tokens: `--with-registry-auth` (deploy and rollback) stores the CLI's registry credentials in the Swarm raft store so the nodes can pull. Deploy/rollback therefore log in with a **Read-only** Docker Hub access token (`DOCKER_HUB_READ_ONLY_ACCESS_TOKEN`, create it under Docker Hub -> Account settings -> Personal access tokens, scope *Read-only*); the read/write/delete token is only used by `release.yaml` to push and never reaches the Swarm.
 
 The manual checklist below does the same by hand.
 
@@ -36,16 +38,17 @@ The manual checklist below does the same by hand.
   ssh-keygen -t ed25519 -N "" -C "second-brain-mcp-vault" -f ./vault_deploy_key
   ```
 - [ ] In the vault repo: Settings -> Deploy keys -> Add deploy key, paste `vault_deploy_key.pub`, tick **Allow write access**.
-- [ ] On the Swarm manager, create the secret and destroy the local copies:
+- [ ] Store the private key as the GitHub secret `VAULT_DEPLOY_KEY` (the `re-deploy=true` workflow creates the Swarm secret from it when missing), then destroy the local copies:
   ```bash
-  docker secret create vault_deploy_key ./vault_deploy_key
+  gh secret set VAULT_DEPLOY_KEY < ./vault_deploy_key
   shred -u ./vault_deploy_key ./vault_deploy_key.pub
   ```
+  Manual deploys without GitHub Actions: run `docker secret create vault_deploy_key ./vault_deploy_key` on the manager before the `shred`. The private key then only lives in the GitHub secret and the Swarm secret.
   The prod compose mounts it at `/run/secrets/vault_deploy_key` (uid/gid 10001, mode 0400) and git uses it via `GIT_SSH_COMMAND`. GitHub host keys are baked into the image and verified.
 
 ### 3. Publish the image (Docker Hub, immutable tag)
 
-- [ ] Create a GitHub Release `vX.Y.Z`: `release.yaml` pushes `barlito/second-brain-mcp:vX.Y.Z`. Manual equivalent: `docker build -t barlito/second-brain-mcp:vX.Y.Z . && docker push barlito/second-brain-mcp:vX.Y.Z` (never reuse a tag). The deploying machine needs `docker login` to Docker Hub (`--with-registry-auth` forwards it to the nodes).
+- [ ] Create a GitHub Release `vX.Y.Z`: `release.yaml` pushes `barlito/second-brain-mcp:vX.Y.Z`. Manual equivalent: `docker build -t barlito/second-brain-mcp:vX.Y.Z . && docker push barlito/second-brain-mcp:vX.Y.Z` (never reuse a tag). The deploying machine needs `docker login` to Docker Hub (`--with-registry-auth` forwards it to the nodes and stores it in the Swarm raft store: log in with a read-only token, not the push token).
 
 ### 3b. Web admin secrets and Authelia (required: compose refuses to render without them)
 
@@ -58,11 +61,11 @@ The web admin UI (`https://second-brain-admin.barlito.fr`, port 3002) sits behin
   ```bash
   openssl rand -hex 32
   ```
-  The deploy job must export both in the environment of `make deploy.prod`; the prod compose uses `${ADMIN_PROXY_SECRET:?...}` / `${ADMIN_WEB_SECRET:?...}`. For a manual deploy: `export ADMIN_PROXY_SECRET=... ADMIN_WEB_SECRET=...` first. (Local `make deploy` generates and reuses `data/admin-proxy-secret` and `data/admin-web-secret`, mode 0600, gitignored.)
+  The deploy job must export both in the environment of `make deploy.prod`; the prod compose uses `${ADMIN_PROXY_SECRET:?...}` / `${ADMIN_WEB_SECRET:?...}`. For a manual deploy: `export ADMIN_PROXY_SECRET=... ADMIN_WEB_SECRET=...` first. To rotate either one, update the GitHub secret and run the Deploy workflow with `re-deploy=true`: the image-only update (`docker service update --image`) does not re-render the compose file, so the service keeps the old values (and Traefik's header middleware label too). (Local `make deploy` generates and reuses `data/admin-proxy-secret` and `data/admin-web-secret`, mode 0600, gitignored.)
 - [ ] Authelia (in the traefik-base stack) must satisfy:
   - the `authelia-auth@file` forwardAuth middleware lists `Remote-User`, `Remote-Groups` (and `Remote-Name`) in `authResponseHeaders`;
   - an access control rule for host `second-brain-admin.barlito.fr` (and `second-brain-admin.local.barlito.fr` locally) restricted to `subject: ["group:admins"]` with the policy you want (e.g. `two_factor`); the app also checks the `admins` group itself (`ADMIN_GROUP`).
-  - the session cookie is named `authelia_session` (default); set `AUTHELIA_SESSION_COOKIE` if yours differs. CSRF tokens are bound to it, so POSTs are refused without it and a new login invalidates old forms.
+  - the session cookie is named `authelia_session` (default). If yours differs, export `AUTHELIA_SESSION_COOKIE` when rendering the prod compose (`docker-compose-prod.yml` passes `${AUTHELIA_SESSION_COOKIE:-authelia_session}` to the app) and redeploy with `re-deploy=true`; for the workflow, set the repo variable `AUTHELIA_SESSION_COOKIE`. CSRF tokens are bound to it, so POSTs are refused without it and a new login invalidates old forms.
 
 ### 4. Deploy
 
@@ -118,6 +121,8 @@ The web admin UI (`https://second-brain-admin.barlito.fr`, port 3002) sits behin
 
 Updates use `stop-first` with `failure_action: rollback` and a 30 s monitor window, so a task that fails to start is rolled back automatically (Swarm then exits 0, which is why `deploy.assert_image` exists: it fails the workflow unless the service really runs the new image, healthy).
 
+**Automatic rollback after a migration crash-loops.** If the new image started, migrated `acl.db` (schema version bumped) and then failed the monitor window (unhealthy, crash after boot), Swarm rolls back to the old image, which refuses the newer schema (`DB schema version N is newer than this build supports`) and crash-loops: the service is down. Recover with the Rollback workflow and the pre-upgrade backup: `gh workflow run rollback.yaml --ref main -f tag=<old> -f restore-db=acl-<ts>.db` (scale to 0, restore, start the old image), or fix forward by deploying a corrected newer release.
+
 Run the **Rollback** workflow (`gh workflow run rollback.yaml --ref main -f tag=<old> [-f restore-db=acl-<ts>.db]`) or by hand:
 
 ```bash
@@ -135,7 +140,13 @@ make docker.service.update args="--replicas 1 --image barlito/second-brain-mcp:<
 TAG=<old> make deploy.assert_image && make smoke.test
 ```
 
-Tokens created or revoked after the restored backup are lost. `deploy.prod` and the Deploy/Rollback workflows take a backup (`make db.backup`) before changing anything, so a pre-upgrade copy always exists under `/data/backups` (list it with `docker exec <cid> ls /data/backups`). Local `make deploy` does not back up.
+Tokens created or revoked after the restored backup are lost. `deploy.prod` and the Deploy/Rollback workflows take a backup (`make db.backup`) before changing anything, under `/data/backups` (list it with `docker exec <cid> ls /data/backups`). A pre-upgrade copy is **not** guaranteed: `db.backup` is skipped when no task is running (first deploy, service down or crash-looping), and the Rollback workflow continues when its backup fails (`continue-on-error`, with a warning). Check the job log for the backup line, and take one by hand (`make backup-db`) before a risky upgrade if in doubt. Local `make deploy` does not back up.
+
+### Secret rotation
+
+- `vault_deploy_key`: Swarm secrets are immutable and in use by the service, so rotate with a new, versioned name; the mount path stays `/run/secrets/vault_deploy_key` (fixed `target` in `docker-compose-prod.yml`). Add the new public key to the vault repo's deploy keys, set the GitHub secret `VAULT_DEPLOY_KEY` to the new private key and the variable `VAULT_DEPLOY_KEY_SECRET` to e.g. `vault_deploy_key_v2`, then run the Deploy workflow with `re-deploy=true` (it creates the new secret and rolls the service onto it). Manually: `docker secret create vault_deploy_key_v2 <file>` then `VAULT_DEPLOY_KEY_SECRET=vault_deploy_key_v2 TAG=<tag> make deploy.prod`. Afterwards remove the old deploy key from the repo and `docker secret rm vault_deploy_key`.
+- `ADMIN_PROXY_SECRET` / `ADMIN_WEB_SECRET`: update the GitHub secrets and redeploy with `re-deploy=true` (an image-only update keeps the old values). Rotating `ADMIN_WEB_SECRET` invalidates open admin forms.
+- Docker Hub read-only token: update `DOCKER_HUB_READ_ONLY_ACCESS_TOKEN`; the next deploy/rollback (`--with-registry-auth`) replaces the stored credentials. Revoke the old token on Docker Hub afterwards.
 
 The SQLite database and the vault live on named volumes and survive redeploys.
 
@@ -152,4 +163,4 @@ The SQLite database and the vault live on named volumes and survive redeploys.
 | `/health/details` is `degraded`, `lastPushOk: false` or `unpushed: true` | Push failing: check the logs for `git push` / `periodic sync` errors, that the deploy key has write access, and that GitHub is reachable. Local commits are kept and retried every sync interval. |
 | `vault bootstrap failed` at startup, container restarting | Clone failed: secret `vault_deploy_key` missing or wrong, key not added to the repo, repo or `main` branch missing, or a different repo name than the one in `docker-compose-prod.yml`. |
 | Permission errors on `/vault` or `/data` | The volumes must be writable by uid/gid 10001 (the image pre-creates them so for named volumes). If you switched to bind mounts, `chown 10001:10001` them. |
-| Service does not start: pull denied / no such image | The tag was not pushed, or the deploying machine is not logged in to Docker Hub (`--with-registry-auth` forwards that login). `TAG` unset aborts before deploying. |
+| Service does not start: pull denied / no such image | The tag was not pushed, or the deploying machine is not logged in to Docker Hub (`--with-registry-auth` forwards that login). `TAG` unset aborts before deploying; the workflows check the image with `docker manifest inspect` first. |

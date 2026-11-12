@@ -38,7 +38,7 @@ test("logAuthFailure writes a null-token denied auth row", () => {
 
 test("free-text fields are truncated", () => {
   const big = "x".repeat(10_000);
-  audit.logAudit({ action: "read", result: "ok", space: big, project: big, section: big, note: big, detail: big });
+  audit.logAudit({ tokenId: "t", tokenName: "t", action: "read", result: "ok", space: big, project: big, section: big, note: big, detail: big });
   const r = last();
   for (const k of ["space", "project", "section", "note", "detail"]) {
     assert.equal(r[k]!.length, audit.MAX_FIELD_LEN);
@@ -50,7 +50,7 @@ test("pruneAudit deletes only old rows and returns the count", () => {
   const old = new Date(Date.now() - 40 * 86_400_000).toISOString();
   db.prepare("INSERT INTO audit_log (ts, action, result) VALUES (?, 'prune-test', 'ok')").run(old);
   db.prepare("INSERT INTO audit_log (ts, action, result) VALUES (?, 'prune-test', 'ok')").run(old);
-  audit.logAudit({ action: "prune-test", result: "ok" });
+  audit.logAudit({ tokenId: "t", tokenName: "t", action: "prune-test", result: "ok" });
   assert.equal(audit.pruneAudit(30), 2);
   assert.equal(
     (db.prepare("SELECT COUNT(*) c FROM audit_log WHERE action = 'prune-test'").get() as { c: number }).c,

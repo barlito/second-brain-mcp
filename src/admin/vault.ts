@@ -115,7 +115,8 @@ function checkContent(t: NoteRef, content: string): void {
 // Optimistic concurrency: `base` is the sha256 of the content the form was loaded from. The
 // comparison runs INSIDE the write lock (after the pull), so nothing can slip in between
 // the check and the write.
-export async function editNote(vaultRoot: string, t: NoteRef, content: string, base: string, user: string): Promise<string> {
+// Returns null when the content was identical (nothing committed).
+export async function editNote(vaultRoot: string, t: NoteRef, content: string, base: string, user: string): Promise<string | null> {
   if (!SHA256_RE.test(base)) throw new AdminError(422, "missing or invalid form state; reload the note");
   checkContent(t, content);
   const abs = resolve(vaultRoot, t);
@@ -140,7 +141,7 @@ export async function editNote(vaultRoot: string, t: NoteRef, content: string, b
   return commitSha;
 }
 
-export async function createNote(vaultRoot: string, t: NoteRef, content: string, user: string): Promise<string> {
+export async function createNote(vaultRoot: string, t: NoteRef, content: string, user: string): Promise<string | null> {
   if (!isValidSlug(t.note)) throw new AdminError(422, "Invalid note name: use a-z, 0-9 and hyphens (max 64, no leading hyphen).");
   checkContent(t, content);
   const abs = resolve(vaultRoot, t);

@@ -43,11 +43,11 @@ test("shutdown waits for in-flight requests before draining writes; new requests
     exit: (c) => exits.push(c),
   });
   const done = shutdown("SIGTERM");
-  // Wait (bounded) until shutdown has progressed to abortPushes, then flush
-  // several macrotasks so a premature drain would have had the chance to run.
-  for (let i = 0; i < 1000 && !events.includes("abortPushes"); i++) await new Promise((r) => setImmediate(r));
-  for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r));
-  assert.deepEqual(events, ["abortPushes"], "drain must wait for the in-flight request");
+  // Wait (bounded) until shutdown has started, then flush several macrotasks
+  // so a premature drain (or push abort) would have had the chance to run.
+  for (let i = 0; i < 1000 && !lifecycle.shuttingDown; i++) await new Promise((r) => setImmediate(r));
+  for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r));
+  assert.deepEqual(events, [], "drain must wait for the in-flight request");
   assert.deepEqual(exits, []);
 
   // Late arrival on an existing keep-alive path: refused with JSON-RPC 503.
@@ -58,8 +58,29 @@ test("shutdown waits for in-flight requests before draining writes; new requests
 
   (fakeRes as unknown as EventEmitter).emit("finish");
   await done;
-  assert.deepEqual(events, ["abortPushes", "drain"]);
+  // Pushes are only aborted once the drain (incl. the final push) is over.
+  assert.deepEqual(events, ["drain", "abortPushes"]);
   assert.deepEqual(exits, [0]);
+});
+
+test("JSON-RPC batches above the cap are refused before reaching the MCP server", async () => {
+  const app = await listen(server.createApp({ vaultRoot: newRepo() }));
+  const auth = { Authorization: `Bearer ${token}`, Accept: "application/json, text/event-stream" };
+  const batch = (n: number) =>
+    JSON.stringify(Array.from({ length: n }, (_, i) => ({ jsonrpc: "2.0", method: "tools/list", id: i + 1 })));
+  try {
+    const big = await post(app.baseUrl, auth, batch(server.MAX_JSONRPC_BATCH + 1));
+    assert.equal(big.status, 400);
+    const body = (await big.json()) as { error: { code: number; message: string } };
+    assert.equal(body.error.code, -32600);
+    assert.match(body.error.message, /batch too large/);
+
+    const ok = await post(app.baseUrl, auth, batch(server.MAX_JSONRPC_BATCH));
+    assert.notEqual(ok.status, 400);
+    await ok.text();
+  } finally {
+    await app.close();
+  }
 });
 
 test("while shutting down /mcp answers 503 JSON-RPC", async () => {
