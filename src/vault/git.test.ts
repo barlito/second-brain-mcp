@@ -138,7 +138,7 @@ test("unreachable remote: write succeeds, push is retried and status reports fai
   console.error = (...a: unknown[]) => void errors.push(a.join(" "));
   try {
     const { commitSha } = await syncWrite(vault, join(vault, "n.md"), "x\n", "offline write");
-    assert.match(commitSha, /^[0-9a-f]{40}$/);
+    assert.match(commitSha ?? "", /^[0-9a-f]{40}$/);
     await drainWrites();
   } finally {
     console.error = orig;
