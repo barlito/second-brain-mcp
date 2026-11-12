@@ -1169,15 +1169,20 @@ export async function noteHistory(
     const status = statusLines.find((l) => l.includes("\t"));
     const parts = status?.split("\t");
     const atCommit = parts ? parts[parts.length - 1] : current;
-    // After a rename/copy line, older commits know the file by its old path.
-    if (parts && /^[RC]/.test(parts[0]) && parts.length >= 3) current = parts[1];
+    // --follow also detects copies: a note created from a template (or with the same content as
+    // another note) shows up as C<score> from that other note, and an inbox accept as a rename
+    // from _inbox/<id>.md. Both are this note's creation: keep that commit, stop the walk there.
+    const isMove = parts !== undefined && parts.length >= 3 && /^[RC]/.test(parts[0]);
+    const created = isMove && (parts[0].startsWith("C") || parts[1].startsWith("_inbox/"));
+    // After a genuine rename line, older commits know the file by its old path.
+    if (isMove && !created) current = parts[1];
     if (!canRead(atCommit)) {
       restricted = true;
       break;
     }
     const [sha, hash, date, author, ...rest] = header.split("\t");
     entries.push({ sha, hash, path: atCommit, date, author, subject: rest.join("\t") });
-    if (entries.length >= limit) break;
+    if (created || entries.length >= limit) break;
   }
   return { path: rel, entries, restricted };
 }
