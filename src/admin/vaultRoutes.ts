@@ -96,8 +96,8 @@ export function vaultRouter(d: VaultDeps): express.Router {
     try {
       await browse(vaultRoot, [t.space, t.project, t.section]);
       const sha = await createNote(vaultRoot, t, content, userOf(res));
-      auditWrite(res, "web_note_create", t, "ok", "created", sha);
-      d.redirectBanner(res, noteUrl(t), { kind: "ok", title: `Created ${t.note}.`, lines: [`Commit ${sha.slice(0, 7)}`] });
+      auditWrite(res, "web_note_create", t, "ok", "created", sha || undefined);
+      d.redirectBanner(res, noteUrl(t), { kind: "ok", title: `Created ${t.note}.`, lines: sha ? [`Commit ${sha.slice(0, 7)}`] : [] });
     } catch (err) {
       auditWrite(res, "web_note_create", t, "error", reasonOf(err));
       if (err instanceof AdminError && (err.status === 422 || err.status === 409)) {
@@ -128,8 +128,14 @@ export function vaultRouter(d: VaultDeps): express.Router {
     const base = str(body.base);
     try {
       const sha = await editNote(vaultRoot, t, content, base, userOf(res));
-      auditWrite(res, "web_note_edit", t, "ok", "edited", sha);
-      d.redirectBanner(res, noteUrl(t), { kind: "ok", title: `Saved ${t.note}.`, lines: [`Commit ${sha.slice(0, 7)}`] });
+      if (sha === null) {
+        // Identical content: no commit, so no sha (HEAD may be someone else's commit).
+        auditWrite(res, "web_note_edit", t, "ok", "no changes (content identical)");
+        d.redirectBanner(res, noteUrl(t), { kind: "ok", title: `No changes to ${t.note} (content identical).` });
+      } else {
+        auditWrite(res, "web_note_edit", t, "ok", "edited", sha || undefined);
+        d.redirectBanner(res, noteUrl(t), { kind: "ok", title: `Saved ${t.note}.`, lines: sha ? [`Commit ${sha.slice(0, 7)}`] : [] });
+      }
     } catch (err) {
       auditWrite(res, "web_note_edit", t, "error", reasonOf(err));
       // 422 (rule violation) and 409 (stale): keep the user's text and the ORIGINAL base, so a

@@ -11,6 +11,11 @@ import { redact, SyncConflictError, VaultBusyError } from "../vault/git";
 
 export const MAX_CONTENT_CHARS = 512 * 1024;
 
+// A write whose content was identical: nothing committed, so no sha to report.
+export const NO_CHANGES_MESSAGE = "No changes (content identical).";
+// Same rule as the web editor (admin/vault NOT_UTF8_MESSAGE): never decode and rewrite such a note.
+export const NOTE_NOT_UTF8_MESSAGE = "Note is not valid UTF-8; edit it in git.";
+
 // Dependencies handed to every tool's register().
 export interface ToolDeps {
   vaultRoot: string;

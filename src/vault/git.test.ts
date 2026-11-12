@@ -33,6 +33,7 @@ import {
   MoveSourceDirtyError,
   MoveSourceMissingError,
   NoteTooLargeError,
+  NoteNotUtf8Error,
   MoveTargetExistsError,
   writeNoteAtomic,
 } from "./git";
@@ -61,9 +62,9 @@ test("writeNoteAtomic + commitFile produce a real commit", async () => {
   assert.equal(readFileSync(abs, "utf8"), "# hello\n");
   assert.equal(sha, git(["rev-parse", "HEAD"], repo).trim());
   assert.match(git(["log", "--oneline", "-1"], repo), /add note/);
-  // identical content again: nothing to commit, returns HEAD
+  // identical content again: nothing to commit, reports no commit (not HEAD)
   writeNoteAtomic(repo, abs, "# hello\n");
-  assert.equal(await commitFile(repo, "note.md", "noop"), sha);
+  assert.equal(await commitFile(repo, "note.md", "noop"), null);
   assert.deepEqual(readdirSync(repo).filter((f) => f.includes(".tmp-")), []);
 });
 
@@ -100,7 +101,7 @@ test("a failing locked operation does not wedge the queue", async () => {
   const failing = syncWrite(repo, join(outside, "x.md"), "x", "bad");
   const ok = syncWrite(repo, join(repo, "ok.md"), "ok\n", "good");
   await assert.rejects(failing);
-  assert.match((await ok).commitSha, /^[0-9a-f]{40}$/);
+  assert.match((await ok).commitSha ?? "", /^[0-9a-f]{40}$/);
   await drainWrites();
 });
 
@@ -236,7 +237,8 @@ test("identical re-write succeeds even with untracked files present", async () =
   const { commitSha } = await syncWrite(repo, join(repo, "a.md"), "a\n", "a");
   writeFileSync(join(repo, "untracked.txt"), "u\n");
   const again = await syncWrite(repo, join(repo, "a.md"), "a\n", "a again");
-  assert.equal(again.commitSha, commitSha);
+  assert.ok(commitSha);
+  assert.equal(again.commitSha, null); // nothing committed: HEAD is not reported as ours
   assert.equal(git(["rev-list", "--count", "HEAD"], repo).trim(), "1");
 });
 
@@ -711,5 +713,76 @@ test("syncMove: a failed commit (hook) rolls the move back", async () => {
   await assert.rejects(syncMove(repo, a, join(repo, "z", "a.md"), "mv"));
   assert.equal(readFileSync(a, "utf8"), "A\n");
   assert.equal(existsSync(join(repo, "z", "a.md")), false);
+  assert.equal(git(["status", "--porcelain"], repo), "");
+});
+
+// ---- write path: commit-landed guard, validation before touching, raw bytes ----
+
+test("lockedWrite: an error reported after the commit landed keeps the write (no silent revert)", async () => {
+  const repo = newRepo();
+  const abs = join(repo, "j.md");
+  await syncAppend(repo, abs, "- one", "a1");
+  // `git commit` succeeds but then reports a failure (as a post-commit hook timeout would).
+  const cp = require("node:child_process");
+  const real = cp.execFile;
+  cp.execFile = (file: string, args: string[], opts: unknown, cb: (...a: unknown[]) => void) =>
+    real(file, args, opts, (err: unknown, stdout: string, stderr: string) =>
+      args[0] === "commit" && !err
+        ? cb(Object.assign(new Error("post-commit timed out"), { stdout, stderr }), stdout, stderr)
+        : cb(err, stdout, stderr),
+    );
+  const orig = console.error;
+  console.error = () => undefined;
+  let r: { commitSha: string | null };
+  try {
+    r = await syncAppend(repo, abs, "- two", "a2");
+  } finally {
+    cp.execFile = real;
+    console.error = orig;
+  }
+  const head = git(["rev-parse", "HEAD"], repo).trim();
+  assert.equal(r.commitSha, head);
+  assert.equal(git(["show", "HEAD:j.md"], repo), "- one\n- two\n");
+  assert.equal(readFileSync(abs, "utf8"), "- one\n- two\n", "working tree matches HEAD");
+  assert.equal(git(["status", "--porcelain"], repo), "");
+  await syncAppend(repo, abs, "- three", "a3");
+  assert.equal(git(["show", "HEAD:j.md"], repo), "- one\n- two\n- three\n", "next append does not revert");
+});
+
+test("syncAppend: a refused append (size/check) leaves the file and a human's staged state untouched", async () => {
+  const repo = newRepo();
+  const abs = join(repo, "n.md");
+  await syncWrite(repo, abs, "a\n", "a");
+  writeFileSync(abs, "a\nstaged by a human\n");
+  git(["add", "n.md"], repo);
+  const old = new Date(Date.now() - 3600_000);
+  utimesSync(abs, old, old);
+  const mtime = lstatSync(abs).mtimeMs;
+  await assert.rejects(syncAppend(repo, abs, "y".repeat(50), "a", 20), NoteTooLargeError);
+  await assert.rejects(
+    syncAppend(repo, abs, "z", "a", undefined, () => {
+      throw new Error("rule");
+    }),
+    /rule/,
+  );
+  assert.equal(lstatSync(abs).mtimeMs, mtime);
+  assert.equal(git(["diff", "--cached", "--name-only"], repo).trim(), "n.md", "staged change kept");
+  assert.equal(git(["show", ":n.md"], repo), "a\nstaged by a human\n");
+});
+
+test("non-UTF-8 note: append is refused and bytes kept; a failed overwrite restores the raw bytes", async () => {
+  const repo = newRepo();
+  const abs = join(repo, "bin.md");
+  const bytes = Buffer.from([0x68, 0x69, 0xff, 0xfe, 0x0a, 0xc3, 0x28, 0x0a]);
+  writeFileSync(abs, bytes);
+  git(["add", "."], repo);
+  git(["commit", "-m", "seed"], repo);
+  await assert.rejects(syncAppend(repo, abs, "x", "a"), NoteNotUtf8Error);
+  assert.ok(readFileSync(abs).equals(bytes));
+  // Failed commit (hook) on an overwrite: restore must write the original bytes back.
+  const hook = join(repo, ".git", "hooks", "pre-commit");
+  writeFileSync(hook, "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+  await assert.rejects(syncWrite(repo, abs, "replaced\n", "w"));
+  assert.ok(readFileSync(abs).equals(bytes), "raw bytes restored, no U+FFFD");
   assert.equal(git(["status", "--porcelain"], repo), "");
 });

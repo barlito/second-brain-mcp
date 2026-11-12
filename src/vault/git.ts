@@ -471,7 +471,7 @@ export async function pullRebase(
 // Write-then-rename so a crash mid-write never leaves a half-written note.
 // The temp name is random and opened O_EXCL|O_NOFOLLOW so a planted symlink
 // can't redirect the write.
-export function writeNoteAtomic(vaultRoot: string, absolutePath: string, content: string): void {
+export function writeNoteAtomic(vaultRoot: string, absolutePath: string, content: string | Buffer): void {
   assertSafePath(vaultRoot, absolutePath);
   const dir = path.dirname(absolutePath);
   mkdirSync(dir, { recursive: true });
@@ -486,7 +486,7 @@ export function writeNoteAtomic(vaultRoot: string, absolutePath: string, content
       fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW,
       0o644,
     );
-    writeSync(fd, content);
+    writeSync(fd, typeof content === "string" ? Buffer.from(content, "utf8") : content);
     fsyncSync(fd);
     closeSync(fd);
     fd = undefined;
@@ -498,11 +498,14 @@ export function writeNoteAtomic(vaultRoot: string, absolutePath: string, content
   }
 }
 
+// Returns the new commit's sha, or null when nothing was staged for the path
+// (identical re-write): no commit is made, and HEAD (possibly someone else's
+// commit) is deliberately not reported as ours.
 export async function commitFile(
   vaultRoot: string,
   relativePath: string,
   message: string,
-): Promise<string> {
+): Promise<string | null> {
   await runGit(["add", "--", relativePath], vaultRoot);
   let staged = true;
   try {
@@ -512,10 +515,9 @@ export async function commitFile(
   } catch (err) {
     if ((err as { code?: unknown }).code !== 1) throw err;
   }
-  if (staged) {
-    // Pathspec: never sweep in other staged changes (e.g. a human's drafts).
-    await runGit(["commit", "-m", message, "--", relativePath], vaultRoot);
-  }
+  if (!staged) return null;
+  // Pathspec: never sweep in other staged changes (e.g. a human's drafts).
+  await runGit(["commit", "-m", message, "--", relativePath], vaultRoot);
   return (await runGit(["rev-parse", "HEAD"], vaultRoot)).trim();
 }
 
@@ -661,7 +663,7 @@ export function syncWrite(
   content: string,
   commitMessage: string,
   opts: WriteOptions = {},
-): Promise<{ commitSha: string }> {
+): Promise<WriteResult> {
   return lockedWrite(vaultRoot, absolutePath, () => content, commitMessage, opts);
 }
 
@@ -670,6 +672,21 @@ export class NoteTooLargeError extends Error {
     super(message);
     this.name = "NoteTooLargeError";
   }
+}
+
+// The existing note is not valid UTF-8: appending would have to decode it and
+// would corrupt the invalid bytes (U+FFFD). Such a note must be edited in git.
+export class NoteNotUtf8Error extends Error {
+  constructor() {
+    super("note is not valid UTF-8");
+    this.name = "NoteNotUtf8Error";
+  }
+}
+
+// commitSha is null when the content was identical and nothing was committed.
+// It is "" in the rare case where the commit landed but its sha could not be read back.
+export interface WriteResult {
+  commitSha: string | null;
 }
 
 // Read-modify-write inside the write lock, so concurrent appends never lose
@@ -684,11 +701,13 @@ export function syncAppend(
   maxChars?: number,
   // Validates the resulting content inside the lock; throws to refuse.
   check?: (next: string) => void,
-): Promise<{ commitSha: string }> {
+): Promise<WriteResult> {
   return lockedWrite(
     vaultRoot,
     absolutePath,
-    (prev) => {
+    (raw) => {
+      const prev = raw ? raw.toString("utf8") : "";
+      if (raw && !Buffer.from(prev, "utf8").equals(raw)) throw new NoteNotUtf8Error();
       const t = typeof text === "function" ? text() : text;
       const next = (prev === "" || prev.endsWith("\n") ? prev : prev + "\n") + t.replace(/\n+$/, "") + "\n";
       if (maxChars !== undefined && next.length > maxChars) throw new NoteTooLargeError("note would exceed the size limit");
@@ -748,13 +767,18 @@ function finishLocked<T>(vaultRoot: string, remote: boolean, value: T): LockedRe
   return { value, settle };
 }
 
+async function headOrEmpty(vaultRoot: string): Promise<string> {
+  return (await runGit(["rev-parse", "HEAD"], vaultRoot).catch(() => "")).trim();
+}
+
 function lockedWrite(
   vaultRoot: string,
   absolutePath: string,
-  build: (previous: string) => string,
+  // Gets the note's current raw bytes (null when missing); throws to refuse.
+  build: (previous: Buffer | null) => string,
   commitMessage: string,
   opts: WriteOptions = {},
-): Promise<{ commitSha: string }> {
+): Promise<WriteResult> {
   return withLock(vaultRoot, async () => {
     assertSafePath(vaultRoot, absolutePath);
     const remote = await prepareLocked(vaultRoot);
@@ -763,11 +787,23 @@ function lockedWrite(
 
     const relativePath = path.relative(vaultRoot, absolutePath);
     const previous = existsSync(absolutePath) ? readFileSync(absolutePath) : null;
-    let commitSha: string;
+    // Built and validated before anything is touched: a refusal leaves the file
+    // (mtime) and the index (a human's staged state) exactly as they were.
+    const next = build(previous);
+    const headBefore = await headOrEmpty(vaultRoot);
+    let commitSha: string | null;
     try {
-      writeNoteAtomic(vaultRoot, absolutePath, build(previous ? previous.toString("utf8") : ""));
+      writeNoteAtomic(vaultRoot, absolutePath, next);
       commitSha = await commitFile(vaultRoot, relativePath, commitMessage);
     } catch (err) {
+      // Roll back only if the commit did not land (git may report an error after
+      // it did, e.g. a failing post-commit hook or a timeout): otherwise the working
+      // tree would disagree with HEAD and the next append would silently revert this write.
+      const headNow = await headOrEmpty(vaultRoot);
+      if (headNow !== headBefore) {
+        console.error(`git write: error after commit landed, keeping it: ${errText(err)}`);
+        return finishLocked(vaultRoot, remote, { commitSha: headNow });
+      }
       await restoreNote(vaultRoot, absolutePath, relativePath, previous);
       throw err;
     }
@@ -850,7 +886,8 @@ async function restoreNote(
     if (previous === null) {
       if (existsSync(absolutePath) || lstatOrNull(absolutePath)) unlinkSync(absolutePath);
     } else {
-      writeNoteAtomic(vaultRoot, absolutePath, previous.toString("utf8"));
+      // Raw bytes: a note that is not valid UTF-8 must come back byte for byte.
+      writeNoteAtomic(vaultRoot, absolutePath, previous);
     }
   } catch {
     /* best effort */
