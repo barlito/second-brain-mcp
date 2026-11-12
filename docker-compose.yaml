@@ -27,6 +27,11 @@ services:
       - VAULT_BRANCH=main
       - VAULT_SYNC_INTERVAL_MS=60000
       # Per-agent working memory stays small (see README "Space limits")
+      # Token-less sessions: sliding idle expiry and abuse limits (defaults shown)
+      - SESSION_IDLE_DAYS=5
+      - ACCESS_MAX_PENDING_TOTAL=20
+      - ANON_INIT_PER_MIN=10
+      - ANON_ACCESS_REQUESTS_PER_HOUR=10
       - SPACE_LIMITS=agents:maxNotes=30,maxNoteBytes=4096,maxProjectBytes=102400,archiveAfterDays=60
       # Shown in the ready-to-paste `claude mcp add` command after token creation
       - PUBLIC_MCP_URL=https://second-brain.local.barlito.fr/mcp

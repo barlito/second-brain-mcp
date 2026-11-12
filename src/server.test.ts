@@ -140,15 +140,13 @@ test("kb_write / kb_read with a wrongly-scoped token are denied", async () => {
   }
 });
 
-test("no Authorization header gets 401 before any MCP-level response", async () => {
+test("no Authorization header and no connector key: 401 before anything else", async () => {
   const res = await fetch(baseUrl, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ jsonrpc: "2.0", method: "initialize", id: 1 }),
+    body: JSON.stringify({ jsonrpc: "2.0", method: "tools/list", id: 1 }),
   });
   assert.equal(res.status, 401);
-  const body = (await res.json()) as { error: string };
-  assert.ok(body.error);
 });
 
 test("garbage Authorization header also gets 401", async () => {
@@ -260,7 +258,7 @@ test("audit_log has the expected ok/denied rows", async () => {
 test("401 writes a (coalesced) auth/denied audit row with a client IP", async () => {
   // Same IP: at most one row per minute, so earlier 401s may already have logged it.
   const before = (db.prepare("SELECT COUNT(*) AS c FROM audit_log WHERE action = 'auth'").get() as { c: number }).c;
-  for (const headers of [{}, { Authorization: "Bearer nope-not-a-token" }] as Record<string, string>[]) {
+  for (const headers of [{ Authorization: "Bearer nope-not-a-token" }, { Authorization: "Basic xyz" }] as Record<string, string>[]) {
     const res = await fetch(baseUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json", ...headers },
@@ -313,8 +311,11 @@ test("body over 1 MB gets a JSON-RPC 413 and leaves an audit row; unauthenticate
   assert.equal(row.token_name, "token-a");
   assert.match(row.detail, /413/);
 
-  const unauth = await fetch(baseUrl, { method: "POST", headers: { "Content-Type": "application/json" }, body: big });
+  const unauth = await fetch(baseUrl, { method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer nope" }, body: big });
   assert.equal(unauth.status, 401);
+  // Without a connector key the token-less path never even reads the body.
+  const anon = await fetch(baseUrl, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ pad: "x".repeat(40_000) }) });
+  assert.equal(anon.status, 401);
 });
 
 test("oversized content (under the body limit) is rejected and nothing is written", async () => {

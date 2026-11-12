@@ -25,6 +25,8 @@ import {
   Ctx,
   DashboardData,
   dashboardView,
+  accessView,
+  connectorKeyCreatedView,
   errorView,
   inboxView,
   proposalView,
@@ -32,6 +34,9 @@ import {
   tokensView,
   TokenForm,
 } from "../web/views";
+import { AccessError, approveRequest, auditSessionRevoke, countPendingRequests, denyRequest, listPendingRequests } from "../access";
+import { listActiveSessions, revokeSession } from "../auth/sessions";
+import { ConnectorKeyError, CONNECTOR_HEADER, createConnectorKey, listConnectorKeys, revealConnectorKey, revokeConnectorKey } from "../auth/connectorKeys";
 import { OneTimeStore } from "./onetime";
 import { acceptProposal, AdminError, listInbox, rejectProposal, showProposal } from "./service";
 import { vaultRouter } from "./vaultRoutes";
@@ -115,6 +120,7 @@ const FLASH_RE = /^[0-9a-f]{32}$/;
 
 type Flash =
   | { kind: "banner"; banner: Banner }
+  | { kind: "ckey"; created: { id: string; name: string; key: string } }
   | { kind: "token"; created: { id: string; name: string; token: string; expires_at: string | null }; notes: string[]; dir: string };
 
 async function dashboardData(vaultRoot: string): Promise<DashboardData> {
@@ -156,6 +162,7 @@ async function dashboardData(vaultRoot: string): Promise<DashboardData> {
     conflictBranches: sync.conflictBranches,
     activeTokens: safeCount(countActiveTokens),
     pendingProposals: pending,
+    pendingAccess: safeCount(countPendingRequests),
     audit24h: count("SELECT COUNT(*) AS n FROM audit_log WHERE ts >= ?", since),
   };
 }
@@ -308,7 +315,8 @@ export function createWebAdminApp(opts: WebAdminOptions): Express {
 
   tokensRouter.get("/", async (req, res, next) => {
     try {
-      send(res, tokensView(ctxOf(res), listTokens(), takeBanner(req, res), undefined, await knownProjects()));
+      const withSessions = req.query.sessions === "1";
+      send(res, tokensView(ctxOf(res), listTokens().filter((t) => withSessions || t.kind !== "session"), takeBanner(req, res), undefined, await knownProjects(), withSessions));
     } catch (err) {
       next(err);
     }
@@ -338,7 +346,7 @@ export function createWebAdminApp(opts: WebAdminOptions): Express {
     };
     // Project suggestions are only needed when the form is re-rendered.
     const fail = async (title: string, lines: string[] = []): Promise<void> =>
-      send(res, tokensView(ctxOf(res), listTokens(), { kind: "err", title, lines }, form, await knownProjects()), 422);
+      send(res, tokensView(ctxOf(res), listTokens().filter((t) => t.kind !== "session"), { kind: "err", title, lines }, form, await knownProjects()), 422);
     try {
       let scopes: Scope[];
       if (form.preset && !isBoundedPreset(form.preset) && form.scopes.trim()) return fail("Use either a preset or explicit scopes, not both.");
@@ -456,6 +464,90 @@ export function createWebAdminApp(opts: WebAdminOptions): Express {
   inboxRouter.post("/:id/accept", resolveWith((id, body, actor) => acceptProposal(vaultRoot, id, body.overwrite === "1", actor), "Accepted"));
   inboxRouter.post("/:id/reject", resolveWith((id, _body, actor) => rejectProposal(vaultRoot, id, actor), "Rejected"));
   app.use("/inbox", inboxRouter);
+
+  // ---- access requests (token-less sessions) ----
+
+  const accessRouter = express.Router();
+  accessRouter.param("id", (_req, res, next, id: string) => {
+    if (!UUID_RE.test(id)) return void send(res, errorView(ctxOf(res), 400, "invalid id"), 400);
+    next();
+  });
+  accessRouter.get("/", (req, res) => {
+    send(res, accessView(ctxOf(res), listPendingRequests(), listActiveSessions(), listConnectorKeys(), takeBanner(req, res)));
+  });
+  const accessBanner = (res: Response, banner: Banner): void => redirectWithFlash(res, "/access", { kind: "banner", banner });
+  accessRouter.post("/:id/approve", (req, res) => {
+    const body = req.body as Record<string, unknown>;
+    try {
+      const text = str(body.scopes);
+      const d = approveRequest(req.params.id as string, {
+        scopes: text.trim() ? scopesFromText(text) : undefined,
+        allowWildcard: body.allow_wildcard === "1",
+        code: str(body.code),
+        actor: res.locals.actor as string,
+      });
+      accessBanner(res, { kind: "ok", title: `Approved ${d.space}/${d.project} as ${d.tokenName}.`, lines: [d.scopes.map(formatScope).join(", "), ...d.notes] });
+    } catch (err) {
+      if (err instanceof AccessError) return accessBanner(res, { kind: "err", title: err.message, lines: err.lines });
+      // Scope-shape errors from parseScopes.
+      if (err instanceof Error && /^invalid scope/.test(err.message)) return accessBanner(res, { kind: "err", title: err.message });
+      throw err;
+    }
+  });
+  accessRouter.post("/:id/deny", (req, res) => {
+    try {
+      const d = denyRequest(req.params.id as string, res.locals.actor as string);
+      accessBanner(res, { kind: "ok", title: `Denied ${d.space}/${d.project}.` });
+    } catch (err) {
+      if (err instanceof AccessError) return accessBanner(res, { kind: "err", title: err.message });
+      throw err;
+    }
+  });
+  // The plaintext key is reachable only through this one-time flash.
+  accessRouter.get("/keys/created/:flashId", (req, res) => {
+    const fid = req.params.flashId as string;
+    const f = FLASH_RE.test(fid) ? flash.take(fid, userOf(res)) : undefined;
+    if (f?.kind !== "ckey") return void send(res, errorView(ctxOf(res), 404, "This page was already shown or has expired. A key cannot be retrieved again; revoke it and create a new one."), 404);
+    send(res, connectorKeyCreatedView(ctxOf(res), f.created, claudeKeyCommand(f.created.key)));
+  });
+  // Encryption secret of the stored keys: ADMIN_WEB_SECRET only (a per-boot random CSRF key would lose them).
+  const keySecret = opts.secret || process.env.ADMIN_WEB_SECRET || undefined;
+  const claudeKeyCommand = (key: string): string => `claude mcp add --scope user --transport http second-brain ${publicMcpUrl} --header "${CONNECTOR_HEADER}: ${key}"`;
+  accessRouter.post("/keys/:id/reveal", (req, res) => {
+    const r = revealConnectorKey({ id: req.params.id as string }, keySecret);
+    // The value is never audited, only the fact that it was shown.
+    auditAdmin(res, "connector_key_reveal", r.status === "ok" ? "ok" : "error", `${req.params.id} ${r.status}`);
+    if (r.status !== "ok") {
+      return accessBanner(res, { kind: "err", title: r.status === "missing" || r.status === "ambiguous" ? "Key not found or revoked." : "Cannot decrypt this key (the secret changed or it predates it): create a new key. It still works as is." });
+    }
+    res.setHeader("Cache-Control", "no-store");
+    send(res, connectorKeyCreatedView(ctxOf(res), r, claudeKeyCommand(r.key), true));
+  });
+  accessRouter.post("/keys", (req, res) => {
+    try {
+      const c = createConnectorKey(str((req.body as Record<string, unknown>).name), keySecret);
+      // Flash first, so nothing after the key exists can lose the one chance to show it.
+      const to = `/access/keys/created/${flash.put({ kind: "ckey", created: c }, userOf(res))}`;
+      auditAdmin(res, "admin_connector_key_create", "ok", `${c.id} ${c.name}`);
+      res.redirect(303, to);
+    } catch (err) {
+      if (err instanceof ConnectorKeyError) return accessBanner(res, { kind: "err", title: err.message });
+      throw err;
+    }
+  });
+  accessRouter.post("/keys/:id/revoke", (req, res) => {
+    const id = req.params.id as string;
+    const r = revokeConnectorKey(id);
+    auditAdmin(res, "admin_connector_key_revoke", r.revoked ? "ok" : "error", r.revoked ? `${id} ended ${r.sessions} session(s)` : `${id} not found or already revoked`);
+    accessBanner(res, r.revoked ? { kind: "ok", title: `Key revoked, ${r.sessions} session(s) ended.` } : { kind: "err", title: "Key not found or already revoked." });
+  });
+  accessRouter.post("/sessions/:id/revoke", (req, res) => {
+    const id = req.params.id as string;
+    const ok = revokeSession(id);
+    auditSessionRevoke(res.locals.actor as string, id, ok);
+    accessBanner(res, ok ? { kind: "ok", title: "Session revoked." } : { kind: "err", title: "Session not found or already revoked." });
+  });
+  app.use("/access", accessRouter);
 
   // ---- vault browser / editor ----
 

@@ -221,7 +221,7 @@ test("limiter: blocks after max failures per window, resets after it, bounds its
   assert.equal((l as unknown as { map: Map<string, unknown> }).map.size, 2);
 });
 
-test("repeated bad tokens: 401s, then 429 without DB work, one coalesced audit row", async () => {
+test("repeated bad tokens: 401s, then 429 for failing attempts only, one coalesced audit row", async () => {
   const limiter = new server.AuthFailureLimiter(3, 60_000);
   const tp = server.createTrustedProxy("127.0.0.1");
   const app = await listen(server.createApp({ vaultRoot: newRepo(), authLimiter: limiter, trustedProxy: tp }));
@@ -238,8 +238,8 @@ test("repeated bad tokens: 401s, then 429 without DB work, one coalesced audit r
     assert.equal(body.error.message, "Too many failed authentications");
     assert.equal(count(), 1);
 
-    // Even a valid token from the blocked IP is refused before touching the DB.
-    assert.equal((await post(app.baseUrl, { Authorization: `Bearer ${token}`, "X-Forwarded-For": ip })).status, 429);
+    // A valid token is validated first: it is never refused because of other clients' failures on the same address.
+    assert.notEqual((await post(app.baseUrl, { Authorization: `Bearer ${token}`, "X-Forwarded-For": ip })).status, 429);
     // Another IP is unaffected.
     assert.notEqual((await post(app.baseUrl, { Authorization: `Bearer ${token}`, "X-Forwarded-For": "203.0.113.78" })).status, 429);
   } finally {

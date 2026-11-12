@@ -1,6 +1,9 @@
 // Page renderers for the web admin UI. Every dynamic value goes through html`` (escaped).
 import MarkdownIt from "markdown-it";
 import type { InboxListItem, ShownProposal } from "../admin/service";
+import type { PendingRequest } from "../access";
+import type { ActiveSession } from "../auth/sessions";
+import { CONNECTOR_HEADER, type ConnectorKeyEntry } from "../auth/connectorKeys";
 import type { TokenListEntry } from "../auth/tokens";
 import { formatScope } from "../cli/token";
 import { html, raw, SafeHtml } from "./html";
@@ -36,6 +39,7 @@ const NAV: Array<[string, string]> = [
   ["/", "Dashboard"],
   ["/tokens", "Tokens"],
   ["/inbox", "Inbox"],
+  ["/access", "Access"],
   ["/vault", "Vault"],
   ["/audit", "Audit"],
 ];
@@ -84,6 +88,7 @@ export interface DashboardData {
   // null: the query failed (shown as n/a)
   activeTokens: number | null;
   pendingProposals: number | null;
+  pendingAccess: number | null;
   audit24h: number | null;
 }
 
@@ -100,6 +105,7 @@ export function dashboardView(ctx: Ctx, d: DashboardData): SafeHtml {
 <div class="grid">
 <div class="stat"><div class="n">${d.activeTokens ?? "n/a"}</div><div class="l">active tokens</div></div>
 <div class="stat"><div class="n">${d.pendingProposals ?? "n/a"}</div><div class="l">pending proposals</div></div>
+<div class="stat"><a href="/access"><div class="n">${d.pendingAccess ?? "n/a"}</div><div class="l">pending access requests</div></a></div>
 <div class="stat"><div class="n">${d.audit24h ?? "n/a"}</div><div class="l">audit rows, last 24 h</div></div>
 </div>
 <div class="card"><h2 class="flush">Health</h2>
@@ -134,7 +140,7 @@ export interface TokenForm {
   dir: string;
 }
 
-export function tokensView(ctx: Ctx, tokens: TokenListEntry[], banner?: Banner, form?: TokenForm, projects: string[] = []): SafeHtml {
+export function tokensView(ctx: Ctx, tokens: TokenListEntry[], banner?: Banner, form?: TokenForm, projects: string[] = [], showSessions = false): SafeHtml {
   const f = form ?? { name: "", scopes: "", preset: "", allowWildcard: false, expiresInDays: "", project: "", dir: "" };
   return layout(
     ctx,
@@ -142,6 +148,7 @@ export function tokensView(ctx: Ctx, tokens: TokenListEntry[], banner?: Banner, 
     "Tokens",
     html`<h1>Tokens</h1>
 ${bannerView(banner)}
+<p class="muted">${showSessions ? html`Showing session grants too. <a href="/tokens">Hide them</a>` : html`Session grants (from token-less sessions) are hidden: they live on the <a href="/access">Access</a> page. <a href="/tokens?sessions=1">Show them</a>`}</p>
 <div class="scroll"><table>
 <thead><tr><th>Name</th><th>Scopes</th><th>Created</th><th>Last used</th><th>Expires</th><th>Status</th><th></th></tr></thead>
 <tbody>
@@ -150,7 +157,7 @@ ${
     ? html`<tr><td colspan="7" class="muted">No tokens.</td></tr>`
     : tokens.map(
         (t) => html`<tr>
-<td>${t.name}<br><span class="muted mono">${t.id}</span></td>
+<td>${t.name}${t.kind === "session" ? html` <span class="badge">session</span>` : ""}<br><span class="muted mono">${t.id}</span></td>
 <td>${t.scopes.map((s) => html`<div><code>${formatScope(s)}</code></div>`)}</td>
 <td class="mono">${t.created_at}</td>
 <td class="mono">${t.last_used_at ?? "never"}</td>
@@ -277,6 +284,127 @@ ${csrfField(ctx)}
 </form>
 </div>
 <p><a href="/inbox">Back to inbox</a></p>`,
+  );
+}
+
+// ---- access requests (token-less sessions) --------------------------------
+
+const ageOf = (iso: string): string => {
+  const m = Math.max(0, Math.round((Date.now() - Date.parse(iso)) / 60_000));
+  return m < 1 ? "just now" : m < 60 ? `${m} min ago` : `${Math.round(m / 60)} h ago`;
+};
+
+type ConnectorKey = ConnectorKeyEntry;
+
+export function accessView(ctx: Ctx, pending: PendingRequest[], sessions: ActiveSession[], keys: ConnectorKey[], banner?: Banner): SafeHtml {
+  return layout(
+    ctx,
+    "/access",
+    "Access requests",
+    html`<h1>Access requests</h1>
+${bannerView(banner)}
+<p class="muted">Clients connected without a token ask for access to a project. Match the code the agent shows you, adjust the scopes if needed, then approve. Nothing is granted until you do.</p>
+${
+  pending.length === 0
+    ? html`<div class="card"><p class="muted">No pending requests.</p></div>`
+    : pending.map(
+        (r) => html`<div class="card stack">
+<p>${r.elevation ? html`<span class="badge err">elevation</span>` : ""} <strong>${r.client_name}</strong> ${r.client_version} &nbsp; <span class="muted">${ageOf(r.created_at)}, expires ${r.expires_at}</span> &nbsp; <span class="muted mono">${r.id}</span></p>
+<p>Asks for:${r.requested_scopes.map((sc) => html`<div><code>${formatScope(sc)}</code> ${sc.permission === "write" ? html`<span class="badge err">write</span>` : ""}</div>`)}</p>
+${r.exceeds ? html`<div class="banner err" role="alert"><strong>scopes exceed the stated request</strong> (${r.access} on ${r.space}/${r.project}): review every scope above.</div>` : ""}
+<p>Client: <strong>${r.client_name}</strong> ${r.client_version} &nbsp; Key: <strong>${r.connector_key ?? "?"}</strong> &nbsp; IP: <span class="mono">${r.remote_ip ?? "?"}</span></p>
+<p>Reason: ${r.reason}</p>
+<p>Current grants of this session:${
+          r.current_grants.length === 0
+            ? html` <span class="muted">none</span>`
+            : r.current_grants.map((g) => html`<div><strong>${g.name}</strong>: ${g.scopes.map((sc) => html`<code>${formatScope(sc)}</code> `)}</div>`)
+        }</p>
+<form method="post" action="/access/${r.id}/approve" class="stack">
+${csrfField(ctx)}
+<label for="scopes-${r.id}">Scopes <span class="hint">(one per line; leave as is to grant the default)</span></label>
+<textarea id="scopes-${r.id}" name="scopes" spellcheck="false" rows="4">${r.requested_scopes.map(formatScope).join("\n")}</textarea>
+<label class="check"><input type="checkbox" name="allow_wildcard" value="1"> Allow wildcard (required for any <code>*</code> scope beyond the default)</label>
+<label for="code-${r.id}">Request code <span class="hint">(the 6 characters your agent showed you in the chat; deliberately not displayed here)</span></label>
+<input type="text" id="code-${r.id}" name="code" maxlength="6" required autocomplete="off" spellcheck="false">
+<div class="actions"><button class="primary" type="submit">Approve</button></div>
+</form>
+<form method="post" action="/access/${r.id}/deny" class="actions" data-confirm="Deny this request?">
+${csrfField(ctx)}
+<button class="danger" type="submit">Deny</button>
+</form>
+</div>`,
+      )
+}
+<h2>Active sessions</h2>
+<div class="scroll"><table>
+<thead><tr><th>Client</th><th>Key</th><th>Grants</th><th>IP</th><th>Created</th><th>Last seen</th><th>Expires</th><th></th></tr></thead>
+<tbody>
+${
+  sessions.length === 0
+    ? html`<tr><td colspan="8" class="muted">No sessions with access.</td></tr>`
+    : sessions.map(
+        (s) => html`<tr>
+<td>${s.client_name} ${s.client_version}<br><span class="muted mono">${s.id}</span></td>
+<td>${s.connector_key ?? ""}</td>
+<td>${s.grants.map((g) => html`<div><strong>${g.name}</strong>${g.scopes.map((sc) => html`<div><code>${formatScope(sc)}</code></div>`)}</div>`)}</td>
+<td class="mono">${s.remote_ip ?? ""}</td>
+<td class="mono">${s.created_at}</td>
+<td class="mono">${s.last_seen_at}</td>
+<td class="mono">${s.expires_at}</td>
+<td><form method="post" action="/access/sessions/${s.id}/revoke" class="inline" data-confirm="Revoke this session? Its access stops immediately.">${csrfField(ctx)}<button class="danger" type="submit">Revoke</button></form></td>
+</tr>`,
+      )
+}
+</tbody></table></div>
+<h2>Connector keys</h2>
+<p class="muted">Token-less access is closed unless a client sends a valid key in the <code>${CONNECTOR_HEADER}</code> header (claude.ai connector "Request headers", or <code>--header</code> in Claude Code). Revoking a key ends the sessions opened through it and their grants.</p>
+<div class="scroll"><table>
+<thead><tr><th>Name</th><th>Created</th><th>Last used</th><th>Status</th><th></th></tr></thead>
+<tbody>
+${
+  keys.length === 0
+    ? html`<tr><td colspan="5" class="muted">No keys: token-less access is disabled.</td></tr>`
+    : keys.map(
+        (k) => html`<tr>
+<td>${k.name}<br><span class="muted mono">${k.id}</span></td>
+<td class="mono">${k.created_at}</td>
+<td class="mono">${k.last_used_at ?? "never"}</td>
+<td>${k.revoked_at ? html`<span class="badge err">revoked</span>` : html`<span class="badge ok">active</span>`}</td>
+<td>${k.revoked_at ? "" : html`<form method="post" action="/access/keys/${k.id}/reveal" class="inline">${csrfField(ctx)}<button type="submit">Reveal</button></form> <form method="post" action="/access/keys/${k.id}/revoke" class="inline" data-confirm="Revoke this key? Sessions opened through it end now.">${csrfField(ctx)}<button class="danger" type="submit">Revoke</button></form>`}</td>
+</tr>`,
+      )
+}
+</tbody></table></div>
+<form method="post" action="/access/keys" class="card stack">
+${csrfField(ctx)}
+<label for="key-name">New key name <span class="hint">(1-64 characters, e.g. claude-ai)</span></label>
+<input type="text" id="key-name" name="name" maxlength="64" required>
+<div class="actions"><button class="primary" type="submit">Create key</button></div>
+</form>`,
+  );
+}
+
+export function connectorKeyCreatedView(ctx: Ctx, created: { id: string; name: string; key: string }, command: string, revealed = false): SafeHtml {
+  return layout(
+    ctx,
+    "/access",
+    revealed ? "Connector key" : "Connector key created",
+    html`<h1>${revealed ? "Connector key" : "Connector key created"}</h1>
+<div class="banner warn" role="alert"><strong>This is a secret.</strong> Paste it into the connector and do not share it. You can reveal it again from the Access page (audited).</div>
+<div class="card">
+<p>Name: <strong>${created.name}</strong> <span class="muted mono">(${created.id})</span></p>
+<h2 class="flush">claude.ai</h2>
+<p>Custom connector: Authentication "No connection", then add a request header (mark it required):</p>
+<p>Header name: <code>${CONNECTOR_HEADER}</code></p>
+<textarea id="ckey-value" class="cmd" readonly rows="2" spellcheck="false">${created.key}</textarea>
+<div class="actions"><button type="button" class="primary" data-copy="ckey-value">Copy value</button><span class="muted" id="ckey-value-status" role="status"></span></div>
+</div>
+<div class="card">
+<h2 class="flush">Claude Code</h2>
+<textarea id="claude-cmd" class="cmd" readonly rows="3" spellcheck="false">${command}</textarea>
+<div class="actions"><button type="button" class="primary" data-copy="claude-cmd">Copy</button><span class="muted" id="claude-cmd-status" role="status"></span></div>
+</div>
+<p><a href="/access">Back to access</a></p>`,
   );
 }
 

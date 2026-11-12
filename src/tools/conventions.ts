@@ -86,4 +86,6 @@ Working rules:
 - New project: kb_init_project creates overview/index from a template.
 - If unsure whether something deserves a note, prefer a short journal entry, or use \`kb_propose\` (needs propose or write); the user reviews proposals.
 - Space \`agents\` is per-agent scratch working memory (agents/<agent-name>). Its overview/index is the handover note another agent resumes from: keep it up to date. The server may cap notes and sizes there and auto-archive stale notes; a refused write says what to condense or kb_archive. Durable knowledge belongs in the real project (kb_propose or kb_write), not in agents.
-- Writes (kb_write) are direct and committed to git; re-read before overwriting a note you did not just read.`;
+- Writes (kb_write) are direct and committed to git; re-read before overwriting a note you did not just read.
+
+Access without a token: if you are connected without a token, kb_* tools answer "No access for this session". You do NOT have to request access up front: work without the knowledge base when you do not need it, and call kb_request_access only when you actually need it (with the space and project you work on, read or write, and a clear reason). Then ask the user to approve it in their admin web and call kb_access_status with the returned request_id until it says approved. You can request again later in the same session to get more (another project, read to write, or an explicit scopes list); each approval adds to what you already have, a denial changes nothing. Only the user grants access, and can revoke it.`;

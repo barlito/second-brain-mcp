@@ -14,6 +14,10 @@ import { listen } from "./listen";
 import { parseAutoArchiveInterval, startAutoArchive } from "./autoArchive";
 import { parseSpaceLimits } from "./limits";
 import { createMcpServer } from "./mcp";
+import { auditAuthFailure, flushAuthAudit } from "./authFailure";
+import { anonLimits, AnonLimits, ipKey, RateLimiter } from "./rateLimit";
+import { makeSessionAuth } from "./sessionAuth";
+import { startSessionPruning } from "./auth/sessions";
 import {
   abortPendingPushes,
   BootstrapAbortedError,
@@ -196,33 +200,27 @@ export interface AppOptions {
   lifecycle?: Lifecycle;
   trustedProxy?: TrustedProxy;
   authLimiter?: AuthFailureLimiter;
+  // Limits of the token-less surface (default: env, see rateLimit.ts).
+  anonLimits?: AnonLimits;
 }
 
 // Bearer-token auth, mounted before the MCP route. No MCP involved on failure.
 function makeBearerAuth(limiter: AuthFailureLimiter) {
-  // Expired tokens never count toward the 429, but their audit rows are still coalesced per IP/minute.
+  // Expired tokens never count toward the 429, but their audit rows are still coalesced per client/minute.
   const expiredAudit = new AuthFailureLimiter(Infinity);
   return (req: Request, res: Response, next: NextFunction): void => {
-    const ip = req.ip ?? "unknown";
-    if (limiter.blocked(ip)) {
-      jsonRpcError(res, 429, -32000, "Too many failed authentications");
-      return;
-    }
+    // Keyed per client (IPv6 by /64). Failures only throttle failing attempts: a valid token is checked
+    // first and never blocked because someone else fails from the same (e.g. shared) address.
+    const ip = ipKey(req.ip);
 
     // countable=false: not a guessing attempt (expired token), so it skips the brute-force count.
     const fail = (reason: string, countable = true): void => {
-      const { audit, previous } = countable ? limiter.record(ip) : expiredAudit.record(ip);
-      if (audit) {
-        // A DB failure here must still yield a 401.
-        try {
-          logAuthFailure({
-            clientIp: req.ip,
-            reason: previous > 1 ? `${reason} (previous minute: ${previous} failures)` : reason,
-          });
-        } catch (err) {
-          console.error("auth failure audit write failed:", redact(String(err)));
-        }
+      if (countable && limiter.blocked(ip)) {
+        jsonRpcError(res, 429, -32000, "Too many failed authentications");
+        return;
       }
+      const { audit, previous } = countable ? limiter.record(ip) : expiredAudit.record(ip);
+      if (audit) auditAuthFailure(req.ip, previous > 1 ? `${reason} (previous minute: ${previous} failures)` : reason);
       res.status(401).json({ error: reason });
     };
 
@@ -356,12 +354,20 @@ export function createApp(opts: AppOptions): Express {
     next();
   });
 
-  // Body parsing only after auth, so unauthenticated callers can't make us
-  // buffer anything.
-  app.use("/mcp", bearerAuth, express.json({ limit: BODY_LIMIT }));
+  // Body parsing only after auth. A request with an Authorization header takes the Bearer path
+  // exactly as before (it never needs a session); without one it takes the token-less session
+  // path, whose own small body cap applies (see sessionAuth.ts).
+  const limits = opts.anonLimits ?? anonLimits();
+  const sessionAuth = makeSessionAuth(limits, new RateLimiter(limits.requestsPerHour, 3_600_000), new RateLimiter(limits.initPerMin, 60_000), new AuthFailureLimiter(Infinity));
+  const bearerBody = express.json({ limit: BODY_LIMIT });
+  app.use("/mcp", (req, res, next) => {
+    if (req.headers.authorization !== undefined) return bearerAuth(req, res, (err?: unknown) => (err ? next(err) : bearerBody(req, res, next)));
+    sessionAuth(req, res, next);
+  });
 
-  // Stateless Streamable HTTP mode: a fresh McpServer + transport per request,
-  // no session state kept between calls.
+  // Stateless Streamable HTTP mode: a fresh McpServer + transport per request. The only state is
+  // the server-issued session id (DB), used to bind access requests to a client; the transport
+  // does not know about it.
   app.post("/mcp", async (req, res) => {
     if (Array.isArray(req.body) && req.body.length > MAX_JSONRPC_BATCH) {
       jsonRpcError(res, 400, -32600, `Invalid Request: batch too large (max ${MAX_JSONRPC_BATCH} messages)`);
@@ -421,7 +427,7 @@ export function createApp(opts: AppOptions): Express {
     if (e.type === "entity.too.large") {
       status = 413;
       code = -32600;
-      message = "Request too large (max 1 MB)";
+      message = res.locals.anon ? "Request too large (max 32 KB without a token)" : "Request too large (max 1 MB)";
     } else if (e.type === "entity.parse.failed") {
       status = 400;
       code = -32700;
@@ -633,6 +639,7 @@ export async function start(): Promise<{ server: Server; shutdown: (signal?: str
   const stopSync = intervalMs > 0 ? startPeriodicSync(vaultRoot, intervalMs) : undefined;
 
   const stopArchive = startAutoArchive(vaultRoot);
+  const stopSessions = startSessionPruning();
 
   shutdown = createShutdown({
     server: withAdmin(withAdmin(server, adminServer), webAdminServer),
@@ -640,9 +647,13 @@ export async function start(): Promise<{ server: Server; shutdown: (signal?: str
     stopSync: () => {
       stopSync?.();
       stopArchive?.();
+      stopSessions();
       trustedProxy.stop();
     },
-    closeDb: () => db.close(),
+    closeDb: () => {
+      flushAuthAudit();
+      db.close();
+    },
   });
   // A signal that landed between listen and here.
   if (stopRequested) void shutdown("SIGTERM");

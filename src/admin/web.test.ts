@@ -531,7 +531,7 @@ test("dashboard survives a broken database: unhealthy badge and n/a counts, no 5
   assert.equal(db.prepare, orig);
   assert.equal(r.status, 200);
   assert.match(r.body, /Database: <span class="badge err">error<\/span>/);
-  assert.equal((r.body.match(/<div class="n">n\/a<\/div>/g) ?? []).length, 2, "token and audit counts are n/a");
+  assert.equal((r.body.match(/<div class="n">n\/a<\/div>/g) ?? []).length, 3, "token, access and audit counts are n/a");
   assert.match(r.body, /Vault: <span class="badge ok">/);
   // Healthy again afterwards
   assert.match((await get("/")).body, /Database: <span class="badge ok">/);

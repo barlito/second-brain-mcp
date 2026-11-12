@@ -139,6 +139,57 @@ export const MIGRATIONS: ReadonlyArray<Migration> = [
   { tables: [], up: (d) => {
     d.exec("ALTER TABLE tokens ADD COLUMN expires_at TEXT");
   } },
+  // 7: token-less sessions + access requests. A grant is a tokens row with kind='session'
+  // and session_id set: it shares the scopes/audit/ACL path but its hash is of a random,
+  // never-disclosed secret, so it can never authenticate as a Bearer token.
+  { tables: ["tokens", "sessions", "access_requests"], up: (d) => {
+    d.exec(`
+      ALTER TABLE tokens ADD COLUMN kind TEXT NOT NULL DEFAULT 'bearer';
+      ALTER TABLE tokens ADD COLUMN session_id TEXT;
+      CREATE INDEX idx_tokens_session ON tokens(session_id);
+      CREATE TABLE sessions (
+        id TEXT PRIMARY KEY,
+        sid_hash TEXT NOT NULL UNIQUE,
+        client_name TEXT NOT NULL,
+        client_version TEXT NOT NULL,
+        remote_ip TEXT,
+        ip_key TEXT,
+        connector_key_id TEXT,
+        created_at TEXT NOT NULL,
+        last_seen_at TEXT NOT NULL,
+        first_grant_at TEXT,
+        revoked_at TEXT
+      );
+      CREATE INDEX idx_sessions_ip ON sessions(ip_key);
+      CREATE TABLE connector_keys (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        key_hash TEXT NOT NULL UNIQUE,
+        key_enc TEXT,
+        created_at TEXT NOT NULL,
+        revoked_at TEXT,
+        last_used_at TEXT
+      );
+      CREATE TABLE access_requests (
+        id TEXT PRIMARY KEY,
+        code TEXT NOT NULL,
+        session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+        space TEXT,
+        project TEXT,
+        access TEXT CHECK(access IS NULL OR access IN ('read','write')),
+        reason TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','approved','denied')),
+        created_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        decided_at TEXT,
+        decided_by TEXT,
+        token_id TEXT,
+        scopes TEXT,
+        elevation INTEGER NOT NULL DEFAULT 0
+      );
+      CREATE INDEX idx_access_requests_session ON access_requests(session_id);
+    `);
+  } },
 ];
 
 // Applies migration index `v` under BEGIN IMMEDIATE. user_version is re-read inside the

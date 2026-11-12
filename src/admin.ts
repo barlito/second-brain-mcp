@@ -10,6 +10,9 @@ import { redact } from "./vault/git";
 import { errorMessage } from "./tools/common";
 import { acceptProposal, AdminError, CLI_ACTOR, listInbox, rejectProposal, showProposal } from "./admin/service";
 import { migrateFrontmatter } from "./admin/migrate";
+import { AccessError, approveRequest, denyRequest, listPendingRequests } from "./access";
+import { listActiveSessions } from "./auth/sessions";
+import { parseScopes } from "./cli/token";
 import { listen } from "./listen";
 import type { Lifecycle } from "./server";
 
@@ -69,8 +72,50 @@ export function createAdminApp(vaultRoot: string, lifecycle?: Lifecycle): Expres
   // Service errors carry their HTTP status; everything else goes to the error handler.
   const fail = (res: Response, next: NextFunction, err: unknown): void => {
     if (err instanceof AdminError) res.status(err.status).json({ error: err.message });
+    else if (err instanceof AccessError) res.status(err.status).json({ error: err.message, lines: err.lines });
     else next(err);
   };
+
+  // Token-less session access requests (CLI: access-list / access-approve / access-deny).
+  const REF_RE = /^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[A-Za-z0-9]{6})$/;
+  app.get("/admin/access", (req, res, next) => {
+    try {
+      // Codes are what proves the admin read the agent's chat: hidden unless asked for.
+      const withCodes = req.query.codes === "1";
+      res.json({ requests: listPendingRequests().map((r) => (withCodes ? r : { ...r, code: undefined })), sessions: listActiveSessions() });
+    } catch (err) {
+      next(err);
+    }
+  });
+  app.post("/admin/access/:ref/approve", (req, res, next) => {
+    try {
+      const ref = req.params.ref as string;
+      if (!REF_RE.test(ref)) return void res.status(400).json({ error: "invalid request id or code" });
+      const b = (req.body ?? {}) as { scope?: unknown; allowWildcard?: unknown; code?: unknown };
+      if (b.code !== undefined && typeof b.code !== "string") return void res.status(400).json({ error: "code must be a string" });
+      if (b.scope !== undefined && typeof b.scope !== "string") return void res.status(400).json({ error: "scope must be a string" });
+      if (b.allowWildcard !== undefined && typeof b.allowWildcard !== "boolean") return void res.status(400).json({ error: "allowWildcard must be a boolean" });
+      let scopes;
+      try {
+        scopes = b.scope ? parseScopes(b.scope) : undefined;
+      } catch (err) {
+        return void res.status(400).json({ error: errorMessage(err) });
+      }
+      const d = approveRequest(ref, { scopes, allowWildcard: b.allowWildcard === true, code: b.code as string | undefined, actor: CLI_ACTOR });
+      res.json({ ok: true, ...d });
+    } catch (err) {
+      fail(res, next, err);
+    }
+  });
+  app.post("/admin/access/:ref/deny", (req, res, next) => {
+    try {
+      const ref = req.params.ref as string;
+      if (!REF_RE.test(ref)) return void res.status(400).json({ error: "invalid request id or code" });
+      res.json({ ok: true, ...denyRequest(ref, CLI_ACTOR) });
+    } catch (err) {
+      fail(res, next, err);
+    }
+  });
 
   app.get("/admin/inbox/:id", async (req, res, next) => {
     try {
