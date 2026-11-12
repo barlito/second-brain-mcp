@@ -142,8 +142,8 @@ restart: ## Restart (undeploy then deploy)
 logs: ## Follow logs (make logs service=second-brain-mcp)
 	docker service logs -f "$(stack_name)_$(service)"
 
-token-create: ## Create a token (name=X preset=master|master-ro|agent OR scope=sp:proj:sect:read|write|propose,... (agent = read+write on agents:<name>:*, scope= adds extras); wildcards/master presets need allow_wildcard=1; optional expires_in_days=N)
-	@$(call exec_in_service,node dist/cli/token.js create --name "$(name)" $(if $(preset),--preset "$(preset)") $(if $(scope),--scope "$(scope)") $(if $(allow_wildcard),--allow-wildcard) $(if $(expires_in_days),--expires-in-days "$(expires_in_days)"))
+token-create: ## Create a token (name=X preset=master|master-ro|agent|project OR scope=sp:proj:sect:read|write|propose,... (agent = read+write on agents:<name>:*; project=<space>/<project> with preset=project = read meta + that project, write that project; scope= adds extras); wildcards/master presets need allow_wildcard=1; optional expires_in_days=N, dir=<local dir> for the claude mcp add command)
+	@$(call exec_in_service,node dist/cli/token.js create --name "$(name)" $(if $(preset),--preset "$(preset)") $(if $(scope),--scope "$(scope)") $(if $(allow_wildcard),--allow-wildcard) $(if $(expires_in_days),--expires-in-days "$(expires_in_days)") $(if $(project),--project "$(project)") $(if $(dir),--dir "$(dir)"))
 
 token-list: ## List tokens
 	@$(call exec_in_service,node dist/cli/token.js list)

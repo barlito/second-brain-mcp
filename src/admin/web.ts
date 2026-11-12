@@ -7,7 +7,9 @@ import type { Server } from "node:http";
 import express, { Express, NextFunction, Request, Response } from "express";
 import { db } from "../db";
 import { countActiveTokens, createToken, listTokens, revokeToken, TokenValidationError, validateTokenInput } from "../auth/tokens";
-import { AGENT_PRESET, confirmableWildcards, dropRedundantScopes, formatScope, parseScopes, PRESETS, resolveScopes, wildcardWarnings } from "../cli/token";
+import { confirmableWildcards, dropRedundantScopes, formatScope, isBoundedPreset, parseScopes, PRESETS, PROJECT_PRESET, resolveScopes, wildcardWarnings } from "../cli/token";
+import { claudeAddCommand, dirProblem, mcpUrl } from "../mcpCommand";
+import { listAllProjects } from "../vault/enumerate";
 import type { Scope } from "../auth/types";
 import { dbOk, getBootInfo, vaultOk } from "../health";
 import { isValidInboxId, listInboxIds } from "../inbox";
@@ -53,6 +55,8 @@ export interface WebAdminOptions {
   // Shared secret Traefik injects (X-SB-Admin-Proxy) after Authelia; required, >= 32 chars.
   proxySecret: string;
   sessionCookie?: string;
+  // Public MCP endpoint shown in the post-creation `claude mcp add` command (default: PUBLIC_MCP_URL).
+  mcpUrl?: string;
 }
 
 export const MIN_PROXY_SECRET = 32;
@@ -111,7 +115,7 @@ const FLASH_RE = /^[0-9a-f]{32}$/;
 
 type Flash =
   | { kind: "banner"; banner: Banner }
-  | { kind: "token"; created: { id: string; name: string; token: string; expires_at: string | null }; notes: string[] };
+  | { kind: "token"; created: { id: string; name: string; token: string; expires_at: string | null }; notes: string[]; dir: string };
 
 async function dashboardData(vaultRoot: string): Promise<DashboardData> {
   const vault = vaultOk(vaultRoot);
@@ -176,6 +180,9 @@ export function createWebAdminApp(opts: WebAdminOptions): Express {
   }
   const adminGroup = opts.adminGroup || DEFAULT_ADMIN_GROUP;
   const sessionCookie = opts.sessionCookie || DEFAULT_SESSION_COOKIE;
+  const publicMcpUrl = opts.mcpUrl ?? mcpUrl();
+  // Rendered once on the one-time page from the flash; never stored or logged.
+  const claudeCommand = (token: string, dir: string): string => claudeAddCommand({ url: publicMcpUrl, token, dir });
   // Without ADMIN_WEB_SECRET the tokens reset on restart (forms must be reloaded).
   const secret = opts.secret || randomBytes(32).toString("hex");
   const flash = new OneTimeStore<Flash>(FLASH_TTL_MS, 200);
@@ -296,7 +303,16 @@ export function createWebAdminApp(opts: WebAdminOptions): Express {
     next();
   });
 
-  tokensRouter.get("/", (req, res) => send(res, tokensView(ctxOf(res), listTokens(), takeBanner(req, res))));
+  // Project suggestions for the preset field; a vault read error just means no suggestions.
+  const knownProjects = (): Promise<string[]> => listAllProjects(vaultRoot).catch(() => []);
+
+  tokensRouter.get("/", async (req, res, next) => {
+    try {
+      send(res, tokensView(ctxOf(res), listTokens(), takeBanner(req, res), undefined, await knownProjects()));
+    } catch (err) {
+      next(err);
+    }
+  });
 
   // The plaintext is reachable only through this one-time flash, never rendered by the POST.
   tokensRouter.get("/created/:flashId", (req, res) => {
@@ -306,10 +322,10 @@ export function createWebAdminApp(opts: WebAdminOptions): Express {
       const msg = "This page was already shown or has expired. A token cannot be retrieved again; revoke it and create a new one if it was lost.";
       return void send(res, errorView(ctxOf(res), 404, msg), 404);
     }
-    send(res, tokenCreatedView(ctxOf(res), f.created, f.notes));
+    send(res, tokenCreatedView(ctxOf(res), f.created, f.notes, claudeCommand(f.created.token, f.dir)));
   });
 
-  tokensRouter.post("/", (req, res) => {
+  tokensRouter.post("/", async (req, res) => {
     const body = req.body as Record<string, unknown>;
     const form: TokenForm = {
       name: str(body.name),
@@ -317,14 +333,20 @@ export function createWebAdminApp(opts: WebAdminOptions): Express {
       preset: str(body.preset),
       allowWildcard: body.allow_wildcard === "1",
       expiresInDays: str(body.expires_in_days).trim(),
+      project: str(body.project).trim(),
+      dir: str(body.dir).trim(),
     };
-    const fail = (title: string, lines: string[] = []): void =>
-      send(res, tokensView(ctxOf(res), listTokens(), { kind: "err", title, lines }, form), 422);
+    // Project suggestions are only needed when the form is re-rendered.
+    const fail = async (title: string, lines: string[] = []): Promise<void> =>
+      send(res, tokensView(ctxOf(res), listTokens(), { kind: "err", title, lines }, form, await knownProjects()), 422);
     try {
       let scopes: Scope[];
-      if (form.preset && form.preset !== AGENT_PRESET && form.scopes.trim()) return fail("Use either a preset or explicit scopes, not both.");
-      if (form.preset === AGENT_PRESET) {
-        scopes = resolveScopes(form.preset, undefined, form.name.trim());
+      if (form.preset && !isBoundedPreset(form.preset) && form.scopes.trim()) return fail("Use either a preset or explicit scopes, not both.");
+      const dirErr = form.dir ? dirProblem(form.dir) : undefined;
+      if (dirErr) return fail(dirErr[0].toUpperCase() + dirErr.slice(1) + ".");
+      if (form.project && form.preset !== PROJECT_PRESET) return fail(`The project field is only valid with the "${PROJECT_PRESET}" preset.`);
+      if (isBoundedPreset(form.preset)) {
+        scopes = resolveScopes(form.preset, undefined, form.name.trim(), form.preset === PROJECT_PRESET ? form.project : undefined);
         if (form.scopes.trim()) scopes.push(...scopesFromText(form.scopes));
       } else if (form.preset) {
         if (!Object.hasOwn(PRESETS, form.preset)) return fail(`Unknown preset "${form.preset}".`);
@@ -335,7 +357,7 @@ export function createWebAdminApp(opts: WebAdminOptions): Express {
       }
       const validated = validateTokenInput(form.name, scopes);
       const { kept, dropped } = dropRedundantScopes(validated.scopes);
-      const warnings = wildcardWarnings(confirmableWildcards(kept, form.preset, validated.name));
+      const warnings = wildcardWarnings(confirmableWildcards(kept, form.preset, validated.name, form.project));
       if (warnings.length > 0 && !form.allowWildcard) {
         return fail("Wildcard scopes and presets grant broad access. Tick \"Allow wildcard\" to confirm. No token created.", warnings);
       }
@@ -350,7 +372,7 @@ export function createWebAdminApp(opts: WebAdminOptions): Express {
         ...dropped.map((s) => `Dropped redundant scope ${formatScope(s)} (already covered by a wildcard scope).`),
       ];
       // Flash first: nothing after the token exists may lose the one chance to show it.
-      const to = `/tokens/created/${flash.put({ kind: "token", created: { id: created.id, name: created.name, token: created.token, expires_at: created.expires_at ?? null }, notes }, userOf(res))}`;
+      const to = `/tokens/created/${flash.put({ kind: "token", created: { id: created.id, name: created.name, token: created.token, expires_at: created.expires_at ?? null }, notes, dir: form.dir }, userOf(res))}`;
       auditAdmin(res, "admin_token_create", "ok", `${created.id} ${created.name} [${kept.map(formatScope).join(",")}]`);
       res.redirect(303, to);
     } catch (err) {

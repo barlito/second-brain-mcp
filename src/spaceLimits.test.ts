@@ -1,7 +1,7 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { cleanup, git, makeTempDb, makeTempVault } from "./test-support/fixtures";
 import { callTool, lastAudit, listen } from "./test-support/server";
@@ -94,13 +94,18 @@ test("kb_write: note count limit with usage message; overwrite does not count tw
 });
 
 test("kb_write: project bytes limit counts the new size of an overwrite, not old+new", async () => {
-  // Sizes include the frontmatter the server adds (about 80 bytes per note).
+  // Sizes are read from disk, so the test does not depend on the frontmatter size.
+  const size = (note: string): number => statSync(join(vault, "agents/p3/notes", `${note}.md`)).size;
   const s = "y".repeat(500);
   assert.equal((await w("p3", "a", s)).isError, false);
-  assert.equal((await w("p3", "b", s)).isError, false); // about 1160 <= 1500
-  // Overwriting a with 700 bytes: about 1360 total. old+new (about 1940) would be refused.
+  assert.equal((await w("p3", "b", s)).isError, false);
+  const oldA = size("a");
+  // Overwriting a with 700 bytes grows it; old+new would be refused, the new size alone is not.
   assert.equal((await w("p3", "a", "z".repeat(700))).isError, false);
-  const r = await w("p3", "c", "z".repeat(100)); // about 1540 > 1500
+  const total = size("a") + size("b");
+  assert.ok(total <= 1500 && total + oldA > 1500, `fixture sizes: total ${total}, old a ${oldA}`);
+  // A new note whose body alone exceeds the remaining room is refused whatever its frontmatter.
+  const r = await w("p3", "c", "z".repeat(1500 - total + 1));
   assert.equal(r.isError, true);
   assert.match(r.text, /Size limit reached for agents\/p3: this write would make \d+ bytes \(limit 1500\)\. Current usage of agents\/p3: 2 notes, \d+ bytes\./);
   assert.match(r.text, /kb_archive/);

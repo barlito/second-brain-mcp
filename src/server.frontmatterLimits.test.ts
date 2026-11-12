@@ -79,3 +79,46 @@ test("migration: notes that would break the project limit are skipped and report
   assert.match(readFileSync(join(vault, "lim/mg/notes/n1.md"), "utf8"), /^---\ntype: note\nauthor: migration\n/);
   assert.equal(readFileSync(join(vault, "lim/mg/notes/n5.md"), "utf8"), "0123456789\n");
 });
+
+test("web edit: saving an over-limit note unchanged is 'no changes', not a limit error", async () => {
+  const { createNote, editNote, sha256Hex } = await import("./admin/vault");
+  const t = { space: "lim", project: "ov", section: "notes", note: "n" };
+  await createNote(vault, t, "tiny\n", "u");
+  const file = join(vault, "lim/ov/notes/n.md");
+  writeFileSync(file, `${readFileSync(file, "utf8")}${"p".repeat(200)}\n`); // now over the 120-byte limit
+  git(["commit", "-qam", "grow"], vault);
+  const cur = readFileSync(file, "utf8");
+  assert.equal(await editNote(vault, t, cur, sha256Hex(cur), "u"), null);
+  assert.equal(readFileSync(file, "utf8"), cur);
+  // A real change that keeps it over the limit is still refused.
+  await assert.rejects(editNote(vault, t, `${cur}more\n`, sha256Hex(cur), "u"), /Note too large for lim/);
+});
+
+test("web edit: the limit counts the CRLF bytes of a CRLF note", async () => {
+  const { createNote, editNote, sha256Hex } = await import("./admin/vault");
+  const t = { space: "lim", project: "cr", section: "notes", note: "n" };
+  await createNote(vault, t, "tiny\n", "u");
+  const file = join(vault, "lim/cr/notes/n.md");
+  const lf = readFileSync(file, "utf8");
+  writeFileSync(file, lf.replace(/\n/g, "\r\n"));
+  git(["commit", "-qam", "crlf"], vault);
+  // Largest body that still fits 120 bytes with LF endings; with CRLF every line costs one more byte.
+  const lines = Math.floor((120 - Buffer.byteLength(lf)) / 2);
+  const edited = `${lf}${"l\n".repeat(lines)}`;
+  const crlfBytes = Buffer.byteLength(edited.replace(/\n/g, "\r\n"));
+  assert.ok(Buffer.byteLength(edited) <= 120 && crlfBytes > 120, "fixture straddles the limit");
+  await assert.rejects(editNote(vault, t, edited, sha256Hex(lf), "u"), /Note too large for lim/);
+  assert.equal(readFileSync(file, "utf8"), lf.replace(/\n/g, "\r\n"));
+});
+
+test("inbox accept without overwrite on an existing target: 409 'exists' before the limit 422", async () => {
+  const { createNote } = await import("./admin/vault");
+  await createNote(vault, { space: "lim", project: "ib2", section: "notes", note: "n" }, "tiny\n", "u");
+  const p = await callTool(baseUrl, tok, "kb_propose", { space: "lim", project: "ib2", section: "notes", note: "n", content: body60, reason: "r" });
+  const accept = (body: object) => fetch(`${adminUrl}/admin/inbox/${p.text}/accept`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  const r = await accept({});
+  assert.equal(r.status, 409);
+  assert.match(((await r.json()) as { error: string }).error, /already exists/);
+  const ow = await accept({ overwrite: true });
+  assert.equal(ow.status, 422, "with overwrite the limit applies");
+});
