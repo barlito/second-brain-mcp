@@ -285,7 +285,7 @@ Tests need Node 24. If the host has no Node, run them in a container (CI runs `n
 
 ```bash
 docker run --rm -v "$PWD":/app -w /app node:24-alpine sh -c \
-  'apk add --no-cache git python3 make g++ >/dev/null \
+  'apk add --no-cache git >/dev/null \
    && git config --global user.name ci && git config --global user.email ci@noreply.local \
    && npm ci && npm test && npm run build'
 ```
