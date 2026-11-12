@@ -1,0 +1,168 @@
+name: Deploy prod
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Never cancel a running deploy: a half-finished stack update is worse than a queued one.
+concurrency:
+  group: deploy-prod
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/barlito/second-brain-mcp
+  SERVICE: second-brain-mcp_second-brain-mcp
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Only deploy from main
+        run: |
+          if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+            echo "::error::Deploy is only allowed from refs/heads/main (got $GITHUB_REF). Use: gh workflow run deploy.yml --ref main"
+            exit 1
+          fi
+
+  test:
+    needs: guard
+    uses: ./.github/workflows/ci.yml
+
+  publish:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      tag: ${{ steps.vars.outputs.tag }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - id: vars
+        run: echo "tag=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2 # v3.10.0
+
+      - uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Tags are immutable: refuse to overwrite an existing <short-sha>.
+      - name: Fail if tag already exists
+        env:
+          TAG: ${{ steps.vars.outputs.tag }}
+        run: |
+          if docker buildx imagetools inspect "$IMAGE:$TAG" >/dev/null 2>&1; then
+            echo "::error::$IMAGE:$TAG already exists; tags are immutable."
+            exit 1
+          fi
+
+      - uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:${{ steps.vars.outputs.tag }}
+            ${{ env.IMAGE }}:main
+
+  deploy:
+    needs: publish
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      DOCKER_HOST: ssh://${{ vars.SERVER_USERNAME }}@${{ vars.SERVER_HOST }}:${{ vars.SERVER_PORT }}
+      IMAGE_TAG: ${{ needs.publish.outputs.tag }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - uses: webfactory/ssh-agent@dc588b651fe13675774614f8e6a936a468676387 # v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      - name: Pin server host key
+        env:
+          SERVER_HOST_KEY: ${{ vars.SERVER_HOST_KEY }}
+        run: |
+          if [ -z "$SERVER_HOST_KEY" ]; then
+            echo "::error::SERVER_HOST_KEY repository variable is not set; refusing to trust the host on first use."
+            exit 1
+          fi
+          mkdir -p ~/.ssh
+          # Full known_hosts line, e.g. "[1.2.3.4]:3333 ssh-ed25519 AAAA..."
+          printf '%s\n' "$SERVER_HOST_KEY" >> ~/.ssh/known_hosts
+
+      - name: Docker sanity check
+        run: docker info --format 'swarm={{.Swarm.LocalNodeState}} manager={{.Swarm.ControlAvailable}}'
+
+      - name: Ensure vault_deploy_key swarm secret
+        env:
+          VAULT_DEPLOY_KEY: ${{ secrets.VAULT_DEPLOY_KEY }}
+        run: |
+          if docker secret inspect vault_deploy_key >/dev/null 2>&1; then
+            echo "Secret vault_deploy_key already exists, leaving it untouched."
+          else
+            printf '%s\n' "$VAULT_DEPLOY_KEY" | docker secret create vault_deploy_key - >/dev/null
+            echo "Secret vault_deploy_key created."
+          fi
+
+      - name: Registry login for the node
+        env:
+          GHCR_PULL_TOKEN: ${{ secrets.GHCR_PULL_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_ACTOR: ${{ github.actor }}
+        run: |
+          if [ -n "$GHCR_PULL_TOKEN" ]; then
+            printf '%s' "$GHCR_PULL_TOKEN" | docker login ghcr.io -u "$GH_ACTOR" --password-stdin
+          else
+            echo "::warning::GHCR_PULL_TOKEN is not set: using the job GITHUB_TOKEN, which expires after this job, so Swarm may fail to re-pull the image later (reschedule, node change). Set GHCR_PULL_TOKEN (read:packages PAT) to avoid this."
+            printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$GH_ACTOR" --password-stdin
+          fi
+
+      - name: Backup DB (if service already deployed)
+        run: |
+          if docker service inspect "$SERVICE" >/dev/null 2>&1; then
+            make backup-db
+          else
+            echo "Service $SERVICE not found (first deploy), skipping backup."
+          fi
+
+      - name: Deploy stack
+        env:
+          ADMIN_PROXY_SECRET: ${{ secrets.ADMIN_PROXY_SECRET }}
+          ADMIN_WEB_SECRET: ${{ secrets.ADMIN_WEB_SECRET }}
+        run: make deploy.prod IMAGE_TAG="$IMAGE_TAG"
+
+      - name: Wait for the new task to be running
+        run: |
+          want="$IMAGE:$IMAGE_TAG"
+          for i in $(seq 1 36); do
+            upd=$(docker service inspect "$SERVICE" --format '{{if .UpdateStatus}}{{.UpdateStatus.State}}{{end}}')
+            spec=$(docker service inspect "$SERVICE" --format '{{.Spec.TaskTemplate.ContainerSpec.Image}}')
+            task=$(docker service ps "$SERVICE" --filter desired-state=running --format '{{.Image}} {{.CurrentState}}' | head -n1)
+            echo "[$i/36] update=${upd:-none} spec=${spec%%@*} task=$task"
+            case "$upd" in rollback_*|paused) break ;; esac
+            if [ "${spec%%@*}" = "$want" ]; then
+              case "$task" in
+                "$want"*" Running "*)
+                  if [ -z "$upd" ] || [ "$upd" = completed ]; then
+                    echo "Service is running $want."
+                    exit 0
+                  fi ;;
+              esac
+            fi
+            sleep 5
+          done
+          echo "::error::Service did not become healthy on $want within 3 minutes."
+          docker service ps "$SERVICE" --no-trunc || true
+          docker service logs --tail 50 "$SERVICE" || true
+          exit 1
+
+      - name: Health check
+        run: |
+          curl -fsS --retry 6 --retry-delay 5 --retry-all-errors --max-time 10 \
+            https://second-brain.barlito.fr/health

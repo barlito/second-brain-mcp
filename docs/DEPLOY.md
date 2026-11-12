@@ -2,7 +2,25 @@
 
 Target: a Docker Swarm manager running the [traefik-base](https://github.com/barlito/traefik-base) stack (network `traefik_traefik_proxy`), serving `https://second-brain.barlito.fr`.
 
-Known gaps (not built yet): there is no publish/deploy GitHub workflow (CI only builds and tests, so image publishing and deploy are manual below; a deploy workflow is a follow-up), and no off-host backup automation.
+Deploys can run via the GitHub Actions workflow (see "Deploy via GitHub Actions" below) or manually with the checklist. Known gap: no off-host backup automation.
+
+## Deploy via GitHub Actions
+
+`.github/workflows/deploy.yml` (manual `workflow_dispatch`, `main` only, serialized by `concurrency: deploy-prod`):
+
+1. Runs the CI workflow (`ci.yml`).
+2. Builds and pushes `ghcr.io/barlito/second-brain-mcp:<short-sha>` (and `:main`). Fails if the `<short-sha>` tag already exists (tags are immutable).
+3. In the `production` environment: over SSH (`DOCKER_HOST`, pinned host key) creates the Swarm secret `vault_deploy_key` if missing, logs the node in to ghcr, runs `make backup-db` if the service exists (a failed backup aborts the deploy), runs `make deploy.prod`, waits up to 3 min for the new task to run, then checks `https://second-brain.barlito.fr/health`.
+
+Required repo config:
+
+- Variables: `SERVER_HOST`, `SERVER_PORT`, `SERVER_USERNAME`, `SERVER_HOST_KEY` (full `known_hosts` line; the job fails if unset).
+- Secrets: `SSH_PRIVATE_KEY`, `VAULT_DEPLOY_KEY` (private key of the vault deploy key), `ADMIN_PROXY_SECRET`, `ADMIN_WEB_SECRET`.
+- Optional secret `GHCR_PULL_TOKEN`: long-lived PAT with `read:packages`. Without it the job's `GITHUB_TOKEN` is used, which expires after the job, so Swarm may fail to re-pull the image later (a warning is emitted).
+
+Trigger: `gh workflow run deploy.yml --ref main`.
+
+Rollback is not supported by the workflow (it always deploys the current `main` commit). Roll back manually with `make deploy.prod IMAGE_TAG=<old>` (see Rollback below, including the DB restore note for schema migrations).
 
 ## Checklist
 
