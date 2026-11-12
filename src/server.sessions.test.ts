@@ -9,6 +9,8 @@ process.env.VAULT_PATH = vault;
 // Leftover pending requests of other tests must not trip the per-client caps; dedicated tests override.
 process.env.ACCESS_MAX_PENDING_PER_IP = "1000";
 process.env.ACCESS_MAX_PENDING_TOTAL = "1000";
+// This file tests the approval flow from zero access; the default meta baseline is covered in server.baseline.test.ts.
+process.env.SESSION_BASELINE_SCOPES = "none";
 
 type Db = typeof import("./db").db;
 let db: Db;

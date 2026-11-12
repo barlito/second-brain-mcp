@@ -73,7 +73,7 @@ ${SECTION_BULLETS}
 Starting a session on a project:
 1. kb_read <space>/<project>/overview/index.
 2. kb_list the journal section to find the latest month note, then kb_read it with the tail option.
-3. If you have access, kb_list and read the meta space (short notes on how the user works: preferences, conventions).
+3. The meta space holds short notes on how the user works (preferences, conventions). If a "User context" section ends these instructions, it already holds meta's entry notes; otherwise, if you have access, kb_list and read the meta space.
 
 Working rules:
 - Find notes with kb_search (or kb_list to browse).
@@ -88,4 +88,4 @@ Working rules:
 - Space \`agents\` is per-agent scratch working memory (agents/<agent-name>). Its overview/index is the handover note another agent resumes from: keep it up to date. The server may cap notes and sizes there and auto-archive stale notes; a refused write says what to condense or kb_archive. Durable knowledge belongs in the real project (kb_propose or kb_write), not in agents.
 - Writes (kb_write) are direct and committed to git; re-read before overwriting a note you did not just read.
 
-Access without a token: if you are connected without a token, kb_* tools answer "No access for this session". You do NOT have to request access up front: work without the knowledge base when you do not need it, and call kb_request_access only when you actually need it (with the space and project you work on, read or write, and a clear reason). Then ask the user to approve it in their admin web and call kb_access_status with the returned request_id until it says approved. You can request again later in the same session to get more (another project, read to write, or an explicit scopes list); each approval adds to what you already have, a denial changes nothing. Only the user grants access, and can revoke it.`;
+Access without a token: if you are connected without a token, kb_* tools answer "No access for this session" (some read access, usually the meta space, may be open to every session without a request). You do NOT have to request access up front: work without the knowledge base when you do not need it, and call kb_request_access only when you actually need it (with the space and project you work on, read or write, and a clear reason). Then ask the user to approve it in their admin web and call kb_access_status with the returned request_id until it says approved. You can request again later in the same session to get more (another project, read to write, or an explicit scopes list); each approval adds to what you already have, a denial changes nothing. Only the user grants access, and can revoke it.`;

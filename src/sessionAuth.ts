@@ -4,7 +4,10 @@
 //    token-less clients into OAuth discovery);
 //  - a small body cap, parsed before anything else happens;
 //  - an allowlist of JSON-RPC methods; the rest is refused before a session is even looked up;
-//  - no vault access: tools/call is fenced centrally (tools/common auditedCall) until a grant exists.
+//  - no vault access beyond the read-only baseline scopes (default meta read, auth/baseline.ts): until a
+//    grant exists, tools/call is fenced centrally (tools/common auditedCall) to the access tools and the
+//    read-only tools. A session with only the baseline still follows the grantless expiry (1 h idle,
+//    ANON_SESSION_MAX_HOURS); the client re-initializes on 404.
 import express, { NextFunction, Request, Response } from "express";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { TokenContext, tokenContextStorage } from "./auth/context";
@@ -12,6 +15,7 @@ import { clientSlug, countGrantlessSessions, createSession, evictGrantlessSessio
 import { logAudit } from "./audit";
 import { auditAuthFailure } from "./authFailure";
 import { CONNECTOR_HEADER, checkConnectorKey } from "./auth/connectorKeys";
+import { Scope } from "./auth/types";
 import { AnonLimits, ipKey, RateLimiter } from "./rateLimit";
 import { redact } from "./vault/git";
 
@@ -23,14 +27,15 @@ const ALLOWED_METHODS = new Set(["initialize", "ping", "tools/list", "tools/call
 const rpcError = (res: Response, status: number, code: number, message: string): void =>
   void res.status(status).json({ jsonrpc: "2.0", error: { code, message }, id: null });
 
-function contextFor(s: LiveSession, ip: string | undefined, requests: RateLimiter): TokenContext {
+// `baseline`: read scopes every session holds without approval (SESSION_BASELINE_SCOPES).
+function contextFor(s: LiveSession, ip: string | undefined, requests: RateLimiter, baseline: Scope[]): TokenContext {
   const last = s.grants[s.grants.length - 1];
   return {
     tokenId: last?.tokenId ?? `session:${s.id}`,
     name: last?.name ?? `session-${clientSlug(s.clientName)}`,
-    scopes: s.grants.flatMap((g) => g.scopes),
+    scopes: [...baseline, ...s.grants.flatMap((g) => g.scopes)],
     clientIp: ip,
-    session: { id: s.id, clientName: s.clientName, grants: s.grants, allowRequest: () => requests.hit(ipKey(ip)) },
+    session: { id: s.id, clientName: s.clientName, grants: s.grants, baselineName: `session-${clientSlug(s.clientName)}`, allowRequest: () => requests.hit(ipKey(ip)) },
   };
 }
 
@@ -45,6 +50,7 @@ export function makeSessionAuth(
   requestLimiter: RateLimiter,
   initLimiter: RateLimiter,
   failures: FailureLimiter,
+  baseline: Scope[] = [],
 ): (req: Request, res: Response, next: NextFunction) => void {
   const parse = express.json({ limit: ANON_BODY_LIMIT });
   // Non-initialize calls: a budget per client and one per session, so a valid session id is no free pass to flood.
@@ -104,7 +110,7 @@ export function makeSessionAuth(
         live = found;
       }
 
-      const ctx = contextFor(live, req.ip, requestLimiter);
+      const ctx = contextFor(live, req.ip, requestLimiter, baseline);
       res.locals.tokenContext = ctx;
       tokenContextStorage.run(ctx, next);
     });
