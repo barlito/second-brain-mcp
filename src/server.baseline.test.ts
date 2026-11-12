@@ -87,8 +87,9 @@ after(async () => {
   cleanup();
 });
 
-test("SESSION_BASELINE_SCOPES: unset = none; read scopes parse; write, '*' space and malformed values are refused", () => {
-  assert.deepEqual(baseline.sessionBaselineScopes({}), []);
+test("SESSION_BASELINE_SCOPES: unset = meta read, none/empty = off; read scopes parse; write, '*' space and malformed values are refused", () => {
+  assert.deepEqual(baseline.sessionBaselineScopes({}), [{ space: "meta", project: "*", section: "*", permission: "read" }]);
+  assert.deepEqual(baseline.sessionBaselineScopes({ SESSION_BASELINE_SCOPES: "none" }), []);
   assert.deepEqual(baseline.sessionBaselineScopes({ SESSION_BASELINE_SCOPES: " " }), []);
   assert.deepEqual(baseline.sessionBaselineScopes({ SESSION_BASELINE_SCOPES: "meta:*:*:read, idees:x:notes:read" }), [
     { space: "meta", project: "*", section: "*", permission: "read" },
@@ -118,7 +119,7 @@ test("with a baseline, a session without any grant reads meta but nothing else, 
   assert.equal(req.isError, false, req.text);
 });
 
-test("without a baseline, a session without grant still gets 'No access' for meta (default unchanged)", async () => {
+test("with the baseline turned off, a session without grant gets 'No access' for meta", async () => {
   const base = without.baseUrl;
   const { sid, instructions } = await connect(base);
   const r = await call(base, anon(base, sid), "kb_read", { space: "meta", project: "profil", section: "notes", note: "outils" });

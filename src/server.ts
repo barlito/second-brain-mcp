@@ -207,7 +207,7 @@ export interface AppOptions {
   authLimiter?: AuthFailureLimiter;
   // Limits of the token-less surface (default: env, see rateLimit.ts).
   anonLimits?: AnonLimits;
-  // Read scopes of every token-less session (default: env SESSION_BASELINE_SCOPES, see auth/baseline.ts).
+  // Read scopes of every token-less session (default: meta read, or env SESSION_BASELINE_SCOPES; see auth/baseline.ts).
   sessionBaseline?: Scope[];
 }
 

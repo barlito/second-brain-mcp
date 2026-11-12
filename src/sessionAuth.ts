@@ -4,7 +4,7 @@
 //    token-less clients into OAuth discovery);
 //  - a small body cap, parsed before anything else happens;
 //  - an allowlist of JSON-RPC methods; the rest is refused before a session is even looked up;
-//  - no vault access beyond the read-only SESSION_BASELINE_SCOPES (default none): tools/call is
+//  - no vault access beyond the read-only baseline scopes (default meta read, auth/baseline.ts): tools/call is
 //    fenced centrally (tools/common auditedCall) until a grant or a baseline scope exists.
 import express, { NextFunction, Request, Response } from "express";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";

@@ -1,5 +1,6 @@
-// SESSION_BASELINE_SCOPES: read scopes every token-less session holds from its first request,
-// without an access request (typically `meta:*:*:read`, the user's short notes on how they work).
+// Read scopes every token-less session holds from its first request, without an access request.
+// Default: `meta:*:*:read` (the user's short notes on how they work). SESSION_BASELINE_SCOPES
+// overrides it; "none" (or empty) turns it off.
 // Only a valid connector key opens a session, so this is what a leaked key exposes: read-only by
 // construction, and validated at startup so a typo never silently widens or drops access.
 import { isValidSlug } from "../vault/paths";
@@ -8,9 +9,12 @@ import { Scope } from "./types";
 
 const level = (v: string): boolean => v === "*" || isValidSlug(v);
 
+export const DEFAULT_BASELINE: readonly Scope[] = [{ space: "meta", project: "*", section: "*", permission: "read" }];
+
 export function sessionBaselineScopes(env: NodeJS.ProcessEnv = process.env): Scope[] {
-  const raw = (env.SESSION_BASELINE_SCOPES ?? "").trim();
-  if (raw === "") return [];
+  if (env.SESSION_BASELINE_SCOPES === undefined) return DEFAULT_BASELINE.map((s) => ({ ...s }));
+  const raw = env.SESSION_BASELINE_SCOPES.trim();
+  if (raw === "" || raw === "none") return [];
   return raw.split(",").map((entry) => {
     const parts = entry.trim().split(":");
     if (parts.length !== 4) throw new Error(`SESSION_BASELINE_SCOPES: invalid scope "${entry}", expected space:project:section:read`);
