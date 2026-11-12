@@ -141,9 +141,43 @@ test("kb_history of an inbox-accepted note stops before _inbox", async () => {
   const h = await call(rw, "kb_history", { ...base, section: "notes", note: "accepted" });
   assert.equal(h.isError, false, h.text);
   const lines = h.text.split("\n");
-  assert.equal(lines.length, 3, h.text);
+  assert.equal(lines.length, 2, h.text); // the accept is the note's creation: no notice
   assert.match(lines[1], /move _inbox\/p1\.md/);
-  assert.equal(lines[2], NOTICE);
+});
+
+const TEMPLATE = "# Overview\n\n## Goals\n\n- \n\n## Context\n\n- \n\n## Decisions\n\n- \n\n## Open questions\n\n- \n";
+
+test("kb_history does not follow a copy from another note made from the same template", async () => {
+  const a = { space: "pro", project: "alpha", section: "overview", note: "index" };
+  const b = { space: "pro", project: "beta", section: "overview", note: "index" };
+  assert.equal((await call(rw, "kb_write", { ...a, content: TEMPLATE + "alpha\n" })).isError, false);
+  assert.equal((await call(rw, "kb_write", { ...a, content: TEMPLATE + "alpha v2\n" })).isError, false);
+  assert.equal((await call(rw, "kb_write", { ...b, content: TEMPLATE + "beta\n" })).isError, false);
+  const h = await call(ro, "kb_history", b);
+  assert.equal(h.isError, false, h.text);
+  const lines = h.text.split("\n");
+  assert.equal(lines.length, 2, h.text);
+  assert.match(lines[1], /kb_write: pro\/beta\/overview\/index/);
+  // A token that cannot read alpha must not get the spurious notice either.
+  const betaOnly = createTok("beta-only", [{ space: "pro", project: "beta", section: "*", permission: "read" }]).token;
+  const hb = await call(betaOnly, "kb_history", b);
+  assert.equal(hb.text.split("\n").length, 2, hb.text);
+  assert.doesNotMatch(hb.text, /not accessible/);
+  // Master view (admin): only beta's commit, at beta's path.
+  const { noteHistory } = await import("./vault/git");
+  const { entries } = await noteHistory(vault, path.join(vault, "pro/beta/overview/index.md"), 50);
+  assert.deepEqual(entries.map((e) => e.path), ["pro/beta/overview/index.md"]);
+});
+
+test("kb_history does not follow a copy from a note with identical content", async () => {
+  const a = { ...base, section: "notes", note: "twin-a" };
+  const b = { ...base, section: "ideas", note: "twin-b" };
+  assert.equal((await call(rw, "kb_write", { ...a, content: TEMPLATE })).isError, false);
+  assert.equal((await call(rw, "kb_write", { ...b, content: TEMPLATE })).isError, false);
+  const h = await call(rw, "kb_history", b);
+  const lines = h.text.split("\n");
+  assert.equal(lines.length, 2, h.text);
+  assert.match(lines[1], /kb_write: pro\/proj\/ideas\/twin-b/);
 });
 
 test("noteHistory in a repo without commits: no history, no error", async () => {
