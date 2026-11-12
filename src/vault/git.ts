@@ -908,6 +908,9 @@ export interface WriteOptions {
   mustNotExist?: boolean;
   // Runs inside the lock after the pull; throwing aborts the write (e.g. inbox quota).
   precheck?: () => void | Promise<void>;
+  // Runs inside the lock on the FINAL content (after build, before anything is written);
+  // throwing refuses the write. Put every rule that depends on the written bytes here.
+  check?: (next: string) => void;
 }
 
 export function syncWrite(
@@ -996,12 +999,14 @@ export class MoveTargetExistsError extends Error {
 // Pull (best effort) under the lock; shared by every write operation. Skipped
 // while the remote recently failed with a network error: the write commits
 // locally and the background pusher rebases onto the remote once it is back.
-async function prepareLocked(vaultRoot: string): Promise<boolean> {
+// `out.pulled` reports whether the pull actually succeeded.
+async function prepareLocked(vaultRoot: string, out?: { pulled: boolean }): Promise<boolean> {
   await selfHeal(vaultRoot);
   const remote = await hasRemote(vaultRoot);
   if (remote && !remoteRecentlyDown(vaultRoot)) {
     try {
       await pullRebase(vaultRoot);
+      if (out) out.pulled = true;
     } catch (err) {
       if (err instanceof SyncConflictError) throw err;
       // Remote unreachable: still commit locally; the push retry catches up.
@@ -1041,6 +1046,7 @@ function lockedWrite(
     // Built and validated before anything is touched: a refusal leaves the file
     // (mtime) and the index (a human's staged state) exactly as they were.
     const next = build(previous);
+    opts.check?.(next);
     const headBefore = await headOrEmpty(vaultRoot);
     let commitSha: string | null;
     try {
@@ -1124,6 +1130,58 @@ export function syncMove(
     }
     return finishLocked(vaultRoot, remote, { commitSha, to: toAbs });
   });
+}
+
+// System job (auto-archive): `select` runs inside the lock after the pull and returns the moves;
+// all of them land in ONE commit. Unbounded: it must not count against the client write cap.
+// Returns null when there was nothing to move, "skipped" when a remote exists but the pull
+// did not happen (down or failed): archiving on a stale tree could diverge from the remote.
+export function syncMoveBatch(
+  vaultRoot: string,
+  select: () => Promise<Array<{ from: string; to: string }>>,
+  commitMessage: string,
+): Promise<{ commitSha: string; moved: number } | "skipped" | null> {
+  return withLock<{ commitSha: string; moved: number } | "skipped" | null>(
+    vaultRoot,
+    async () => {
+      const pull = { pulled: false };
+      const remote = await prepareLocked(vaultRoot, pull);
+      if (remote && !pull.pulled) return { value: "skipped" as const, push: false };
+      const moves = await select();
+      if (moves.length === 0) return { value: null, push: false };
+      for (const m of moves) {
+        assertSafePath(vaultRoot, m.from);
+        assertSafePath(vaultRoot, m.to);
+        if (!existsSync(m.from) || lstatOrNull(m.to)) throw new Error(`auto-archive: unexpected state for ${m.from}`);
+      }
+      const rels = moves.flatMap((m) => [path.relative(vaultRoot, m.from), path.relative(vaultRoot, m.to)]);
+      const headBefore = await headOrEmpty(vaultRoot);
+      try {
+        for (const m of moves) {
+          mkdirSync(path.dirname(m.to), { recursive: true });
+          assertSafePath(vaultRoot, path.dirname(m.to));
+          await runGit(["mv", "--", path.relative(vaultRoot, m.from), path.relative(vaultRoot, m.to)], vaultRoot);
+        }
+        await runGit(["commit", "-m", commitMessage, "--", ...rels], vaultRoot);
+      } catch (err) {
+        if ((await headOrEmpty(vaultRoot)) === headBefore) {
+          await runGit(["reset", "-q", "--", ...rels], vaultRoot).catch(() => undefined);
+          for (const m of moves) {
+            try {
+              if (!existsSync(m.from) && existsSync(m.to)) renameSync(m.to, m.from);
+            } catch {
+              /* best effort */
+            }
+          }
+          throw err;
+        }
+        console.error(`git move batch: error after commit landed, keeping it: ${errText(err)}`);
+      }
+      const commitSha = await headOrEmpty(vaultRoot);
+      return finishLocked(vaultRoot, remote, { commitSha, moved: moves.length });
+    },
+    false,
+  );
 }
 
 // Leave the tree clean for the next call after a failed write/commit.

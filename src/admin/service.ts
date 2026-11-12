@@ -17,6 +17,7 @@ import { isValidSlug, resolveNotePath } from "../vault/paths";
 import { InboxInvalidError, InboxMissingError, NoteExistsError, redact, syncInboxResolve } from "../vault/git";
 import { errorMessage, MAX_CONTENT_CHARS, safeAudit } from "../tools/common";
 import { NoteRuleError, validateNoteContent } from "../tools/conventions";
+import { assertSpaceLimits } from "../limits";
 import { rejectReservedSection } from "../tools/reserved";
 
 export const CLI_ACTOR = "admin-cli";
@@ -112,6 +113,8 @@ export async function acceptProposal(vaultRoot: string, id: string, overwrite: b
     const { commitSha } = await syncInboxResolve(vaultRoot, inboxPath(vaultRoot, id), (raw) => {
       const { p, t } = validateAccept(raw, id);
       seen = p;
+      // accept.content below is what gets written, so it is what is measured.
+      assertSpaceLimits(vaultRoot, t, Buffer.byteLength(p.content, "utf8"));
       return {
         message: `inbox accept: ${p.target} (proposed by ${p.proposedBy})`,
         accept: {

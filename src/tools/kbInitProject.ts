@@ -38,7 +38,7 @@ export const register: RegisterTool = (server, { vaultRoot }) => {
           return writeNote(
             vaultRoot,
             { space, project, section: OVERVIEW_SECTION, note: ENTRY_NOTE },
-            entryNoteTemplate(project, summary),
+            entryNoteTemplate(project, summary, space),
             `kb_init_project: ${space}/${project} via ${ctx.name}`,
             { mustNotExist: true },
           );

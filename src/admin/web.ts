@@ -7,7 +7,7 @@ import type { Server } from "node:http";
 import express, { Express, NextFunction, Request, Response } from "express";
 import { db } from "../db";
 import { countActiveTokens, createToken, listTokens, revokeToken, TokenValidationError, validateTokenInput } from "../auth/tokens";
-import { dropRedundantScopes, formatScope, parseScopes, PRESETS, wildcardWarnings } from "../cli/token";
+import { AGENT_PRESET, confirmableWildcards, dropRedundantScopes, formatScope, parseScopes, PRESETS, resolveScopes, wildcardWarnings } from "../cli/token";
 import type { Scope } from "../auth/types";
 import { dbOk, getBootInfo, vaultOk } from "../health";
 import { isValidInboxId, listInboxIds } from "../inbox";
@@ -322,8 +322,11 @@ export function createWebAdminApp(opts: WebAdminOptions): Express {
       send(res, tokensView(ctxOf(res), listTokens(), { kind: "err", title, lines }, form), 422);
     try {
       let scopes: Scope[];
-      if (form.preset && form.scopes.trim()) return fail("Use either a preset or explicit scopes, not both.");
-      if (form.preset) {
+      if (form.preset && form.preset !== AGENT_PRESET && form.scopes.trim()) return fail("Use either a preset or explicit scopes, not both.");
+      if (form.preset === AGENT_PRESET) {
+        scopes = resolveScopes(form.preset, undefined, form.name.trim());
+        if (form.scopes.trim()) scopes.push(...scopesFromText(form.scopes));
+      } else if (form.preset) {
         if (!Object.hasOwn(PRESETS, form.preset)) return fail(`Unknown preset "${form.preset}".`);
         scopes = PRESETS[form.preset].map((s) => ({ ...s }));
       } else {
@@ -332,7 +335,7 @@ export function createWebAdminApp(opts: WebAdminOptions): Express {
       }
       const validated = validateTokenInput(form.name, scopes);
       const { kept, dropped } = dropRedundantScopes(validated.scopes);
-      const warnings = wildcardWarnings(kept);
+      const warnings = wildcardWarnings(confirmableWildcards(kept, form.preset, validated.name));
       if (warnings.length > 0 && !form.allowWildcard) {
         return fail("Wildcard scopes and presets grant broad access. Tick \"Allow wildcard\" to confirm. No token created.", warnings);
       }

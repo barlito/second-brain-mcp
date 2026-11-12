@@ -57,7 +57,25 @@ Only `archive` is enforced beyond the `overview/index` size cap; the other names
 
 ### Server instructions
 
-On connection the server sends MCP `instructions` describing this layout, the reserved sections, the session-start routine and the working rules (short notes, find notes with `kb_search`, `kb_history` for a note's git history, update the Docs map, archive instead of delete, `kb_propose` when unsure whether something deserves a note, re-read before overwriting). MCP clients that surface server instructions therefore get the conventions automatically; nothing needs to be configured per client.
+On connection the server sends MCP `instructions` describing this layout, the reserved sections, the session-start routine and the working rules (short notes, find notes with `kb_search`, `kb_history` for a note's git history, update the Docs map, archive instead of delete, `kb_propose` when unsure whether something deserves a note, re-read before overwriting) and a short paragraph on the `agents` space (scratch working memory, keep the index up to date for handover, durable knowledge goes to the real project). MCP clients that surface server instructions therefore get the conventions automatically; nothing needs to be configured per client.
+
+### Agents space and space limits
+
+The `agents` space is per-agent scratch working memory: `agents/<agent-name>/...` with the usual reserved sections. Its `overview/index` is the agent's brief and handover note; `kb_init_project` in this space creates it from an agent template (Role, Current state, Current task, Next step, Key notes, Docs map). Durable knowledge belongs in the real project (`kb_propose` / `kb_write`), not here.
+
+**Limits.** `SPACE_LIMITS` sets per-space limits, applied per project inside the space and counted over every section except `archive`:
+
+```
+SPACE_LIMITS="agents:maxNotes=30,maxNoteBytes=4096,maxProjectBytes=102400,archiveAfterDays=60"
+```
+
+Format: `space:key=value,key=value`, several spaces separated by `;`. Keys (positive integers, all optional): `maxNotes` (notes per project), `maxNoteBytes` (UTF-8 size of one note), `maxProjectBytes` (total size of the project's notes), `archiveAfterDays` (see below). A malformed value stops the server at startup. Spaces not listed have no limits. The limits are checked inside the write queue on every write path (`kb_write`, `kb_append`, inbox accept, web admin create/edit, `kb_init_project`). Overwriting a note counts the new size, not old plus new. A write that does not grow the project is always allowed on the aggregate limits, so an over-limit project can be condensed. On violation the client gets, for example: `Note limit reached for agents/bot: this write would make 31 notes (limit 30). Current usage of agents/bot: 30 notes, 12000 bytes. Condense notes or kb_archive old ones first.` (`Size limit reached ...` for `maxProjectBytes`, `Note too large for agents: ... bytes (limit ...)` for `maxNoteBytes`). `overview/index` keeps its separate 3 KB cap.
+
+The `archive` section is excluded from all limits and is never purged.
+
+**Auto-archive.** For spaces with `archiveAfterDays`, a job runs shortly after startup and then every `AUTO_ARCHIVE_INTERVAL_MS` (default 24 h; `0` disables it). Notes whose last git commit is older than that are moved to `archive/<section>-<note>` exactly like `kb_archive`, all in one commit per run (commit message `auto-archive: ...`), with an `auto_archive` audit row under the identity `system`. `overview/index`, notes with uncommitted changes and notes already in `archive` are never touched.
+
+**Handover.** A new agent resumes another one's work with a token that has read (and write) on `agents:<old-name>:*` (`make token-create name=<old-name> preset=agent`, or add `agents:<old-name>:*:read,agents:<old-name>:*:write` as extra scopes), then reads `overview/index` and the tail of the latest `journal/YYYY-MM`.
 
 ## Tools
 
@@ -181,6 +199,7 @@ make token-revoke id=<token id>
 - Wildcards: `*` is allowed only as trailing levels: `*:*:*`, `<space>:*:*`, `<space>:<project>:*`, or fully explicit. Patterns like `*:proj:sec` or `space:*:sec` are rejected. A token may hold scopes in several spaces.
 - `read`, `write` and `propose` are separate: `write` does not imply `read`. Grant both if you want both. `propose` only allows `kb_propose` (which `write` also allows); a propose-only token cannot change notes.
 - Presets: `preset=master` (read+write on `*:*:*`) and `preset=master-ro` (read on `*:*:*`). Use either `preset=` or `scope=`, not both (the CLI rejects the combination).
+- Preset `agent`: `make token-create name=<agent-name> preset=agent` grants read+write on `agents:<agent-name>:*` (the name must be a slug). It is bounded to one project, so it needs no `allow_wildcard`; unlike the master presets it may be combined with `scope=` to add extra scopes. The web admin offers it in the preset list.
 - Wildcard scopes and presets are refused unless `allow_wildcard=1` (CLI: `--allow-wildcard`). Before creating the token the CLI prints to stderr what it can read/write (including content created later). Prefer explicit scopes unless you need a master token.
 - Scopes already covered by a wildcard scope of the same permission (e.g. `pro:x:y:read` next to `*:*:*:read`) are dropped at creation; the CLI says which on stderr.
 - Wildcards are also enforced at match time: a stored scope with a non-`*` level after a `*` (e.g. inserted by hand) matches nothing and logs a warning.
@@ -347,6 +366,8 @@ Compose sets these; no `.env` file is needed, except that both compose files req
 | `ADMIN_WEB_SECRET` | CSRF key for the web admin; if unset, random per boot (open forms break on restart). | random | generated by `make deploy` | required (GitHub secret) |
 | `AUTHELIA_SESSION_COOKIE` | Authelia session cookie name the CSRF token is bound to. | `authelia_session` | `authelia_session_local` | unset |
 | `INBOX_MAX_PER_TOKEN`, `INBOX_MAX_TOTAL` | `kb_propose` quotas: pending proposals per token name / in total. | `20` / `200` | unset | unset |
+| `SPACE_LIMITS` | Per-space limits and auto-archive age, see [Agents space and space limits](#agents-space-and-space-limits). Validated at startup. | unset (no limits) | `agents:maxNotes=30,maxNoteBytes=4096,maxProjectBytes=102400,archiveAfterDays=60` | same |
+| `AUTO_ARCHIVE_INTERVAL_MS` | Auto-archive run interval (also runs once after startup); `0` disables. | `86400000` | unset | unset |
 | `GIT_SSH_COMMAND` | SSH command for git; points at the deploy key secret. | unset | unset | `ssh -i /run/secrets/vault_deploy_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=10` |
 | `GIT_AUTHOR_NAME`, `GIT_AUTHOR_EMAIL`, `GIT_COMMITTER_NAME`, `GIT_COMMITTER_EMAIL` | Git identity (git refuses to commit without one). | none | `second-brain-mcp` / `second-brain-mcp@noreply.local` | same |
 | `NODE_ENV` | Node mode. | `production` (set in the Dockerfile) | `development` | `production` |

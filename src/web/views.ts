@@ -173,6 +173,7 @@ ${csrfField(ctx)}
 <option value=""${f.preset === "" ? raw(" selected") : ""}>none (use the scopes below)</option>
 <option value="master"${f.preset === "master" ? raw(" selected") : ""}>master: read + write everywhere (wildcard)</option>
 <option value="master-ro"${f.preset === "master-ro" ? raw(" selected") : ""}>master-ro: read everywhere (wildcard)</option>
+<option value="agent"${f.preset === "agent" ? raw(" selected") : ""}>agent: read + write on agents:&lt;name&gt;:* (scopes below are added)</option>
 </select>
 <label for="scopes">Scopes <span class="hint">(one per line: <code>space:project:section:permission</code>; permission is read, write or propose; <code>*</code> only as trailing levels)</span></label>
 <textarea id="scopes" name="scopes" spellcheck="false" placeholder="pro:second-brain:*:write">${f.scopes}</textarea>

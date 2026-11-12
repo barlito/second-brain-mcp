@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 import { parseArgs as nodeParseArgs } from "node:util";
-import { createToken, listTokens, revokeToken, validateTokenInput } from "../auth/tokens";
+import { createToken, listTokens, revokeToken, TokenValidationError, validateTokenInput } from "../auth/tokens";
 import { Permission, Scope } from "../auth/types";
 import { safeAudit } from "../tools/common";
+import { AGENTS_SPACE } from "../tools/conventions";
+import { isValidSlug } from "../vault/paths";
 
 // Audit identity for token changes made from the command line (the web admin uses admin:<user>).
 export const CLI_ACTOR = "cli";
@@ -31,16 +33,33 @@ export const PRESETS: Record<string, Scope[]> = {
   "master-ro": [{ space: "*", project: "*", section: "*", permission: "read" }],
 };
 
-// Resolves --preset / --scope (exactly one) into scopes.
-export function resolveScopes(preset: string | undefined, scope: string | undefined): Scope[] {
+// Per-agent preset: read+write on its own agents project. Bounded (one project), so it needs
+// no wildcard confirmation, and explicit scopes may be added on top of it.
+export const AGENT_PRESET = "agent";
+
+export function agentScopes(name: string): Scope[] {
+  if (!isValidSlug(name)) throw new TokenValidationError(`preset "${AGENT_PRESET}" needs a name that is a valid slug (a-z, 0-9, hyphen)`);
+  return (["read", "write"] as const).map((permission) => ({ space: AGENTS_SPACE, project: name, section: "*", permission }));
+}
+
+// Resolves --preset / --scope into scopes. `name` is the token name (used by the agent preset).
+export function resolveScopes(preset: string | undefined, scope: string | undefined, name?: string): Scope[] {
+  if (preset === AGENT_PRESET) return [...agentScopes(name ?? ""), ...(scope ? parseScopes(scope) : [])];
   if (preset && scope) throw new Error("use either --preset or --scope, not both");
   if (preset) {
-    const p = PRESETS[preset];
-    if (!p) throw new Error(`unknown preset "${preset}", expected one of: ${Object.keys(PRESETS).join(", ")}`);
+    const p = Object.hasOwn(PRESETS, preset) ? PRESETS[preset] : undefined;
+    if (!p) throw new Error(`unknown preset "${preset}", expected one of: ${[...Object.keys(PRESETS), AGENT_PRESET].join(", ")}`);
     return p.map((s) => ({ ...s }));
   }
   if (!scope) throw new Error("--preset or --scope is required");
   return parseScopes(scope);
+}
+
+// Scopes that need the wildcard confirmation: the agent preset's own scopes do not.
+export function confirmableWildcards(scopes: Scope[], preset: string | undefined, name: string): Scope[] {
+  if (preset !== AGENT_PRESET) return scopes;
+  const own = agentScopes(name).map(formatScope);
+  return scopes.filter((s) => !own.includes(formatScope(s)));
 }
 
 export function formatScope(s: Scope): string {
@@ -104,7 +123,7 @@ function cmdCreate(argv: string[]): void {
 
   let scopes: Scope[];
   try {
-    scopes = resolveScopes(preset, scope);
+    scopes = resolveScopes(preset, scope, name);
   } catch (err) {
     fail((err as Error).message);
   }
@@ -114,7 +133,7 @@ function cmdCreate(argv: string[]): void {
   const { kept, dropped } = dropRedundantScopes(validated.scopes);
   scopes = kept;
 
-  const warnings = wildcardWarnings(scopes);
+  const warnings = wildcardWarnings(confirmableWildcards(scopes, preset, name));
   if (warnings.length > 0) {
     for (const w of warnings) console.error(w);
     if (!values["allow-wildcard"]) {
