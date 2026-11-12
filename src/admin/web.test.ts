@@ -4,7 +4,7 @@ import http from "node:http";
 import type { AddressInfo } from "node:net";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { cleanup, git, makeTempDb, makeTempVault } from "../test-support/fixtures";
+import { cleanup, git, makeTempDb, makeTempVault, stripFm } from "../test-support/fixtures";
 import { serializeProposal } from "../inbox";
 
 makeTempDb();
@@ -415,7 +415,7 @@ test("inbox: accept creates the note (one commit, audited as admin:<user>); over
   // Reload of the POST (same nonce) is refused and does nothing
   assert.equal((await post(`/inbox/${mid(2)}/accept`, {}, { nonce: nonce2 })).status, 409);
   await drain();
-  assert.equal(readFileSync(join(vault, "sp/pj/notes/acc.md"), "utf8"), "accepted body\n");
+  assert.equal(stripFm(readFileSync(join(vault, "sp/pj/notes/acc.md"), "utf8")), "accepted body\n");
   assert.equal(existsSync(join(vault, "_inbox", `${mid(2)}.md`)), false);
   assert.equal(Number(git(["rev-list", "--count", "HEAD"], vault).trim()), before + 1);
   const a = db.prepare("SELECT * FROM audit_log WHERE action = 'inbox_accept' ORDER BY id DESC LIMIT 1").get() as Record<string, string>;
@@ -427,12 +427,12 @@ test("inbox: accept creates the note (one commit, audited as admin:<user>); over
   assert.equal(refused.status, 303);
   assert.equal(refused.headers.location?.startsWith(`/inbox/${mid(3)}?flash=`), true);
   assert.match((await get(String(refused.headers.location))).body, /already exists/);
-  assert.equal(readFileSync(join(vault, "sp/pj/notes/acc.md"), "utf8"), "accepted body\n");
+  assert.equal(stripFm(readFileSync(join(vault, "sp/pj/notes/acc.md"), "utf8")), "accepted body\n");
   const ow = await post(`/inbox/${mid(3)}/accept`, { overwrite: "1" });
   assert.equal(ow.status, 303);
   assert.match((await follow(ow)).body, /Accepted sp\/pj\/notes\/acc/);
   await drain();
-  assert.equal(readFileSync(join(vault, "sp/pj/notes/acc.md"), "utf8"), "second\n");
+  assert.equal(stripFm(readFileSync(join(vault, "sp/pj/notes/acc.md"), "utf8")), "second\n");
 
   const gone = await post(`/inbox/${mid(2)}/accept`, {}, { nonce: await nonceFor("/tokens") });
   assert.match((await follow(gone)).body, /proposal not found/);

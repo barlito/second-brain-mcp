@@ -3,6 +3,7 @@ import { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { kbArgsShape, MAX_CONTENT_CHARS, RegisterTool, registerKbTool, withAclAndAudit } from "./common";
 import { ENTRY_NOTE_MAX_BYTES, RESERVED_SECTIONS_SUMMARY } from "./conventions";
 import { rejectReservedSection } from "./reserved";
+import { NOTE_TYPES } from "./frontmatter";
 import { writeNote } from "./writeNote";
 
 export const register: RegisterTool = (server, { vaultRoot }) => {
@@ -12,13 +13,17 @@ export const register: RegisterTool = (server, { vaultRoot }) => {
     {
       description:
         "Write (create or overwrite) a note in the shared knowledge base vault. " +
+        `Notes outside overview/journal/archive get a YAML frontmatter (type: ${NOTE_TYPES.join("|")}, sources, author, created, updated); ` +
+        "you may send content with or without it: the server sets author/created/updated, defaults type from the section " +
+        "(decisions, conventions, notes) and keeps `sources` (optional list of up to 20 strings, e.g. URLs) and other keys. " +
+        "Content without frontmatter keeps the existing note's type, sources and other keys (only the body changes); content with frontmatter replaces them. " +
         `${RESERVED_SECTIONS_SUMMARY} overview/index is capped at ${ENTRY_NOTE_MAX_BYTES} bytes.`,
       inputSchema: {
         ...kbArgsShape,
         content: z
           .string()
           .max(MAX_CONTENT_CHARS, "too large (max 512 KB)")
-          .describe("Full note content, written verbatim"),
+          .describe("Full note content (optionally starting with a YAML frontmatter)"),
       },
     },
     async ({ space, project, section, note, content }): Promise<CallToolResult> =>
@@ -30,6 +35,7 @@ export const register: RegisterTool = (server, { vaultRoot }) => {
           { space, project, section, note },
           content,
           `kb_write: ${space}/${project}/${section}/${note} via ${ctx.name}`,
+          { author: ctx.name },
         );
       }),
   );

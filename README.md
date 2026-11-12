@@ -55,6 +55,40 @@ Every project uses the same section names:
 
 Only `archive` is enforced beyond the `overview/index` size cap; the other names are conventions (the server accepts any valid section slug).
 
+### Note frontmatter
+
+Every note written through the server (`kb_write`, web admin create/edit, inbox accept) carries a YAML frontmatter, except in `overview` (3 KB cap), `journal` (`kb_append` lines) and `archive` (moved unchanged):
+
+```yaml
+---
+type: decision
+sources: [https://github.com/barlito/second-brain-mcp/pull/25]
+author: claude-code-laptop
+created: 2026-11-12
+updated: 2026-11-12
+---
+```
+
+- The client may send content with or without frontmatter. The server parses it (malformed YAML, a missing closing `---` or a non-mapping gives `Invalid frontmatter: ...`) and stores a normalized one: keys in the order `type, sources, author, created, updated`, then any other keys the client added (preserved), then the body unchanged.
+- Server-owned, client values ignored: `author` (token name for MCP; `web:<user>` for web admin writes; the reviewer actor `admin-cli` / `admin:<user>` for inbox accept), `created` (kept from the existing note, else today UTC), `updated` (today UTC, `YYYY-MM-DD`).
+- `type` is one of `decision | convention | note | guide | reference | gotcha`. Default from the section: `decisions` gives `decision`, `conventions` gives `convention`, anything else `note`. In `decisions`/`conventions` the type must be the section default (or omitted); elsewhere the client may pick `note`, `guide`, `reference` or `gotcha`. Otherwise the write fails with a clear message.
+- `sources` is an optional list of strings (max 20 items, 1-500 characters each); recommended, to say where the knowledge comes from.
+- Content sent WITHOUT frontmatter keeps the existing note's `type`, `sources` and extra keys (only the body changes). Content sent WITH frontmatter replaces them (a missing `sources` then means none).
+- Extra keys are kept as written (numbers like `1.10`/`0x1F`, big ints, comments, key order). A leading UTF-8 BOM is accepted and dropped. The frontmatter uses the body's line ending (CRLF body gives CRLF frontmatter).
+- `created` is kept from the existing note as written when it is a date or ISO datetime (`2026-11-12`, `2026-11-12T10:00:00Z`).
+- Rewriting a note whose body and client-controlled fields (type, sources, extra keys) are unchanged makes no commit and does not bump `updated`, unless the existing note lacks `author`, `created` or `updated` (then they are filled on that write).
+- `kb_propose` stores the proposal as sent; the frontmatter is normalized when the proposal is accepted.
+- `kb_search` accepts a `type` filter and matches the note body only (frontmatter is excluded from matching and snippets).
+- Migration of existing notes: `make migrate-frontmatter` (see [Frontmatter migration](#frontmatter-migration)).
+
+### Frontmatter migration
+
+```bash
+make migrate-frontmatter
+```
+
+Adds frontmatter to existing notes that have none, and fills only the missing server keys (`type`, `author`, `created`, `updated`) of notes that already have some, e.g. Obsidian properties (outside `overview`, `journal`, `archive`), in ONE commit `migrate: add frontmatter to existing notes` through the server's write lock (the CLI calls the local admin listener). `type` comes from the section default, `author` is `migration`, `created` is the date of the note's first git commit and `updated` the date of its last. Dates come from one `git log` pass over the vault. Notes with malformed frontmatter, invalid UTF-8 or uncommitted changes in the working tree are left alone and listed. The CLI has no response timeout; if the connection drops, check the vault history and re-run. Notes whose new size would break a [space limit](#agents-space-and-space-limits) (checked with a running per-project total) are skipped and listed. The commit touches every migrated note, which resets the auto-archive age of the agents space once. Idempotent: a second run commits nothing. Audit action `migrate_frontmatter`, actor `admin-cli`.
+
 ### Server instructions
 
 On connection the server sends MCP `instructions` describing this layout, the reserved sections, the session-start routine and the working rules (short notes, find notes with `kb_search`, `kb_history` for a note's git history, update the Docs map, archive instead of delete, `kb_propose` when unsure whether something deserves a note, re-read before overwriting) and a short paragraph on the `agents` space (scratch working memory, keep the index up to date for handover, durable knowledge goes to the real project). MCP clients that surface server instructions therefore get the conventions automatically; nothing needs to be configured per client.
@@ -90,10 +124,10 @@ All note-addressed tools take `space`, `project`, `section`, `note` (strings, ma
 
 ### `kb_write`
 
-- Args: the four names plus `content` (string, max 512 x 1024 = 524288 characters, not bytes; more is rejected with ``Invalid argument `content`: too large (max 512 KB).`` (every argument that fails validation gets an ``Invalid argument `<name>`: ...`` message and an audit row)). Written verbatim.
+- Args: the four names plus `content` (string, max 512 x 1024 = 524288 characters, not bytes; more is rejected with ``Invalid argument `content`: too large (max 512 KB).`` (every argument that fails validation gets an ``Invalid argument `<name>`: ...`` message and an audit row)). Written with a normalized [frontmatter](#note-frontmatter) (outside `overview`, `journal`, `archive`), body unchanged.
 - Permission: `write` on the section.
 - Creates or overwrites the note and returns the git commit SHA. Rewriting identical content makes no commit and returns `No changes (content identical).` Commit message: `kb_write: <space>/<project>/<section>/<note> via <token name>`.
-- Errors: ``Section `archive` is managed by kb_archive and cannot be written directly.``; for `overview/index` over 3 KB: `overview/index is too large (<n> bytes, max 3072). The entry note must stay small: move detail into other sections (decisions, conventions, notes) and link to those notes from the Docs map.`
+- Errors: `Invalid frontmatter: ...` (bad YAML, bad `type` for the section, bad `sources`); ``Section `archive` is managed by kb_archive and cannot be written directly.``; for `overview/index` over 3 KB: `overview/index is too large (<n> bytes, max 3072). The entry note must stay small: move detail into other sections (decisions, conventions, notes) and link to those notes from the Docs map.`
 - Writes are direct and overwrite without merging: re-read before overwriting a note you did not just read.
 
 ### `kb_append`
@@ -122,7 +156,7 @@ All note-addressed tools take `space`, `project`, `section`, `note` (strings, ma
 
 ### `kb_search`
 
-- Args: `query` (string, max 200 characters as sent, at least 2 after trimming; shorter gives `Query must be at least 2 characters.`), optional `space`, `project`, `section` (same hierarchy rule as `kb_list`), `include_archived` (default false).
+- Args: `query` (string, max 200 characters as sent, at least 2 after trimming; shorter gives `Query must be at least 2 characters.`), optional `space`, `project`, `section` (same hierarchy rule as `kb_list`), `include_archived` (default false), `type` (`decision | convention | note | guide | reference | gotcha`: only notes whose [frontmatter](#note-frontmatter) type matches).
 - Permission: `read`. Only sections the token can read are opened: the ACL is applied before any directory or file is read.
 - Case-insensitive plain substring match (not regex, no ranking) per line. Output lines are `<space>/<project>/<section>/<note>: <snippet>`; up to 50 notes and 3 lines per note, each snippet at most 200 characters around the match. No hits prints `No matches.`
 - Limits: files over 1 MB are skipped; stops after 3 s, 20 MB read or 5000 notes scanned. When it stops early the output ends with `(truncated: <reason>; results may be incomplete, narrow the search)`, where reason is `time limit reached`, `read limit reached`, `too many notes` or `more notes match` (more than 50 notes hit). Unreadable and oversized entries are counted in `(skipped <n> unreadable or oversized entries)`. Narrow with `space`/`project`/`section` when truncated.

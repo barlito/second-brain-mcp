@@ -1,6 +1,7 @@
 // Inbox operations shared by the loopback listener (CLI) and the web admin UI.
 // Pure functions of (vaultRoot, actor): no HTTP concerns. Failures that map to a client
 // status are thrown as AdminError; anything else propagates (callers log it generically).
+import { existsSync, readFileSync } from "node:fs";
 import {
   assertInboxDirSafe,
   HEAD_BYTES,
@@ -18,6 +19,7 @@ import { InboxInvalidError, InboxMissingError, NoteExistsError, redact, syncInbo
 import { errorMessage, MAX_CONTENT_CHARS, safeAudit } from "../tools/common";
 import { NoteRuleError, validateNoteContent } from "../tools/conventions";
 import { assertSpaceLimits } from "../limits";
+import { normalizeNote, utcToday } from "../tools/frontmatter";
 import { rejectReservedSection } from "../tools/reserved";
 
 export const CLI_ACTOR = "admin-cli";
@@ -113,13 +115,17 @@ export async function acceptProposal(vaultRoot: string, id: string, overwrite: b
     const { commitSha } = await syncInboxResolve(vaultRoot, inboxPath(vaultRoot, id), (raw) => {
       const { p, t } = validateAccept(raw, id);
       seen = p;
-      // accept.content below is what gets written, so it is what is measured.
-      assertSpaceLimits(vaultRoot, t, Buffer.byteLength(p.content, "utf8"));
+      const targetAbs = resolveNotePath(vaultRoot, t.space, t.project, t.section, t.note);
+      // Frontmatter is normalized here (not at propose time); author = the reviewer's audit actor.
+      const existing = existsSync(targetAbs) ? readFileSync(targetAbs, "utf8") : null;
+      const content = normalizeNote(p.content, { section: t.section, author: actor, today: utcToday(), existing });
+      // `content` is what gets written (frontmatter included), so it is what is measured.
+      assertSpaceLimits(vaultRoot, t, Buffer.byteLength(content, "utf8"));
       return {
         message: `inbox accept: ${p.target} (proposed by ${p.proposedBy})`,
         accept: {
-          targetAbs: resolveNotePath(vaultRoot, t.space, t.project, t.section, t.note),
-          content: p.content,
+          targetAbs,
+          content,
           overwrite,
         },
       };

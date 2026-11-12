@@ -9,6 +9,7 @@ import { UnsafePathError } from "./vault/paths";
 import { redact } from "./vault/git";
 import { errorMessage } from "./tools/common";
 import { acceptProposal, AdminError, CLI_ACTOR, listInbox, rejectProposal, showProposal } from "./admin/service";
+import { migrateFrontmatter } from "./admin/migrate";
 import { listen } from "./listen";
 import type { Lifecycle } from "./server";
 
@@ -96,6 +97,14 @@ export function createAdminApp(vaultRoot: string, lifecycle?: Lifecycle): Expres
     try {
       const r = await rejectProposal(vaultRoot, req.params.id as string, CLI_ACTOR);
       res.json({ ok: true, id: r.id, target: r.target, commit: r.commit });
+    } catch (err) {
+      fail(res, next, err);
+    }
+  });
+
+  app.post("/admin/migrate-frontmatter", async (_req, res, next) => {
+    try {
+      res.json({ ok: true, ...(await migrateFrontmatter(vaultRoot, CLI_ACTOR)) });
     } catch (err) {
       fail(res, next, err);
     }

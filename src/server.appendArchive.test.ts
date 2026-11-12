@@ -2,7 +2,7 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { cleanup, git, makeTempDb, makeTempVault } from "./test-support/fixtures";
+import { cleanup, git, makeTempDb, makeTempVault, stripFm } from "./test-support/fixtures";
 import { callTool, lastAudit, listen } from "./test-support/server";
 
 const MAX = 512 * 1024; // MAX_CONTENT_CHARS
@@ -112,7 +112,7 @@ test("kb_archive moves to archive/<section>-<note>, then -2, and keeps history",
   const r1 = await call(rw, "kb_archive", w);
   assert.deepEqual(r1, { isError: false, text: "pro/proj/archive/notes-idea" });
   assert.equal(existsSync(join(vault, "pro/proj/notes/idea.md")), false);
-  assert.equal(readFileSync(join(vault, "pro/proj/archive/notes-idea.md"), "utf8"), "one\n");
+  assert.equal(stripFm(readFileSync(join(vault, "pro/proj/archive/notes-idea.md"), "utf8")), "one\n");
   assert.equal(lastAudit(db, "token_name = 'agent-rw'").action, "kb_archive");
 
   await call(rw, "kb_write", { ...w, content: "two\n" });
@@ -184,7 +184,9 @@ test("kb_archive needs write on source AND archive; reading archive needs read o
   assert.equal(row.detail, "-> archive/notes-acl");
   const a = { ...base, section: "archive", note: "notes-acl" };
   assert.deepEqual(await call(notesOnly, "kb_read", a), { isError: true, text: "Permission denied." });
-  assert.deepEqual(await call(archiveReader, "kb_read", a), { isError: false, text: "secret\n" });
+  const archived = await call(archiveReader, "kb_read", a);
+  assert.equal(archived.isError, false);
+  assert.equal(stripFm(archived.text), "secret\n");
 });
 
 test("archive section is writable only through kb_archive", async () => {
