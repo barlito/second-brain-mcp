@@ -4,7 +4,7 @@ import http from "node:http";
 import type { AddressInfo } from "node:net";
 import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { cleanup, git, makeTempDb, makeTempVault } from "../test-support/fixtures";
+import { cleanup, git, makeTempDb, makeTempVault, stripFm } from "../test-support/fixtures";
 
 makeTempDb();
 const { vault } = makeTempVault();
@@ -147,7 +147,7 @@ test("edit: success commits through the write path with a web: message, audited"
   const r = await post(`${NOTE}/edit`, { content: "# Foo\r\n\r\nedited\r\n", base: f.base }, { nonce: f.nonce });
   const page = await follow(r);
   assert.match(page.body, /Saved foo/);
-  assert.equal(read("pro/x/notes/foo.md"), "# Foo\n\nedited\n", "CRLF from the browser is normalised");
+  assert.equal(stripFm(read("pro/x/notes/foo.md")), "# Foo\n\nedited\n", "CRLF from the browser is normalised");
   assert.equal(lastSubject(), "web: edit pro/x/notes/foo by barlito");
   const row = db.prepare("SELECT * FROM audit_log WHERE action = 'web_note_edit' ORDER BY id DESC LIMIT 1").get() as Record<string, string>;
   assert.equal(row.token_name, "web:barlito");
@@ -179,7 +179,7 @@ test("edit: stale base hash -> 409, nothing overwritten", async () => {
   const r = await post(`${NOTE}/edit`, { content: "second\n", base: b.base! }, { nonce: b.nonce });
   assert.equal(r.status, 409);
   assert.match(r.body, /note changed since you opened it/);
-  assert.equal(read("pro/x/notes/foo.md"), "first\n");
+  assert.equal(stripFm(read("pro/x/notes/foo.md")), "first\n");
   const row = db.prepare("SELECT result FROM audit_log WHERE action = 'web_note_edit' ORDER BY id DESC LIMIT 1").get() as { result: string };
   assert.equal(row.result, "error");
 });
@@ -203,7 +203,7 @@ test("create: valid slug commits; invalid slug and duplicates are refused", asyn
   const ok = await post(`${dir}/_new`, { note: "fresh-note", content: "hi\r\nthere" }, { page: `${dir}/_new` });
   const page = await follow(ok);
   assert.match(page.body, /Created fresh-note/);
-  assert.equal(read("pro/x/notes/fresh-note.md"), "hi\nthere");
+  assert.equal(stripFm(read("pro/x/notes/fresh-note.md")), "hi\nthere");
   assert.equal(lastSubject(), "web: create pro/x/notes/fresh-note by barlito");
   assert.equal((db.prepare("SELECT COUNT(*) AS n FROM audit_log WHERE action = 'web_note_create' AND result = 'ok' AND token_name = 'web:barlito'").get() as { n: number }).n, 1);
 
@@ -215,7 +215,7 @@ test("create: valid slug commits; invalid slug and duplicates are refused", asyn
   assert.equal(existsSync(join(vault, "pro/x/notes/Bad Name.md")), false);
   const dup = await post(`${dir}/_new`, { note: "fresh-note", content: "again" }, { page: `${dir}/_new` });
   assert.equal(dup.status, 409);
-  assert.equal(read("pro/x/notes/fresh-note.md"), "hi\nthere");
+  assert.equal(stripFm(read("pro/x/notes/fresh-note.md")), "hi\nthere");
   // archive is reserved, and a missing section is not created on the fly
   assert.equal((await get("/vault/pro/x/nosection/_new")).status, 404);
   const arch = await post("/vault/pro/x/archive/_new", { note: "n", content: "c" }, { nonce: "a".repeat(32), csrf: web.csrfToken(SECRET, "barlito", SESSION) });
@@ -443,7 +443,8 @@ test("edit: non-UTF-8 note is not editable; CRLF files keep CRLF", async () => {
   const c = "/vault/pro/x/notes/crlf";
   const cf = await form(`${c}/edit`, `${c}/edit`);
   await follow(await post(`${c}/edit`, { content: "a\r\nb\r\nc\r\n", base: cf.base! }, { nonce: cf.nonce }));
-  assert.equal(read("pro/x/notes/crlf.md"), "a\r\nb\r\nc\r\n");
+  assert.equal(stripFm(read("pro/x/notes/crlf.md")), "a\r\nb\r\nc\r\n");
+  assert.match(read("pro/x/notes/crlf.md"), /^---\r\ntype: note\r\nauthor: web:barlito\r\n/);
 });
 
 test("failed web writes are audited (create into a missing section)", async () => {

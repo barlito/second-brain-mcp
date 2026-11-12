@@ -72,7 +72,7 @@ test("parseSpaceLimits: malformed specs are rejected", async () => {
 test("kb_write: per-note size limit, audited as error", async () => {
   const r = await w("p1", "big", "x".repeat(1001));
   assert.equal(r.isError, true);
-  assert.match(r.text, /Note too large for agents: 1001 bytes \(limit 1000 per note\)/);
+  assert.match(r.text, /Note too large for agents: \d+ bytes \(limit 1000 per note\)/);
   assert.equal(lastAudit(db, "action = 'kb_write'").result, "error");
   assert.equal(existsSync(join(vault, "agents/p1/notes/big.md")), false);
   assert.equal((await w("p1", "ok", "x".repeat(200))).isError, false);
@@ -84,7 +84,7 @@ test("kb_write: note count limit with usage message; overwrite does not count tw
   assert.equal((await w("p2", "c", "3")).isError, false);
   const r = await w("p2", "d", "4");
   assert.equal(r.isError, true);
-  assert.match(r.text, /Note limit reached for agents\/p2: this write would make 4 notes \(limit 3\)\. Current usage of agents\/p2: 3 notes, 3 bytes\. Condense notes or kb_archive old ones first\./);
+  assert.match(r.text, /Note limit reached for agents\/p2: this write would make 4 notes \(limit 3\)\. Current usage of agents\/p2: 3 notes, \d+ bytes\. Condense notes or kb_archive old ones first\./);
   assert.equal((await w("p2", "a", "again")).isError, false); // overwrite at the cap
   // Another project in the same space has its own budget.
   assert.equal((await w("p2b", "a", "1")).isError, false);
@@ -94,14 +94,15 @@ test("kb_write: note count limit with usage message; overwrite does not count tw
 });
 
 test("kb_write: project bytes limit counts the new size of an overwrite, not old+new", async () => {
-  const s = "y".repeat(700);
+  // Sizes include the frontmatter the server adds (about 80 bytes per note).
+  const s = "y".repeat(500);
   assert.equal((await w("p3", "a", s)).isError, false);
-  assert.equal((await w("p3", "b", s)).isError, false); // 1400 <= 1500
-  // Overwriting a with 200 bytes: 1500 total. old+new (2200) would be refused.
-  assert.equal((await w("p3", "a", "z".repeat(800))).isError, false);
-  const r = await w("p3", "c", "z".repeat(100)); // 1600 > 1500
+  assert.equal((await w("p3", "b", s)).isError, false); // about 1160 <= 1500
+  // Overwriting a with 700 bytes: about 1360 total. old+new (about 1940) would be refused.
+  assert.equal((await w("p3", "a", "z".repeat(700))).isError, false);
+  const r = await w("p3", "c", "z".repeat(100)); // about 1540 > 1500
   assert.equal(r.isError, true);
-  assert.match(r.text, /Size limit reached for agents\/p3: this write would make 1600 bytes \(limit 1500\)\. Current usage of agents\/p3: 2 notes, 1500 bytes\./);
+  assert.match(r.text, /Size limit reached for agents\/p3: this write would make \d+ bytes \(limit 1500\)\. Current usage of agents\/p3: 2 notes, \d+ bytes\./);
   assert.match(r.text, /kb_archive/);
 });
 
@@ -193,7 +194,7 @@ test("inbox accept within limits succeeds", async () => {
   await call(prop, "kb_propose", { space: "agents", project: "p7", section: "notes", note: "ok", content: "small", reason: "r" });
   const [id] = await listInboxIds(vault);
   await acceptProposal(vault, id, false, "tester");
-  assert.equal(readFileSync(join(vault, "agents/p7/notes/ok.md"), "utf8"), "small");
+  assert.match(readFileSync(join(vault, "agents/p7/notes/ok.md"), "utf8"), /^---\n[^]*---\nsmall$/);
 });
 
 test("web admin create and edit enforce the limits (422)", async () => {
@@ -212,8 +213,9 @@ test("web admin create and edit enforce the limits (422)", async () => {
     assert.match(e.message, /Note limit reached for agents\/p8/);
     return true;
   });
-  await editNote(vault, t("a"), "x".repeat(500), sha256Hex("one"), "u"); // overwrite at the cap
-  await assert.rejects(editNote(vault, t("a"), "x".repeat(1100), sha256Hex("x".repeat(500)), "u"), (e: { status?: number }) => e.status === 422);
+  const raw = (n: string): string => readFileSync(join(vault, `agents/p8/notes/${n}.md`), "utf8");
+  await editNote(vault, t("a"), "x".repeat(500), sha256Hex(raw("a")), "u"); // overwrite at the cap
+  await assert.rejects(editNote(vault, t("a"), "x".repeat(1100), sha256Hex(raw("a")), "u"), (e: { status?: number }) => e.status === 422);
 });
 
 test("auto-archive: old notes move in one commit, fresh ones and overview/index stay", async () => {

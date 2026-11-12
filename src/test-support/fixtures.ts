@@ -22,6 +22,11 @@ export function cleanup(): void {
   for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
 }
 
+/** Note text without its leading YAML frontmatter block (LF or CRLF). */
+export function stripFm(text: string): string {
+  return text.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n/, "");
+}
+
 export function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }

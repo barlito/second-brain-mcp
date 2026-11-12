@@ -1,6 +1,6 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { cleanup, git, makeTempDb, makeTempVault } from "./test-support/fixtures";
+import { cleanup, git, makeTempDb, makeTempVault, stripFm } from "./test-support/fixtures";
 import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
@@ -108,7 +108,7 @@ test("kb_write then kb_read with correctly-scoped token succeeds end-to-end", as
       arguments: { space: "sp", project: "proj-a", section: "sect-a", note: "note-1" },
     });
     assert.ok(!readResult.isError, "read should not be a tool error");
-    assert.equal(textOf(readResult as CallToolResult), "hello\n");
+    assert.equal(stripFm(textOf(readResult as CallToolResult)), "hello\n");
   } finally {
     await transport.close();
   }

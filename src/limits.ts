@@ -111,6 +111,8 @@ export function assertSpaceLimits(
   vaultRoot: string,
   t: { space: string; project: string; section: string; note: string },
   newBytes: number,
+  // Bytes already added to the project by earlier, not yet written items of a batch (migration).
+  pendingBytes = 0,
 ): void {
   const limits = getSpaceLimits().get(t.space);
   if (!limits || t.section === ARCHIVE_SECTION) return;
@@ -124,6 +126,7 @@ export function assertSpaceLimits(
   }
   if (limits.maxNotes === undefined && limits.maxProjectBytes === undefined) return;
   const u = usage(vaultRoot, t);
+  u.bytes += pendingBytes;
   const notes = u.notes + (u.existing === null ? 1 : 0);
   const bytes = u.bytes - (u.existing ?? 0) + newBytes;
   const now = `Current usage of ${where}: ${u.notes} notes, ${u.bytes} bytes`;

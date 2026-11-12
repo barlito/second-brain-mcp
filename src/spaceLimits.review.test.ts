@@ -1,7 +1,7 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { cleanup, git, makeTempDb, makeTempVault } from "./test-support/fixtures";
 import { callTool, listen } from "./test-support/server";
@@ -63,7 +63,8 @@ test("web edit: stale base gives 409 before the limit check (422)", async () => 
   const t = { space: "agents", project: "p11", section: "notes", note: "a" };
   await createNote(vault, t, "one", "u");
   await assert.rejects(editNote(vault, t, "x".repeat(1100), sha256Hex("stale"), "u"), (e: { status?: number }) => e.status === 409);
-  await assert.rejects(editNote(vault, t, "x".repeat(1100), sha256Hex("one"), "u"), (e: { status?: number }) => e.status === 422);
+  const cur = readFileSync(join(vault, "agents/p11/notes/a.md"), "utf8"); // with its frontmatter
+  await assert.rejects(editNote(vault, t, "x".repeat(1100), sha256Hex(cur), "u"), (e: { status?: number }) => e.status === 422);
 });
 
 test("usage counts only notes the tools can see (valid slugs)", async () => {

@@ -5,7 +5,8 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { listNoteNames, listSubdirs, NoteInfo, readFileNoFollow, statNote } from "../vault/enumerate";
 import { isValidSlug, resolveNotePath, UnsafePathError } from "../vault/paths";
-import { NoteExistsError, noteHistory, NoteHistoryEntry, runGit, syncWrite } from "../vault/git";
+import { NoteExistsError, noteHistory, NoteHistoryEntry, runGit, syncWriteBuilt } from "../vault/git";
+import { normalizeNote, utcToday } from "../tools/frontmatter";
 import { MAX_CONTENT_CHARS } from "../tools/common";
 import { NoteRuleError, validateNoteContent } from "../tools/conventions";
 import { assertSpaceLimits } from "../limits";
@@ -113,6 +114,21 @@ function checkContent(t: NoteRef, content: string): void {
   }
 }
 
+// Frontmatter rules, run inside the write lock on the note's current bytes. Author = the audit
+// actor of web writes (web:<user>). Errors become 422 for the form.
+function withFrontmatter(t: NoteRef, user: string, content: string, previous: Buffer | null): string {
+  const raw = previous ? previous.toString("utf8") : null;
+  const { text, crlf } = raw === null ? { text: null, crlf: false } : formView(raw);
+  try {
+    const out = normalizeNote(content, { section: t.section, author: `web:${user}`, today: utcToday(), existing: text });
+    if (out === text) return raw as string; // unchanged: keep the file byte for byte
+    return crlf ? out.replace(/\n/g, "\r\n") : out;
+  } catch (err) {
+    if (err instanceof NoteRuleError) throw new AdminError(422, err.message);
+    throw err;
+  }
+}
+
 // Optimistic concurrency: `base` is the sha256 of the content the form was loaded from. The
 // comparison runs INSIDE the write lock (after the pull), so nothing can slip in between
 // the check and the write.
@@ -131,10 +147,9 @@ export async function editNote(vaultRoot: string, t: NoteRef, content: string, b
   };
   const before = await read();
   if (before && !before.utf8) throw new AdminError(422, NOT_UTF8_MESSAGE);
-  const out = before?.crlf ? content.replace(/\n/g, "\r\n") : content;
   let commitSha: string | null;
   try {
-    ({ commitSha } = await syncWrite(vaultRoot, abs, out, `web: edit ${t.space}/${t.project}/${t.section}/${t.note} by ${user}`, {
+    ({ commitSha } = await syncWriteBuilt(vaultRoot, abs, (prev) => withFrontmatter(t, user, content, prev), `web: edit ${t.space}/${t.project}/${t.section}/${t.note} by ${user}`, {
       // Stale check first (409), limits after on the final bytes (422).
       precheck: async () => {
         const cur = await read();
@@ -155,7 +170,7 @@ export async function createNote(vaultRoot: string, t: NoteRef, content: string,
   checkContent(t, content);
   const abs = resolve(vaultRoot, t);
   try {
-    const { commitSha } = await syncWrite(vaultRoot, abs, content, `web: create ${t.space}/${t.project}/${t.section}/${t.note} by ${user}`, {
+    const { commitSha } = await syncWriteBuilt(vaultRoot, abs, (prev) => withFrontmatter(t, user, content, prev), `web: create ${t.space}/${t.project}/${t.section}/${t.note} by ${user}`, {
       mustNotExist: true,
       check: (next) => assertSpaceLimits(vaultRoot, t, Buffer.byteLength(next, "utf8")),
     });

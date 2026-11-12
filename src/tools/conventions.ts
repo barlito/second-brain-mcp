@@ -79,6 +79,7 @@ Working rules:
 - Find notes with kb_search (or kb_list to browse).
 - kb_history shows a note's git history (who changed what, when), following archive moves.
 - Keep notes short and focused: one topic per note, link to related notes.
+- Notes (except overview, journal, archive) carry a YAML frontmatter: type (decision|convention|note|guide|reference|gotcha; default from the section, fixed in decisions/conventions), sources, author, created, updated. Send content with or without it (without: the existing frontmatter is kept); the server fills author and dates. Recommended: set \`sources\` (list of URLs/refs, max 20) to where the knowledge comes from. kb_search accepts a \`type\` filter.
 - Add journal entries with kb_append (journal/YYYY-MM); it writes one timestamped line.
 - When you add an important note, update the Docs map in overview/index. Keep that note small; move detail elsewhere.
 - Archive instead of delete: kb_archive (needs read and write on the section, plus write on the archive section).

@@ -2,7 +2,7 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { cleanup, git, makeTempDb, makeTempVault } from "./test-support/fixtures";
+import { cleanup, git, makeTempDb, makeTempVault, stripFm } from "./test-support/fixtures";
 import { callTool, lastAudit, listen } from "./test-support/server";
 
 makeTempDb();
@@ -75,7 +75,7 @@ test("a master token writes anywhere; commit message and audit row carry the spa
   assert.equal(row.space, "idees");
   assert.equal(row.result, "ok");
   const r = await callTool(app.baseUrl, master, "kb_read", { space: "idees", project: "p", section: "s", note: "n1" });
-  assert.equal(r.text, "hi\n");
+  assert.equal(stripFm(r.text), "hi\n");
 });
 
 test("a legacy-scoped token (post-migration) cannot access any real space", async () => {

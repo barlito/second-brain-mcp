@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import type { AddressInfo } from "node:net";
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { cleanup, git, makeTempDb, makeTempVault } from "./test-support/fixtures";
+import { cleanup, git, makeTempDb, makeTempVault, stripFm } from "./test-support/fixtures";
 import { callTool, lastAudit, listen } from "./test-support/server";
 import { inboxPath, serializeProposal } from "./inbox";
 
@@ -155,7 +155,7 @@ test("admin accept: target created, inbox file gone, ONE commit; re-accept is 40
   const r = await post(`/admin/inbox/${id}/accept`);
   assert.equal(r.status, 200, await r.clone().text());
   await drain();
-  assert.equal(readFileSync(join(vault, "sp/pj/notes/acc.md"), "utf8"), "accepted body\n");
+  assert.equal(stripFm(readFileSync(join(vault, "sp/pj/notes/acc.md"), "utf8")), "accepted body\n");
   assert.equal(existsSync(join(vault, "_inbox", `${id}.md`)), false);
   assert.equal(commits(), before + 1);
   assert.equal(git(["log", "-1", "--format=%s"], vault).trim(), "inbox accept: sp/pj/notes/acc (proposed by tok-prop)");
@@ -174,14 +174,14 @@ test("admin accept onto an existing target is refused unless overwrite", async (
   await drain();
   const r = await post(`/admin/inbox/${id}/accept`);
   assert.equal(r.status, 409);
-  assert.equal(readFileSync(join(vault, "sp/pj/notes/exist.md"), "utf8"), "old\n");
+  assert.equal(stripFm(readFileSync(join(vault, "sp/pj/notes/exist.md"), "utf8")), "old\n");
   assert.ok(existsSync(join(vault, "_inbox", `${id}.md`)));
   assert.equal(lastAudit(db, "action = 'inbox_accept'").result, "error");
   assert.equal((await post(`/admin/inbox/${id}/accept`, { overwrite: "yes" })).status, 400);
   const ok = await post(`/admin/inbox/${id}/accept`, { overwrite: true });
   assert.equal(ok.status, 200);
   await drain();
-  assert.equal(readFileSync(join(vault, "sp/pj/notes/exist.md"), "utf8"), "new\n");
+  assert.equal(stripFm(readFileSync(join(vault, "sp/pj/notes/exist.md"), "utf8")), "new\n");
   assert.equal(existsSync(join(vault, "_inbox", `${id}.md`)), false);
 });
 
@@ -234,8 +234,8 @@ test("concurrency: accept while a kb_write is in flight stays consistent", async
   for (const r of rs) assert.ok(("status" in r ? r.status === 200 : !r.isError));
   await drain();
   for (let i = 0; i < 3; i++) {
-    assert.equal(readFileSync(join(vault, `sp/pj/notes/conc-${i}.md`), "utf8"), `c${i}\n`);
-    assert.equal(readFileSync(join(vault, `sp/pj/notes/w-${i}.md`), "utf8"), `w${i}\n`);
+    assert.equal(stripFm(readFileSync(join(vault, `sp/pj/notes/conc-${i}.md`), "utf8")), `c${i}\n`);
+    assert.equal(stripFm(readFileSync(join(vault, `sp/pj/notes/w-${i}.md`), "utf8")), `w${i}\n`);
   }
   for (const id of ids2) assert.equal(existsSync(join(vault, "_inbox", `${id}.md`)), false);
   assert.equal(git(["status", "--porcelain"], vault).trim(), "");
@@ -256,7 +256,7 @@ test("CLI against the admin listener", async () => {
   await drain();
   assert.match(await run(["reject", id2], adminUrl), /Rejected/);
   await drain();
-  assert.equal(readFileSync(join(vault, "sp/pj/notes/cli.md"), "utf8"), "cli body\n");
+  assert.equal(stripFm(readFileSync(join(vault, "sp/pj/notes/cli.md"), "utf8")), "cli body\n");
   await assert.rejects(run(["list"], "http://127.0.0.1:1"), /cannot reach the admin listener.*server running/);
   await assert.rejects(run(["bogus"], adminUrl), /usage/);
   assert.deepEqual(ids().filter((i) => i === id || i === id2), []);
@@ -356,7 +356,7 @@ test("accept validates and commits what is on disk inside the lock, not a stale 
   await holder;
   assert.equal((await accepting).status, 200);
   await drain();
-  assert.equal(readFileSync(join(vault, "sp/pj/notes/stale.md"), "utf8"), "new\n");
+  assert.equal(stripFm(readFileSync(join(vault, "sp/pj/notes/stale.md"), "utf8")), "new\n");
 });
 
 test("accept applies kb_write content rules (size cap, archive, entry-note cap, bad target)", async () => {

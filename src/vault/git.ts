@@ -923,6 +923,62 @@ export function syncWrite(
   return lockedWrite(vaultRoot, absolutePath, () => content, commitMessage, opts);
 }
 
+// Like syncWrite, but the content is built inside the lock from the note's current bytes
+// (null = missing), so read-dependent fields (frontmatter `created`) cannot race.
+export function syncWriteBuilt(
+  vaultRoot: string,
+  absolutePath: string,
+  build: (previous: Buffer | null) => string,
+  commitMessage: string,
+  opts: WriteOptions = {},
+): Promise<WriteResult> {
+  return lockedWrite(vaultRoot, absolutePath, build, commitMessage, opts);
+}
+
+// Many notes, ONE commit, under the write lock. `plan` runs inside the lock after the pull;
+// it returns the files to write (or [] for nothing to do). commitSha is null when nothing
+// changed. On failure before the commit lands, every touched note is restored.
+export function syncBatchWrite(
+  vaultRoot: string,
+  // `check` validates one item's content and throws to refuse the whole batch before anything is written.
+  plan: () => Promise<Array<{ absolutePath: string; content: string; check?: (next: string) => void }>>,
+  commitMessage: string,
+): Promise<{ commitSha: string | null; files: number }> {
+  return withLock<{ commitSha: string | null; files: number }>(vaultRoot, async () => {
+    const remote = await prepareLocked(vaultRoot);
+    const items = await plan();
+    if (items.length === 0) return { value: { commitSha: null, files: 0 }, push: false };
+    for (const it of items) {
+      assertSafePath(vaultRoot, it.absolutePath);
+      it.check?.(it.content);
+    }
+    const rels = items.map((it) => path.relative(vaultRoot, it.absolutePath));
+    const previous = items.map((it) => (existsSync(it.absolutePath) ? readFileSync(it.absolutePath) : null));
+    const headBefore = await headOrEmpty(vaultRoot);
+    try {
+      for (const it of items) writeNoteAtomic(vaultRoot, it.absolutePath, it.content);
+      await runGit(["add", "--", ...rels], vaultRoot);
+      try {
+        await runGit(["diff", "--cached", "--quiet", "--", ...rels], vaultRoot);
+        return { value: { commitSha: null, files: 0 }, push: false };
+      } catch (err) {
+        if ((err as { code?: unknown }).code !== 1) throw err;
+      }
+      await runGit(["commit", "-m", commitMessage, "--", ...rels], vaultRoot);
+      const commitSha = (await runGit(["rev-parse", "HEAD"], vaultRoot)).trim();
+      return finishLocked(vaultRoot, remote, { commitSha, files: items.length });
+    } catch (err) {
+      const headNow = await headOrEmpty(vaultRoot);
+      if (headNow !== headBefore) {
+        console.error(`git batch write: error after commit landed, keeping it: ${errText(err)}`);
+        return finishLocked(vaultRoot, remote, { commitSha: headNow, files: items.length });
+      }
+      for (let i = 0; i < items.length; i++) await restoreNote(vaultRoot, items[i].absolutePath, rels[i], previous[i]);
+      throw err;
+    }
+  });
+}
+
 export class NoteTooLargeError extends Error {
   constructor(message: string) {
     super(message);

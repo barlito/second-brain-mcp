@@ -4,6 +4,7 @@ import { listNoteNames, readFileNoFollow } from "../vault/enumerate";
 import { resolveNotePath } from "../vault/paths";
 import { RegisterTool, registerKbTool, toolError, toolText } from "./common";
 import { snippet } from "./snippet";
+import { NOTE_TYPES, searchView } from "./frontmatter";
 import { discoveryCall, optSlug, readableSections } from "./discovery";
 
 export const MAX_HIT_FILES = 50;
@@ -28,16 +29,18 @@ export const register: RegisterTool = (server, { vaultRoot }) => {
       description:
         "Case-insensitive plain-text substring search over the notes this token can read. " +
         "Optionally narrow by space/project/section. Returns up to 50 notes with up to 3 matching lines each. " +
+        "Matches the note body (frontmatter excluded); optional `type` keeps only notes whose frontmatter type matches. " +
         "Archived notes are skipped unless include_archived is true or section 'archive' is requested explicitly.",
       inputSchema: {
         query: z.string().max(MAX_QUERY, `must be at most ${MAX_QUERY} characters`).describe("Text to find (2-200 chars)"),
         space: optSlug("space"),
         project: optSlug("project"),
         section: optSlug("section"),
+        type: z.enum(NOTE_TYPES).optional().describe("Only notes whose frontmatter type matches"),
         include_archived: z.boolean().optional().describe("Also search the 'archive' section (default false)"),
       },
     },
-    async ({ query, space, project, section, include_archived }): Promise<CallToolResult> =>
+    async ({ query, space, project, section, type, include_archived }): Promise<CallToolResult> =>
       discoveryCall("kb_search", { space, project, section }, async (ctx) => {
         const trimmed = query.trim();
         const needle = trimmed.toLowerCase();
@@ -94,8 +97,13 @@ export const register: RegisterTool = (server, { vaultRoot }) => {
               continue;
             }
 
+            // Cheap substring test first: YAML is only parsed for notes that can match.
+            if (!content.toLowerCase().includes(needle)) continue;
+            const view = searchView(sec.section, content);
+            if (type !== undefined && view.type !== type) continue;
+
             const lines: string[] = [];
-            for (const line of content.split("\n")) {
+            for (const line of view.body.split("\n")) {
               if (!line.toLowerCase().includes(needle)) continue;
               lines.push(snippet(line, needle));
               if (lines.length >= MAX_LINES_PER_FILE) break;

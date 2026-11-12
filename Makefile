@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := help
-.PHONY: help deploy deploy.prod db.backup db.restore docker.service.update deploy.assert_image smoke.test deploy.prune prune-local-images undeploy restart logs token-create token-list token-revoke backup-db prune-audit inbox-list inbox-show inbox-accept inbox-reject
+.PHONY: help deploy deploy.prod db.backup db.restore docker.service.update deploy.assert_image smoke.test deploy.prune prune-local-images undeploy restart logs token-create token-list token-revoke backup-db prune-audit inbox-list inbox-show inbox-accept inbox-reject migrate-frontmatter
 
 stack_name=second-brain-mcp
 service=second-brain-mcp
@@ -172,3 +172,6 @@ inbox-accept: ## Accept a proposal into its target (make inbox-accept id=<id> [o
 inbox-reject: ## Reject a proposal (make inbox-reject id=<id>)
 	@test -n "$(id)" || { echo "id is required (make inbox-reject id=<id>)" >&2; exit 1; }
 	@$(call exec_in_service,node dist/cli/inbox.js reject "$(id)")
+
+migrate-frontmatter: ## Add frontmatter to existing notes that lack it (one commit, idempotent)
+	@$(call exec_in_service,node dist/cli/migrate.js frontmatter)
