@@ -56,7 +56,8 @@ jobs:
       - run: npm run build
 
   docker:
-    if: ${{ inputs.docker != false }}
+    # Skipped only when release.yaml calls this workflow with docker: false (its own build is the check)
+    if: ${{ github.event_name != 'release' || inputs.docker }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
