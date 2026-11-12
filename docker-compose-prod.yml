@@ -13,6 +13,7 @@
 # Images are referenced by immutable tag: `TAG=<tag> make deploy.prod`.
 #
 # Prerequisite (once): docker secret create vault_deploy_key <private key file>
+# (or a versioned name passed as VAULT_DEPLOY_KEY_SECRET, see docs/DEPLOY.md "Secret rotation")
 services:
   second-brain-mcp:
     image: barlito/second-brain-mcp:${TAG:?TAG is required}
@@ -29,6 +30,8 @@ services:
       # Web admin UI (behind Authelia): own port, only users in this group
       - ADMIN_WEB_PORT=3002
       - ADMIN_GROUP=admins
+      # Authelia session cookie the CSRF tokens are bound to (Authelia's default name)
+      - AUTHELIA_SESSION_COOKIE=${AUTHELIA_SESSION_COOKIE:-authelia_session}
       # Shared secret Traefik injects (X-SB-Admin-Proxy) after Authelia, and the CSRF key
       - ADMIN_PROXY_SECRET=${ADMIN_PROXY_SECRET:?ADMIN_PROXY_SECRET is required (see docs/DEPLOY.md)}
       - ADMIN_WEB_SECRET=${ADMIN_WEB_SECRET:?ADMIN_WEB_SECRET is required (see docs/DEPLOY.md)}
@@ -42,6 +45,8 @@ services:
     stop_grace_period: 30s
     secrets:
       - source: vault_deploy_key
+        # Fixed path whatever the Swarm secret is named (rotation: see docs/DEPLOY.md)
+        target: vault_deploy_key
         uid: "10001"
         gid: "10001"
         mode: 0400
@@ -50,8 +55,19 @@ services:
       - acl-data:/data
     networks:
       - traefik_traefik_proxy
+    # Bounded json-file logs (the default driver keeps everything)
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
     deploy:
       replicas: 1
+      # Named volumes are node-local, and the Makefile's `docker exec`/`docker run -v` targets
+      # (backup, restore, tokens) assume the task runs on the manager DOCKER_HOST points at.
+      placement:
+        constraints:
+          - node.role == manager
       update_config:
         order: stop-first
         failure_action: rollback
@@ -103,6 +119,9 @@ networks:
 secrets:
   vault_deploy_key:
     external: true
+    # Swarm secrets are immutable: rotate by creating vault_deploy_key_v2 and deploying with
+    # VAULT_DEPLOY_KEY_SECRET=vault_deploy_key_v2 (the mount path above does not change).
+    name: ${VAULT_DEPLOY_KEY_SECRET:-vault_deploy_key}
 
 volumes:
   vault-data:

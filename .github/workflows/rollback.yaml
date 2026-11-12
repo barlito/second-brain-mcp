@@ -36,30 +36,39 @@ jobs:
 
       - name: Validate inputs
         run: |
-          [[ "$TAG" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]] || { echo "::error::invalid tag"; exit 1; }
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-.][A-Za-z0-9.]+)?$ ]] || { echo "::error::invalid tag (expected vX.Y.Z[-suffix])"; exit 1; }
           [ -z "$RESTORE_DB" ] || [[ "$RESTORE_DB" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]*\.db$ ]] || { echo "::error::invalid restore-db filename"; exit 1; }
 
       - name: Set up SSH
         env:
           SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
           SERVER_HOST_KEY: ${{ vars.SERVER_HOST_KEY }}
+          SERVER_HOST: ${{ vars.SERVER_HOST }}
+          SERVER_PORT: ${{ vars.SERVER_PORT }}
         run: |
+          [ -n "$SSH_PRIVATE_KEY" ] || { echo "::error::secret SSH_PRIVATE_KEY is not set"; exit 1; }
+          # No trust-on-first-use: the host key must be pinned
+          [ -n "$SERVER_HOST_KEY" ] || { echo "::error::variable SERVER_HOST_KEY is not set (full known_hosts line, see docs/DEPLOY.md)"; exit 1; }
           mkdir -p ~/.ssh
           printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
-          if [ -n "$SERVER_HOST_KEY" ]; then
-            # Pinned host key (full known_hosts line, e.g. "[1.2.3.4]:3333 ssh-ed25519 AAAA...")
-            printf '%s\n' "$SERVER_HOST_KEY" >> ~/.ssh/known_hosts
-          else
-            echo "::warning::SERVER_HOST_KEY is not set: host key not pinned (trust on first use via ssh-keyscan)."
-            ssh-keyscan -p "${{ vars.SERVER_PORT }}" "${{ vars.SERVER_HOST }}" >> ~/.ssh/known_hosts
-          fi
+          # Pinned host key (full known_hosts line, e.g. "[1.2.3.4]:3333 ssh-ed25519 AAAA...")
+          printf '%s\n' "$SERVER_HOST_KEY" >> ~/.ssh/known_hosts
+          if [ -z "$SERVER_PORT" ] || [ "$SERVER_PORT" = 22 ]; then host=$SERVER_HOST; else host="[$SERVER_HOST]:$SERVER_PORT"; fi
+          ssh-keygen -F "$host" >/dev/null \
+            || { echo "::error::SERVER_HOST_KEY has no entry for $host"; exit 1; }
 
-      - name: Login to Docker Hub
+      # Read-only Docker Hub token: --with-registry-auth stores it in the Swarm raft store.
+      # The read/write token stays in release.yaml.
+      - name: Login to Docker Hub (read-only)
         uses: docker/login-action@v4
         with:
           username: ${{ secrets.DOCKER_HUB_USERNAME }}
-          password: ${{ secrets.DOCKER_HUB_READ_WRITE_DELETE_ACCESS_TOKEN }}
+          password: ${{ secrets.DOCKER_HUB_READ_ONLY_ACCESS_TOKEN }}
+
+      # Fail before the stop-first rollout (outage) if the image was never published
+      - name: Check the image is published
+        run: docker manifest inspect "barlito/second-brain-mcp:$TAG" >/dev/null
 
       # Safety copy of the current DB (also kept when restoring an older one)
       - name: Backup database before rollback
