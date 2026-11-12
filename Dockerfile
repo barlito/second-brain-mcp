@@ -78,7 +78,8 @@ USER appuser
 
 EXPOSE 3000
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+# Probe every 2s during start so Traefik routes to a new task quickly (stop-first rollouts).
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --start-interval=2s --retries=3 \
   CMD wget -qO- http://127.0.0.1:3000/health >/dev/null || exit 1
 
 ENTRYPOINT ["/sbin/tini", "--"]
