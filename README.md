@@ -19,7 +19,7 @@ Traefik -> bearer auth (+ per-IP failure limiter) or token-less session -> /mcp 
 ```
 
 1. Traefik terminates TLS (plain HTTP is redirected to HTTPS). Security headers apply in both local and prod; only the rate limit (20 avg / 40 burst per IP) is prod-only.
-2. Bearer auth looks the token up by SHA-256 hash (only hashes are stored). After 10 failed attempts from one IP within 60 s, that IP gets `429` until the window ends (expired tokens get `401` but are not counted). The client IP comes from `X-Forwarded-For`, trusted only from the Traefik tasks (`TRUSTED_PROXY`).
+2. Bearer auth looks the token up by SHA-256 hash (only hashes are stored). The token is validated first: a valid token is never refused because of other clients' failures. After 10 failed attempts from one client (IPv6 by /64) within 60 s, further failing attempts get `429` until the window ends (expired tokens get `401` but are not counted). Failure audit rows are coalesced per client and capped globally (`AUTH_AUDIT_MAX_PER_MIN`, default 30; the excess is counted in one summary row). The client IP comes from `X-Forwarded-For`, trusted only from the Traefik tasks (`TRUSTED_PROXY`).
 3. `/mcp` builds a fresh MCP server per request (stateless).
 4. The tool checks the token's scopes (space, project and section match exactly or via trailing `*` wildcards; `read`, `write` and `propose` are separate permissions). This runs before any filesystem access.
 5. The path is resolved from validated slugs, re-checked against the vault root, and symlinks are refused.
@@ -258,7 +258,7 @@ The MCP can be configured once, everywhere, without a per-project token: a claud
 claude mcp add --scope user --transport http second-brain https://second-brain.barlito.fr/mcp --header "X-SB-Connector-Key: <key>"
 ```
 
-Without a valid, non-revoked key every token-less request gets a generic `401` before anything else happens (no session, no rate-limit bucket, only the coalesced auth-failure audit row), and with no key at all token-less access is disabled. A session is bound to the key that opened it (another key gets `404`); revoking a key ends its sessions and their grants immediately. Requests with an `Authorization` header ignore the connector key entirely.
+Without a valid, non-revoked key every token-less request gets a generic `401` before anything else happens (no session, no rate-limit bucket, only the coalesced auth-failure audit row), and with no key at all token-less access is disabled. The key is checked first and these failures never block anyone: a request with a valid key (or a valid Bearer token) is not refused because others fail from the same, possibly shared, address (e.g. a cloud egress IP). A session is bound to the key that opened it (another key gets `404`); revoking a key ends its sessions and their grants immediately. Requests with an `Authorization` header ignore the connector key entirely.
 
 With the key, a client can initialize, read the server instructions, list the tools and call exactly two tools: `kb_request_access` and `kb_access_status`. The user stays the only one managing access and the agent never sees a token.
 
@@ -266,7 +266,7 @@ Flow:
 
 1. On `initialize` (no `Authorization` header) the server issues its own `Mcp-Session-Id` (256-bit random, stored hashed in SQLite with client name/version, IP and timestamps). The client sends it on every later request. An unknown, expired or revoked id gets HTTP `404`, so the client re-initializes (MCP spec). Sessions live in the DB and survive restarts and redeploys. Requests that carry a Bearer token behave exactly as before and never need a session.
 2. When it actually needs the knowledge base (it need not ask up front), the agent calls `kb_request_access({space, project, access: "read"|"write", reason, scopes?})`. It gets a request id and a short code (6 characters), and is told to ask the user to approve. `scopes` is an optional explicit list (`space:project:section:permission`), validated like token scopes; wildcards are accepted only as a request, the admin must confirm them.
-3. The user opens the admin web (Access requests), matches the code, optionally edits the scopes and approves (or denies). CLI: `make access-list`, `make access-approve id=<id|code> [scope=s:p:sec:perm,...] [allow_wildcard=1]`, `make access-deny id=<id|code>`.
+3. The user opens the admin web (Access requests), identifies the card (client, connector key, IP, scopes, reason, age; the code is deliberately NOT shown there), optionally edits the scopes, types the code from the agent's chat and approves (or denies). CLI: `make access-list` (codes hidden, `codes=1` shows them), `make access-approve id=<id|code> [scope=s:p:sec:perm,...] [allow_wildcard=1]`, `make access-deny id=<id|code>`.
 4. The agent polls `kb_access_status({request_id})` (pending / approved with the scopes / denied / expired / revoked) and then uses the normal tools.
 
 Grants:
@@ -281,8 +281,8 @@ Limits on the unauthenticated surface (all per IP unless noted, in memory):
 
 - IPv6 clients are bucketed by /64 in every per-IP limit.
 - `initialize`: `ANON_INIT_PER_MIN` (default 10); access requests: `ANON_ACCESS_REQUESTS_PER_HOUR` (default 10; repeating an identical pending request is free); other token-less calls: `ANON_SESSION_CALLS_PER_MIN` per session (120) and `ANON_IP_CALLS_PER_MIN` per client (600), over the limit gives `429`.
-- Open sessions without a grant: `ANON_MAX_SESSIONS_PER_IP` (20) and `ANON_MAX_SESSIONS` (1000); beyond a cap the most idle grantless session is evicted instead of refusing the newcomer (no lockout).
-- Pending requests: `ACCESS_MAX_PENDING_PER_SESSION` (3), `ACCESS_MAX_PENDING_PER_IP` (5, refused beyond) and `ACCESS_MAX_PENDING_TOTAL` (20; at the cap the oldest pending request of the busiest client is expired instead of refusing).
+- Open sessions without a grant: `ANON_MAX_SESSIONS_PER_IP` (20, per connector key and client) and `ANON_MAX_SESSIONS` (1000); beyond a cap the most idle grantless session is evicted instead of refusing the newcomer (no lockout).
+- Pending requests: `ACCESS_MAX_PENDING_PER_SESSION` (3), `ACCESS_MAX_PENDING_PER_IP` (5 per connector key and client, refused beyond) and `ACCESS_MAX_PENDING_TOTAL` (20; at the cap the oldest pending request of the busiest client is expired instead of refusing).
 - Repeated "no access" refusals of one session are one audit row per minute with a count.
 - Bodies without a token are capped at 32 KB (1 MB with a token). Allowed methods: `initialize`, `notifications/*`, `ping`, `tools/list`, `tools/call`; anything else is refused before a session is even looked up. `GET`/`DELETE /mcp` answer `405` (never `401`, which would trigger OAuth discovery in clients).
 
@@ -468,6 +468,7 @@ Compose sets these; no `.env` file is needed, except that both compose files req
 | `SPACE_LIMITS` | Per-space limits and auto-archive age, see [Agents space and space limits](#agents-space-and-space-limits). Validated at startup. | unset (no limits) | `agents:maxNotes=30,maxNoteBytes=4096,maxProjectBytes=102400,archiveAfterDays=60` | same |
 | `PUBLIC_MCP_URL` | Public MCP endpoint used in the `claude mcp add` command shown after creating a token (CLI and web admin). Must be an http(s) URL, else the default is used with a warning. | `https://second-brain.barlito.fr/mcp` | `https://second-brain.local.barlito.fr/mcp` | `https://second-brain.barlito.fr/mcp` |
 | `SESSION_MAX_DAYS`, `ANON_SESSION_MAX_HOURS` | Absolute lifetime of a session from its first grant / of a session that never got a grant. | `30` / `2` | unset | unset |
+| `AUTH_AUDIT_MAX_PER_MIN` | Global cap on auth-failure audit rows per minute (excess summarised in one row). | `30` | unset | unset |
 | `ANON_MAX_SESSIONS_PER_IP`, `ANON_SESSION_CALLS_PER_MIN`, `ANON_IP_CALLS_PER_MIN`, `ACCESS_MAX_PENDING_PER_IP` | Token-less limits: grantless sessions per client, calls per session/client per minute, pending requests per client. | `20` / `120` / `600` / `5` | unset | unset |
 | `SESSION_IDLE_DAYS` | Sliding idle expiry of a token-less session that holds grants (a session without grant expires after 1 h). | `5` | `5` | `5` |
 | `ACCESS_REQUEST_TTL_MINUTES`, `ACCESS_MAX_PENDING_PER_SESSION`, `ACCESS_MAX_PENDING_TOTAL` | Access requests: lifetime, pending per session, pending in total. | `15` / `3` / `20` | unset | unset |

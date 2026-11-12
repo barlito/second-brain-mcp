@@ -39,11 +39,13 @@ export function run(argv: string[]): string {
       return keys.map((k) => `id=${k.id}  name=${k.name}  created_at=${k.created_at}  revoked_at=${k.revoked_at ?? "-"}  last_used_at=${k.last_used_at ?? "never"}`).join("\n");
     }
     case "show": {
-      if (!values.name) throw new Error("--name is required");
-      const r = revealConnectorKey({ name: values.name }, process.env.ADMIN_WEB_SECRET || undefined);
-      audit("connector_key_reveal", r.status === "ok" ? "ok" : "error", `${values.name} ${r.status}`);
-      if (r.status === "missing") throw new Error(`no active connector key named "${values.name}"`);
-      if (r.status === "undecryptable") throw new Error("cannot decrypt this key (ADMIN_WEB_SECRET changed, or the name is ambiguous): create a new key. It still works as is.");
+      const ref = values.id ? { id: values.id } : values.name ? { name: values.name } : undefined;
+      if (!ref) throw new Error("--name or --id is required");
+      const r = revealConnectorKey(ref, process.env.ADMIN_WEB_SECRET || undefined);
+      audit("connector_key_reveal", r.status === "ok" ? "ok" : "error", `${values.id ?? values.name} ${r.status}`);
+      if (r.status === "missing") throw new Error("no such active connector key");
+      if (r.status === "ambiguous") throw new Error(`several active keys are named "${values.name}": ambiguous name, use --id (see list)`);
+      if (r.status === "undecryptable") throw new Error("cannot decrypt this key (ADMIN_WEB_SECRET changed, or it was created without one): create a new key. It still works as is.");
       return `id:     ${r.id}\nheader: ${CONNECTOR_HEADER}: ${r.key}`;
     }
     case "revoke": {
@@ -54,7 +56,7 @@ export function run(argv: string[]): string {
       return `Connector key ${values.id} revoked, ${r.sessions} session(s) ended.`;
     }
     default:
-      throw new Error("usage: connectorKey.js <create --name N | show --name N | list | revoke --id ID>");
+      throw new Error("usage: connectorKey.js <create --name N | show --name N|--id ID | list | revoke --id ID>");
   }
 }
 

@@ -78,9 +78,11 @@ export function createAdminApp(vaultRoot: string, lifecycle?: Lifecycle): Expres
 
   // Token-less session access requests (CLI: access-list / access-approve / access-deny).
   const REF_RE = /^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[A-Za-z0-9]{6})$/;
-  app.get("/admin/access", (_req, res, next) => {
+  app.get("/admin/access", (req, res, next) => {
     try {
-      res.json({ requests: listPendingRequests(), sessions: listActiveSessions() });
+      // Codes are what proves the admin read the agent's chat: hidden unless asked for.
+      const withCodes = req.query.codes === "1";
+      res.json({ requests: listPendingRequests().map((r) => (withCodes ? r : { ...r, code: undefined })), sessions: listActiveSessions() });
     } catch (err) {
       next(err);
     }

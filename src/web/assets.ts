@@ -40,7 +40,6 @@ code { background: var(--code-bg); padding: 1px 5px; border-radius: 4px; }
 pre { background: var(--code-bg); padding: 12px; border-radius: 6px; overflow-x: auto; white-space: pre-wrap; word-break: break-word; }
 .muted { color: var(--muted); }
 .badge { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 12px; background: var(--code-bg); }
-.code { font-size: 28px; letter-spacing: 4px; font-family: ui-monospace, monospace; }
 .badge.ok { background: var(--ok-bg); color: var(--ok); }
 .badge.err { background: var(--err-bg); color: var(--danger); }
 .badge.warn { background: var(--warn-bg); color: var(--warn); }

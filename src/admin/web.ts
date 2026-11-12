@@ -518,7 +518,7 @@ export function createWebAdminApp(opts: WebAdminOptions): Express {
     // The value is never audited, only the fact that it was shown.
     auditAdmin(res, "connector_key_reveal", r.status === "ok" ? "ok" : "error", `${req.params.id} ${r.status}`);
     if (r.status !== "ok") {
-      return accessBanner(res, { kind: "err", title: r.status === "missing" ? "Key not found or revoked." : "Cannot decrypt this key (the secret changed or it predates it): create a new key. It still works as is." });
+      return accessBanner(res, { kind: "err", title: r.status === "missing" || r.status === "ambiguous" ? "Key not found or revoked." : "Cannot decrypt this key (the secret changed or it predates it): create a new key. It still works as is." });
     }
     res.setHeader("Cache-Control", "no-store");
     send(res, connectorKeyCreatedView(ctxOf(res), r, claudeKeyCommand(r.key), true));

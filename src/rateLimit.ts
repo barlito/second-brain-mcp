@@ -63,6 +63,34 @@ export class RateLimiter {
   }
 }
 
+// Global cap on log lines per window; what is swallowed is reported once, as a count, in the next window.
+export class GlobalBudget {
+  private start = 0;
+  private used = 0;
+  private swallowed = 0;
+  constructor(
+    private readonly max: number,
+    private readonly windowMs = 60_000,
+    private readonly now: () => number = Date.now,
+  ) {}
+  take(): { log: boolean; summary: number } {
+    const t = this.now();
+    let summary = 0;
+    if (t - this.start >= this.windowMs) {
+      summary = this.swallowed;
+      this.start = t;
+      this.used = 0;
+      this.swallowed = 0;
+    }
+    if (this.used < this.max) {
+      this.used++;
+      return { log: true, summary };
+    }
+    this.swallowed++;
+    return { log: false, summary };
+  }
+}
+
 const posInt = (v: string | undefined, d: number): number => (v && Number.isInteger(Number(v)) && Number(v) > 0 ? Number(v) : d);
 
 export interface AnonLimits {

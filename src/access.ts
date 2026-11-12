@@ -158,8 +158,11 @@ export function createAccessRequest(sessionId: string, input: NewRequest, allow:
     const scopesJson = explicit ? JSON.stringify(explicit) : null;
     const same = mine.find((r) => r.space === (input.space ?? null) && r.project === (input.project ?? null) && r.access === (input.access ?? null) && r.scopes === scopesJson);
     if (same) return { request: same, created: false };
-    const key = (db.prepare("SELECT ip_key FROM sessions WHERE id = ?").get(sessionId) as { ip_key: string | null } | undefined)?.ip_key ?? "unknown";
-    const livePerIp = (db.prepare("SELECT COUNT(*) AS n FROM access_requests r JOIN sessions s ON s.id = r.session_id WHERE r.status = 'pending' AND r.expires_at > ? AND s.ip_key = ?").get(nowIso, key) as { n: number }).n;
+    // Per-client cap bucketed by (connector key, client address): a leaked key cannot starve other keys.
+    const me = db.prepare("SELECT ip_key, connector_key_id FROM sessions WHERE id = ?").get(sessionId) as { ip_key: string | null; connector_key_id: string | null } | undefined;
+    const livePerIp = (db
+      .prepare("SELECT COUNT(*) AS n FROM access_requests r JOIN sessions s ON s.id = r.session_id WHERE r.status = 'pending' AND r.expires_at > ? AND s.ip_key IS ? AND s.connector_key_id IS ?")
+      .get(nowIso, me?.ip_key ?? null, me?.connector_key_id ?? null) as { n: number }).n;
     if (livePerIp >= perIp) throw new AccessError(429, `Too many pending access requests from this address (max ${perIp}). Ask the user to resolve them first.`);
     if (mine.length >= perSession) throw new AccessError(429, `Too many pending access requests for this session (max ${perSession}). Ask the user to resolve them first.`);
     const pending = (db.prepare("SELECT COUNT(*) AS n FROM access_requests WHERE status = 'pending' AND expires_at > ?").get(nowIso) as { n: number }).n;
@@ -168,7 +171,7 @@ export function createAccessRequest(sessionId: string, input: NewRequest, allow:
       const victim = db
         .prepare(
           `SELECT r.id FROM access_requests r JOIN sessions s ON s.id = r.session_id WHERE r.status = 'pending' AND r.expires_at > ?
-           ORDER BY (SELECT COUNT(*) FROM access_requests r2 JOIN sessions s2 ON s2.id = r2.session_id WHERE r2.status = 'pending' AND r2.expires_at > ? AND s2.ip_key IS s.ip_key) DESC, r.created_at LIMIT 1`,
+           ORDER BY (SELECT COUNT(*) FROM access_requests r2 JOIN sessions s2 ON s2.id = r2.session_id WHERE r2.status = 'pending' AND r2.expires_at > ? AND s2.ip_key IS s.ip_key AND s2.connector_key_id IS s.connector_key_id) DESC, r.created_at LIMIT 1`,
         )
         .get(nowIso, nowIso) as { id: string } | undefined;
       if (victim) db.prepare("UPDATE access_requests SET expires_at = ? WHERE id = ?").run(nowIso, victim.id);

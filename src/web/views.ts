@@ -309,7 +309,7 @@ ${
     ? html`<div class="card"><p class="muted">No pending requests.</p></div>`
     : pending.map(
         (r) => html`<div class="card stack">
-<p><strong class="code">${r.code}</strong> ${r.elevation ? html`<span class="badge err">elevation</span>` : ""} &nbsp; <span class="muted">${ageOf(r.created_at)}, expires ${r.expires_at}</span></p>
+<p>${r.elevation ? html`<span class="badge err">elevation</span>` : ""} <strong>${r.client_name}</strong> ${r.client_version} &nbsp; <span class="muted">${ageOf(r.created_at)}, expires ${r.expires_at}</span> &nbsp; <span class="muted mono">${r.id}</span></p>
 <p>Asks for:${r.requested_scopes.map((sc) => html`<div><code>${formatScope(sc)}</code> ${sc.permission === "write" ? html`<span class="badge err">write</span>` : ""}</div>`)}</p>
 ${r.exceeds ? html`<div class="banner err" role="alert"><strong>scopes exceed the stated request</strong> (${r.access} on ${r.space}/${r.project}): review every scope above.</div>` : ""}
 <p>Client: <strong>${r.client_name}</strong> ${r.client_version} &nbsp; Key: <strong>${r.connector_key ?? "?"}</strong> &nbsp; IP: <span class="mono">${r.remote_ip ?? "?"}</span></p>
@@ -324,7 +324,7 @@ ${csrfField(ctx)}
 <label for="scopes-${r.id}">Scopes <span class="hint">(one per line; leave as is to grant the default)</span></label>
 <textarea id="scopes-${r.id}" name="scopes" spellcheck="false" rows="4">${r.requested_scopes.map(formatScope).join("\n")}</textarea>
 <label class="check"><input type="checkbox" name="allow_wildcard" value="1"> Allow wildcard (required for any <code>*</code> scope beyond the default)</label>
-<label for="code-${r.id}">Type the code <strong>${r.code}</strong> to approve</label>
+<label for="code-${r.id}">Request code <span class="hint">(the 6 characters your agent showed you in the chat; deliberately not displayed here)</span></label>
 <input type="text" id="code-${r.id}" name="code" maxlength="6" required autocomplete="off" spellcheck="false">
 <div class="actions"><button class="primary" type="submit">Approve</button></div>
 </form>

@@ -30,7 +30,7 @@ const encKey = (secret: string): Buffer => Buffer.from(hkdfSync("sha256", secret
 // nonce(12) | tag(16) | ciphertext, base64; the row id is bound as additional data.
 function seal(plain: string, id: string, secret: string): string {
   const nonce = randomBytes(12);
-  const c = createCipheriv("aes-256-gcm", encKey(secret), nonce);
+  const c = createCipheriv("aes-256-gcm", encKey(secret), nonce, { authTagLength: 16 });
   c.setAAD(Buffer.from(id));
   const ct = Buffer.concat([c.update(plain, "utf8"), c.final()]);
   return Buffer.concat([nonce, c.getAuthTag(), ct]).toString("base64");
@@ -39,7 +39,9 @@ function seal(plain: string, id: string, secret: string): string {
 function unseal(blob: string, id: string, secret: string): string | null {
   try {
     const b = Buffer.from(blob, "base64");
-    const d = createDecipheriv("aes-256-gcm", encKey(secret), b.subarray(0, 12));
+    if (b.length < 28) return null; // nonce + tag; an empty plaintext still has both
+    // Explicit tag length: never accept a truncated tag.
+    const d = createDecipheriv("aes-256-gcm", encKey(secret), b.subarray(0, 12), { authTagLength: 16 });
     d.setAAD(Buffer.from(id));
     d.setAuthTag(b.subarray(12, 28));
     return Buffer.concat([d.update(b.subarray(28)), d.final()]).toString("utf8");
@@ -78,7 +80,7 @@ export function checkConnectorKey(plain: unknown): { id: string; name: string } 
   return { id: row.id, name: row.name };
 }
 
-export type Reveal = { status: "ok"; id: string; name: string; key: string } | { status: "missing" } | { status: "undecryptable" };
+export type Reveal = { status: "ok"; id: string; name: string; key: string } | { status: "missing" } | { status: "ambiguous" } | { status: "undecryptable" };
 
 // Decrypts an active key by id or by (unambiguous) name. "undecryptable": the secret changed or the key
 // was created without one; the key itself still authenticates through its hash.
@@ -86,7 +88,7 @@ export function revealConnectorKey(ref: { id?: string; name?: string }, secret?:
   const rows = (ref.id !== undefined
     ? db.prepare("SELECT id, name, key_enc FROM connector_keys WHERE id = ? AND revoked_at IS NULL").all(ref.id)
     : db.prepare("SELECT id, name, key_enc FROM connector_keys WHERE name = ? AND revoked_at IS NULL").all(ref.name ?? "")) as Array<{ id: string; name: string; key_enc: string | null }>;
-  if (rows.length !== 1) return { status: rows.length === 0 ? "missing" : "undecryptable" };
+  if (rows.length !== 1) return { status: rows.length === 0 ? "missing" : "ambiguous" };
   const r = rows[0];
   const key = r.key_enc && secret ? unseal(r.key_enc, r.id, secret) : null;
   return key === null ? { status: "undecryptable" } : { status: "ok", id: r.id, name: r.name, key };

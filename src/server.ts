@@ -14,7 +14,8 @@ import { listen } from "./listen";
 import { parseAutoArchiveInterval, startAutoArchive } from "./autoArchive";
 import { parseSpaceLimits } from "./limits";
 import { createMcpServer } from "./mcp";
-import { anonLimits, AnonLimits, RateLimiter } from "./rateLimit";
+import { auditAuthFailure } from "./authFailure";
+import { anonLimits, AnonLimits, ipKey, RateLimiter } from "./rateLimit";
 import { makeSessionAuth } from "./sessionAuth";
 import { startSessionPruning } from "./auth/sessions";
 import {
@@ -205,29 +206,21 @@ export interface AppOptions {
 
 // Bearer-token auth, mounted before the MCP route. No MCP involved on failure.
 function makeBearerAuth(limiter: AuthFailureLimiter) {
-  // Expired tokens never count toward the 429, but their audit rows are still coalesced per IP/minute.
+  // Expired tokens never count toward the 429, but their audit rows are still coalesced per client/minute.
   const expiredAudit = new AuthFailureLimiter(Infinity);
   return (req: Request, res: Response, next: NextFunction): void => {
-    const ip = req.ip ?? "unknown";
-    if (limiter.blocked(ip)) {
-      jsonRpcError(res, 429, -32000, "Too many failed authentications");
-      return;
-    }
+    // Keyed per client (IPv6 by /64). Failures only throttle failing attempts: a valid token is checked
+    // first and never blocked because someone else fails from the same (e.g. shared) address.
+    const ip = ipKey(req.ip);
 
     // countable=false: not a guessing attempt (expired token), so it skips the brute-force count.
     const fail = (reason: string, countable = true): void => {
-      const { audit, previous } = countable ? limiter.record(ip) : expiredAudit.record(ip);
-      if (audit) {
-        // A DB failure here must still yield a 401.
-        try {
-          logAuthFailure({
-            clientIp: req.ip,
-            reason: previous > 1 ? `${reason} (previous minute: ${previous} failures)` : reason,
-          });
-        } catch (err) {
-          console.error("auth failure audit write failed:", redact(String(err)));
-        }
+      if (countable && limiter.blocked(ip)) {
+        jsonRpcError(res, 429, -32000, "Too many failed authentications");
+        return;
       }
+      const { audit, previous } = countable ? limiter.record(ip) : expiredAudit.record(ip);
+      if (audit) auditAuthFailure(req.ip, previous > 1 ? `${reason} (previous minute: ${previous} failures)` : reason);
       res.status(401).json({ error: reason });
     };
 
@@ -365,7 +358,7 @@ export function createApp(opts: AppOptions): Express {
   // exactly as before (it never needs a session); without one it takes the token-less session
   // path, whose own small body cap applies (see sessionAuth.ts).
   const limits = opts.anonLimits ?? anonLimits();
-  const sessionAuth = makeSessionAuth(limits, new RateLimiter(limits.requestsPerHour, 3_600_000), new RateLimiter(limits.initPerMin, 60_000), limiter);
+  const sessionAuth = makeSessionAuth(limits, new RateLimiter(limits.requestsPerHour, 3_600_000), new RateLimiter(limits.initPerMin, 60_000), new AuthFailureLimiter(Infinity));
   const bearerBody = express.json({ limit: BODY_LIMIT });
   app.use("/mcp", (req, res, next) => {
     if (req.headers.authorization !== undefined) return bearerAuth(req, res, (err?: unknown) => (err ? next(err) : bearerBody(req, res, next)));

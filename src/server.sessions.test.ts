@@ -735,14 +735,15 @@ test("grantless sessions: absolute lifetime from creation, per-IP cap and global
   assert.equal((await rpc(app.baseUrl, list, { "mcp-session-id": granted })).status, 200);
 
   // Per-IP cap: the client's own most idle grantless session makes room.
-  const mine = sessions.countGrantlessSessions("127.0.0.1");
+  const keyId = keys.checkConnectorKey(KEY)!.id;
+  const mine = sessions.countGrantlessSessions("127.0.0.1", keyId);
   const a = await mkApp({ sessionsPerIp: mine + 1 });
   try {
     const s1 = await connect(a.baseUrl);
     const s2 = await connect(a.baseUrl);
     assert.match(s2, /^[0-9a-f]{64}$/, "newcomer served");
     assert.ok(s1);
-    assert.equal(sessions.countGrantlessSessions("127.0.0.1"), mine + 1);
+    assert.equal(sessions.countGrantlessSessions("127.0.0.1", keyId), mine + 1);
   } finally {
     await a.close();
   }
@@ -892,16 +893,115 @@ test("pruning deletes dead session grant rows after 30 days, keeps recent ones",
   assert.ok(db.prepare("SELECT 1 FROM tokens WHERE id = ?").get(b.id));
 });
 
-test("failed connector-key attempts feed the auth-failure limiter (429 after 10 per minute per client)", async () => {
+test("an attacker failing from the same address never blocks a valid key or a valid Bearer token", async () => {
   const { createApp } = await import("./server");
   const lim = await listen(createApp({ vaultRoot: vault }));
   try {
-    const hit = () => fetch(`${lim.baseUrl}/mcp`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
-    for (let i = 0; i < 10; i++) assert.equal((await hit()).status, 401);
-    assert.equal((await hit()).status, 429);
+    const bad = (h: Record<string, string>) => fetch(`${lim.baseUrl}/mcp`, { method: "POST", headers: { "Content-Type": "application/json", ...h }, body: "{}" });
+    // Wrong/missing connector keys: always a plain 401, never a block.
+    for (let i = 0; i < 40; i++) assert.equal((await bad({ "X-SB-Connector-Key": "sbk_wrong" + i })).status, 401);
+    // Bad Bearer tokens: throttled after 10 failures...
+    for (let i = 0; i < 10; i++) assert.equal((await bad({ Authorization: "Bearer sb_bad" + i })).status, 401);
+    assert.equal((await bad({ Authorization: "Bearer sb_bad_more" })).status, 429);
+    // ...yet the owner's valid credentials from the same address still work.
+    const ok = await rpc(lim.baseUrl, INIT);
+    assert.equal(ok.status, 200);
+    assert.match(ok.headers.get("mcp-session-id") ?? "", /^[0-9a-f]{64}$/);
+    const b = await rpc(lim.baseUrl, { jsonrpc: "2.0", id: 2, method: "tools/list" }, { Authorization: `Bearer ${masterToken}` });
+    assert.equal(b.status, 200);
   } finally {
     await lim.close();
   }
+});
+
+test("auth failures are keyed per client on /64, and the failure audit has a global per-minute cap with one summary row", async () => {
+  const { AuthFailureLimiter } = await import("./server");
+  const { ipKey, GlobalBudget } = await import("./rateLimit");
+  // Same /64, different hosts: one counter.
+  const l = new AuthFailureLimiter(2, 60_000);
+  l.record(ipKey("2001:db8:5:5::1"));
+  l.record(ipKey("2001:db8:5:5::2"));
+  assert.equal(l.blocked(ipKey("2001:db8:5:5:ffff::9")), true);
+  assert.equal(l.blocked(ipKey("2001:db8:5:6::1")), false);
+  // Global audit cap: excess is swallowed, then reported once.
+  let t = 0;
+  const g = new GlobalBudget(2, 1000, () => t);
+  assert.deepEqual([g.take(), g.take(), g.take(), g.take()].map((x) => x.log), [true, true, false, false]);
+  t = 2000;
+  assert.deepEqual(g.take(), { log: true, summary: 2 });
+  assert.deepEqual(g.take(), { log: true, summary: 0 });
+  // End to end: many distinct clients failing cannot write more than the cap of rows per minute.
+  const { authAuditBudget } = await import("./authFailure");
+  const { auditAuthFailure } = await import("./authFailure");
+  void authAuditBudget;
+  const before = count("SELECT COUNT(*) c FROM audit_log WHERE action = 'auth'");
+  for (let i = 0; i < 200; i++) auditAuthFailure(`198.51.100.${i % 250}`, "x");
+  assert.ok(count("SELECT COUNT(*) c FROM audit_log WHERE action = 'auth'") - before <= 31, "capped (plus at most one summary row)");
+});
+
+test("GCM hardening: short or truncated blobs never decrypt", () => {
+  const k = keys.createConnectorKey("gcm", "gcm-secret");
+  const good = (db.prepare("SELECT key_enc FROM connector_keys WHERE id = ?").get(k.id) as { key_enc: string }).key_enc;
+  assert.equal(keys.revealConnectorKey({ id: k.id }, "gcm-secret").status, "ok");
+  const buf = Buffer.from(good, "base64");
+  for (const bad of [buf.subarray(0, 20), buf.subarray(0, 27), buf.subarray(0, 28), Buffer.alloc(0)]) {
+    db.prepare("UPDATE connector_keys SET key_enc = ? WHERE id = ?").run(bad.toString("base64"), k.id);
+    assert.equal(keys.revealConnectorKey({ id: k.id }, "gcm-secret").status, "undecryptable", `len ${bad.length}`);
+  }
+  keys.revokeConnectorKey(k.id);
+});
+
+test("revealing by an ambiguous name is refused; the id works", () => {
+  const a = keys.createConnectorKey("twin", "s");
+  const b = keys.createConnectorKey("twin", "s");
+  assert.deepEqual(keys.revealConnectorKey({ name: "twin" }, "s"), { status: "ambiguous" });
+  assert.equal(keys.revealConnectorKey({ id: a.id }, "s").status, "ok");
+  assert.equal(keys.revealConnectorKey({ id: b.id }, "s").status, "ok");
+  keys.revokeConnectorKey(a.id);
+  assert.equal(keys.revealConnectorKey({ name: "twin" }, "s").status, "ok", "unambiguous again");
+  keys.revokeConnectorKey(b.id);
+});
+
+test("per-client caps are bucketed by (connector key, client): a leaked key cannot evict or starve other keys", async () => {
+  const k2 = keys.createConnectorKey("bucket-b", "s");
+  // Sessions of key A and key B from the same address.
+  const a1 = sessions.createSession({ clientName: "a", clientVersion: "1", ip: "192.0.2.50", connectorKeyId: "key-a" });
+  const a2 = sessions.createSession({ clientName: "a", clientVersion: "1", ip: "192.0.2.50", connectorKeyId: "key-a" });
+  const b1 = sessions.createSession({ clientName: "b", clientVersion: "1", ip: "192.0.2.50", connectorKeyId: k2.id });
+  assert.equal(sessions.countGrantlessSessions("192.0.2.50", "key-a"), 2);
+  assert.equal(sessions.countGrantlessSessions("192.0.2.50", k2.id), 1);
+  // Key A hits its per-client cap: only key A's own sessions are evicted.
+  assert.equal(sessions.evictGrantlessSession("192.0.2.50", "key-a"), true);
+  assert.equal(sessions.countGrantlessSessions("192.0.2.50", "key-a"), 1);
+  assert.equal(sessions.countGrantlessSessions("192.0.2.50", k2.id), 1, "key B untouched");
+  void a1; void a2; void b1;
+  // Pending cap: key A's requests do not count against key B.
+  process.env.ACCESS_MAX_PENDING_PER_IP = "1";
+  try {
+    const sa = sessions.createSession({ clientName: "a", clientVersion: "1", ip: "192.0.2.51", connectorKeyId: "key-a" });
+    const sb = sessions.createSession({ clientName: "b", clientVersion: "1", ip: "192.0.2.51", connectorKeyId: k2.id });
+    access.createAccessRequest(sa.id, { space: "sp", project: "x1", access: "read", reason: "r" });
+    assert.throws(() => access.createAccessRequest(sa.id, { space: "sp", project: "x2", access: "read", reason: "r" }), /from this address/);
+    assert.ok(access.createAccessRequest(sb.id, { space: "sp", project: "x3", access: "read", reason: "r" }).created, "other key is not starved");
+  } finally {
+    process.env.ACCESS_MAX_PENDING_PER_IP = "1000";
+    db.prepare("DELETE FROM access_requests").run();
+  }
+});
+
+test("eviction order only considers live pending requests: an expired one no longer protects its session", () => {
+  const live = sessions.createSession({ clientName: "live", clientVersion: "1", ip: "192.0.2.60" });
+  const stale = sessions.createSession({ clientName: "stale", clientVersion: "1", ip: "192.0.2.60" });
+  access.createAccessRequest(live.id, { space: "sp", project: "l", access: "read", reason: "r" });
+  const r = access.createAccessRequest(stale.id, { space: "sp", project: "s", access: "read", reason: "r" }).request;
+  db.prepare("UPDATE access_requests SET expires_at = ? WHERE id = ?").run(new Date(Date.now() - 1000).toISOString(), r.id);
+  // `live` is the older (more idle) one but has a live request, so the stale-request session goes first.
+  db.prepare("UPDATE sessions SET last_seen_at = ? WHERE id = ?").run(new Date(Date.now() - 50_000).toISOString(), live.id);
+  db.prepare("UPDATE sessions SET last_seen_at = ? WHERE id = ?").run(new Date(Date.now() - 10_000).toISOString(), stale.id);
+  assert.equal(sessions.evictGrantlessSession("192.0.2.60"), true);
+  assert.ok(db.prepare("SELECT 1 FROM sessions WHERE id = ?").get(live.id));
+  assert.equal(db.prepare("SELECT 1 FROM sessions WHERE id = ?").get(stale.id), undefined);
+  db.prepare("DELETE FROM access_requests").run();
 });
 
 test("anonymous body cap: 32 KB with a connector key", async () => {

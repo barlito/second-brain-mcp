@@ -146,23 +146,24 @@ export function revokeSession(id: string): boolean {
 const GRANTLESS_SQL = `FROM sessions s WHERE revoked_at IS NULL
   AND NOT EXISTS (SELECT 1 FROM tokens t WHERE t.session_id = s.id AND t.kind = 'session' AND t.revoked_at IS NULL)`;
 
-// Live sessions without any grant (what an anonymous flood can fill); per client when `key` is given.
-export function countGrantlessSessions(key?: string): number {
-  const sql = `SELECT COUNT(*) AS n ${GRANTLESS_SQL}${key === undefined ? "" : " AND ip_key = ?"}`;
-  const r = db.prepare(sql).get(...(key === undefined ? [] : [key])) as { n: number };
+// Live sessions without any grant (what an anonymous flood can fill); per (connector key, client) bucket
+// when `key` is given, so a leaked key cannot crowd out sessions opened through other keys.
+export function countGrantlessSessions(key?: string, connectorKeyId?: string): number {
+  const sql = `SELECT COUNT(*) AS n ${GRANTLESS_SQL}${key === undefined ? "" : " AND ip_key = ? AND connector_key_id IS ?"}`;
+  const r = db.prepare(sql).get(...(key === undefined ? [] : [key, connectorKeyId ?? null])) as { n: number };
   return r.n;
 }
 
 // Frees one slot by ending the most idle grantless session (ones with no pending request first), so
 // a flood can never lock legitimate clients out; `key` restricts it to one client.
-export function evictGrantlessSession(key?: string): boolean {
-  const where = key === undefined ? "" : " AND ip_key = ?";
+export function evictGrantlessSession(key?: string, connectorKeyId?: string): boolean {
+  const where = key === undefined ? "" : " AND ip_key = ? AND connector_key_id IS ?";
   const row = db
     .prepare(
       `SELECT s.id ${GRANTLESS_SQL}${where}
-       ORDER BY EXISTS (SELECT 1 FROM access_requests r WHERE r.session_id = s.id AND r.status = 'pending'), s.last_seen_at LIMIT 1`,
+       ORDER BY EXISTS (SELECT 1 FROM access_requests r WHERE r.session_id = s.id AND r.status = 'pending' AND r.expires_at > ?), s.last_seen_at LIMIT 1`,
     )
-    .get(...(key === undefined ? [] : [key])) as { id: string } | undefined;
+    .get(...(key === undefined ? [] : [key, connectorKeyId ?? null]), new Date().toISOString()) as { id: string } | undefined;
   if (!row) return false;
   endSession(row.id);
   return true;

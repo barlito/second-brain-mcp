@@ -9,7 +9,8 @@ import express, { NextFunction, Request, Response } from "express";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { TokenContext, tokenContextStorage } from "./auth/context";
 import { clientSlug, countGrantlessSessions, createSession, evictGrantlessSession, lookupSession, LiveSession } from "./auth/sessions";
-import { logAudit, logAuthFailure } from "./audit";
+import { logAudit } from "./audit";
+import { auditAuthFailure } from "./authFailure";
 import { CONNECTOR_HEADER, checkConnectorKey } from "./auth/connectorKeys";
 import { AnonLimits, ipKey, RateLimiter } from "./rateLimit";
 import { redact } from "./vault/git";
@@ -33,9 +34,9 @@ function contextFor(s: LiveSession, ip: string | undefined, requests: RateLimite
   };
 }
 
-// The auth-failure limiter of server.ts (same instance as the Bearer path).
+// Coalescing only (audit rows per client per minute). It never blocks: a request with a valid key must
+// not be refused because others fail from the same, possibly shared, address.
 export interface FailureLimiter {
-  blocked(ip: string): boolean;
   record(ip: string): { audit: boolean; previous: number };
 }
 
@@ -55,17 +56,10 @@ export function makeSessionAuth(
     const ip = req.ip ?? "unknown";
     // Closed by default: no valid connector key (or none exists at all) = 401, before any body parsing,
     // session lookup, rate-limit bucket or audit row other than the coalesced auth-failure one.
-    if (failures.blocked(ip)) return rpcError(res, 429, -32000, "Too many failed authentications");
     const key = checkConnectorKey(req.headers[CONNECTOR_HEADER.toLowerCase()]);
     if (!key) {
-      const { audit, previous } = failures.record(ip);
-      if (audit) {
-        try {
-          logAuthFailure({ clientIp: req.ip, reason: previous > 1 ? `missing or invalid connector key (previous minute: ${previous} failures)` : "missing or invalid connector key" });
-        } catch (err) {
-          console.error("auth failure audit write failed:", redact(String(err)));
-        }
-      }
+      const { audit, previous } = failures.record(ipKey(ip));
+      if (audit) auditAuthFailure(req.ip, previous > 1 ? `missing or invalid connector key (previous minute: ${previous} failures)` : "missing or invalid connector key");
       return void res.status(401).json({ error: "unauthorized" });
     }
     parse(req, res, (err?: unknown) => {
@@ -86,7 +80,7 @@ export function makeSessionAuth(
         if (!initLimiter.hit(ipk)) return rpcError(res, 429, -32000, "Too many sessions from this address, retry later");
         // Over a cap: end the most idle grantless session (the client's own first) instead of refusing,
         // so a flood cannot lock legitimate clients out.
-        if (countGrantlessSessions(ipk) >= limits.sessionsPerIp) evictGrantlessSession(ipk);
+        if (countGrantlessSessions(ipk, key.id) >= limits.sessionsPerIp) evictGrantlessSession(ipk, key.id);
         if (countGrantlessSessions() >= limits.maxSessions) evictGrantlessSession();
         const info = (body.params.clientInfo ?? {}) as { name?: unknown; version?: unknown };
         const { sid, id } = createSession({ clientName: info.name, clientVersion: info.version, ip, connectorKeyId: key.id });

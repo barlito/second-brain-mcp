@@ -63,6 +63,13 @@ async function follow(r: Res): Promise<Res> {
   return get(String(r.headers.location));
 }
 
+// One pending card (from its opening div to the next card or the end of the pending list).
+function cardOf(body: string, id: string): string {
+  const start = body.lastIndexOf('<div class="card stack">', body.indexOf(id));
+  const next = body.indexOf('<div class="card stack">', start + 10);
+  return body.slice(start, next === -1 ? start + 4000 : next);
+}
+
 function newSession(client = "Claude Code") {
   const { sid, id } = sessions.createSession({ clientName: client, clientVersion: "1.2.3", ip: "203.0.113.7" });
   return { sid, id };
@@ -96,7 +103,8 @@ test("access page: pending request with client, IP, project, reason (escaped), c
   const r = ask(s.id, "pro", "alpha", "write");
   const page = await get("/access");
   assert.equal(page.status, 200);
-  assert.match(page.body, new RegExp(r.code));
+  assert.doesNotMatch(page.body, new RegExp(r.code), "the code is never displayed on the card");
+  assert.match(page.body, new RegExp(r.id));
   assert.match(page.body, /Claude Code/);
   assert.match(page.body, /203\.0\.113\.7/);
   assert.match(page.body, /<code>pro:alpha:\*:write<\/code> <span class="badge err">write<\/span>/);
@@ -175,12 +183,12 @@ test("page shows the session's CURRENT grants next to the requested ones and lab
   const first = ask(s.id, "pro", "delta", "read");
   assert.equal(first.elevation, 0);
   let page = await get("/access");
-  assert.doesNotMatch(page.body.slice(page.body.indexOf(first.code) - 60, page.body.indexOf(first.code) + 400), /elevation/);
+  assert.doesNotMatch(cardOf(page.body, first.id), /elevation/);
   access.approveRequest(first.id, { actor: "admin:alice", code: first.code });
   const up = ask(s.id, "pro", "delta", "write");
   assert.equal(up.elevation, 1);
   page = await get("/access");
-  const card = page.body.slice(page.body.indexOf(up.code) - 80);
+  const card = cardOf(page.body, up.id);
   assert.match(card, /<span class="badge err">elevation<\/span>/);
   assert.match(card, /Current grants of this session:[\s\S]*session-claude-code-pro-delta[\s\S]*<code>pro:delta:\*:read<\/code>/);
   assert.match(card, /Asks for:[\s\S]*<code>pro:delta:\*:write<\/code>/);
@@ -213,7 +221,9 @@ test("CLI: access list / approve (code or id, scope override, wildcard confirm) 
   const r2 = ask(s.id, "pro", "cli-b", "read");
   const r3 = ask(s.id, "pro", "cli-c", "read");
 
-  const list = await run(["list"], base);
+  const hidden = await run(["list"], base);
+  assert.ok(!hidden.includes(r1.code) && !hidden.includes("code="), "codes hidden by default");
+  const list = await run(["list", "--codes"], base);
   assert.match(list, new RegExp(`${r1.id}  code=${r1.code}  client=Claude Code 1.2.3  ip=203\\.0\\.113\\.7.*scopes=\\[meta:\\*:\\*:read, pro:cli-a:\\*:read, pro:cli-a:\\*:write\\]`));
   assert.match(list, /Active sessions:|No active sessions/);
 
@@ -242,15 +252,15 @@ test("card lists each requested scope with writes highlighted, warns when scopes
   const s = newSession("Claude Code");
   const r = ask(s.id, "pro", "zeta", "read", { scopes: ["pro:zeta:notes:read", "pro:other:notes:write"] });
   const page = await get("/access");
-  const card = page.body.slice(page.body.indexOf(r.code) - 40);
+  const card = cardOf(page.body, r.id);
   assert.match(card, /<code>pro:zeta:notes:read<\/code>/);
   assert.match(card, /<code>pro:other:notes:write<\/code> <span class="badge err">write<\/span>/);
   assert.match(card, /scopes exceed the stated request/);
-  assert.match(card, /<strong class="code">/, "code is prominent");
-  assert.match(card, /Type the code <strong>[A-Z0-9]{6}<\/strong> to approve/);
+  assert.ok(!card.slice(0, 1500).includes(r.code), "code not shown");
+  assert.match(card, /Request code/);
   const t = ask(s.id, "pro", "eta", "read", { scopes: ["pro:eta:notes:read"] });
   const page2 = await get("/access");
-  assert.doesNotMatch(page2.body.slice(page2.body.indexOf(t.code) - 40, page2.body.indexOf(t.code) + 900), /exceed/);
+  assert.doesNotMatch(cardOf(page2.body, t.id), /exceed/);
   access.approveRequest(t.id, { actor: "t", code: t.code });
   const sessionsPage = (await get("/access")).body;
   assert.match(sessionsPage, /<th>Created<\/th><th>Last seen<\/th><th>Expires<\/th>/);
@@ -323,7 +333,12 @@ test("connector key CLI: create, show (audited), list, revoke", async () => {
     const a = db.prepare("SELECT token_name, result, detail FROM audit_log WHERE action = 'connector_key_reveal' ORDER BY id DESC").get() as any;
     assert.deepEqual([a.token_name, a.result], ["cli", "ok"]);
     assert.equal(JSON.stringify(db.prepare("SELECT * FROM audit_log").all()).includes(key as string), false);
-    assert.throws(() => run(["show", "--name", "nope"]), /no active connector key/);
+    assert.throws(() => run(["show", "--name", "nope"]), /no such active connector key/);
+    const twin1 = run(["create", "--name", "twin"]);
+    run(["create", "--name", "twin"]);
+    assert.throws(() => run(["show", "--name", "twin"]), /ambiguous name, use --id/);
+    const twinId = /id:\s+([0-9a-f-]+)/.exec(twin1)?.[1] as string;
+    assert.match(run(["show", "--id", twinId]), /sbk_/);
     process.env.ADMIN_WEB_SECRET = "changed";
     assert.throws(() => run(["show", "--name", "cli-key"]), /cannot decrypt/);
     assert.match(run(["list"]), /name=cli-key/);
