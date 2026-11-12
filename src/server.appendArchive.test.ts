@@ -1,6 +1,6 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { cleanup, git, makeTempDb, makeTempVault } from "./test-support/fixtures";
 import { callTool, lastAudit, listen } from "./test-support/server";
@@ -83,6 +83,27 @@ test("kb_read tail returns the last N lines", async () => {
   assert.equal((await call(ro, "kb_read", { ...args, tail: 500 })).text, all.join("\n") + "\n");
   assert.equal((await call(ro, "kb_read", { ...args, tail: 0 })).isError, true);
   assert.equal((await call(ro, "kb_read", { ...args, tail: 501 })).isError, true);
+});
+
+test("kb_read refuses a note over the read cap with a clear message", async () => {
+  const { MAX_READ_BYTES } = await import("./tools/kbRead");
+  const args = { ...base, section: "notes", note: "huge" };
+  mkdirSync(join(vault, "pro/proj/notes"), { recursive: true });
+  writeFileSync(join(vault, "pro/proj/notes/huge.md"), "x".repeat(MAX_READ_BYTES + 1));
+  try {
+    assert.deepEqual(await call(ro, "kb_read", args), {
+      isError: true,
+      text: `Note is too large to read (${MAX_READ_BYTES + 1} bytes, max ${MAX_READ_BYTES}).`,
+    });
+    const row = lastAudit(db, "token_name = 'agent-ro'");
+    assert.equal(row.result, "error");
+    assert.match(row.detail ?? "", /note too large/);
+    writeFileSync(join(vault, "pro/proj/notes/huge.md"), "x".repeat(MAX_READ_BYTES));
+    assert.equal((await call(ro, "kb_read", args)).text.length, MAX_READ_BYTES);
+  } finally {
+    rmSync(join(vault, "pro/proj/notes/huge.md"));
+  }
+  assert.deepEqual(await call(ro, "kb_read", args), { isError: true, text: "Note not found." });
 });
 
 test("kb_archive moves to archive/<section>-<note>, then -2, and keeps history", async () => {
