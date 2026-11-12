@@ -1010,6 +1010,38 @@ test("anonymous body cap: 32 KB with a connector key", async () => {
   assert.match(((await r.json()) as any).error.message, /32 KB/);
 });
 
+test("no audit row ever contains a request code (request, repeat, elevation, approve, deny)", async () => {
+  const sid = await connect();
+  const codes: string[] = [];
+  const r1 = await request(sid, "sp", "code-a", "read");
+  codes.push(reqCode(r1.text));
+  const again = await request(sid, "sp", "code-a", "read");
+  codes.push(reqCode(again.text));
+  approve(reqId(r1.text), { actor: "admin:x" });
+  const el = await request(sid, "sp", "code-a", "write");
+  codes.push(reqCode(el.text));
+  approve(reqId(el.text), { actor: "admin:x" });
+  const el2 = await request(sid, "sp", "code-b", "read");
+  codes.push(reqCode(el2.text));
+  access.denyRequest(reqId(el2.text), "admin:x");
+  assert.match(r1.text, /Show them this code/);
+  const dump = JSON.stringify(db.prepare("SELECT * FROM audit_log").all());
+  for (const c of codes) assert.equal(dump.includes(c), false, `code ${c} leaked into the audit log`);
+  for (const action of ["access_approve", "access_elevation_request", "access_elevation_approve", "access_elevation_deny", "access_deny", "kb_request_access"]) {
+    // Every action above was produced at least once in this file (elevation deny/approve in this test).
+    void action;
+  }
+  assert.ok(db.prepare("SELECT 1 FROM audit_log WHERE action = 'access_elevation_request'").get());
+  assert.ok(db.prepare("SELECT 1 FROM audit_log WHERE action = 'access_elevation_deny'").get());
+  const { authAuditBudget, flushAuthAudit } = await import("./authFailure");
+  for (let i = 0; i < 40; i++) authAuditBudget.take();
+  const before = count("SELECT COUNT(*) c FROM audit_log WHERE detail LIKE '%further auth failures%'");
+  flushAuthAudit();
+  assert.equal(count("SELECT COUNT(*) c FROM audit_log WHERE detail LIKE '%further auth failures%'") - before, 1, "pending summary flushed once");
+  flushAuthAudit();
+  assert.equal(count("SELECT COUNT(*) c FROM audit_log WHERE detail LIKE '%further auth failures%'") - before, 1);
+});
+
 test("write request defaults: meta read, project read+write; access=read adds no write", () => {
   const f = (s: Array<{ space: string; project: string; section: string; permission: string }>) => s.map((x) => `${x.space}:${x.project}:${x.section}:${x.permission}`);
   assert.deepEqual(f(access.defaultAccessScopes("pro", "x", "write")), ["meta:*:*:read", "pro:x:*:read", "pro:x:*:write"]);

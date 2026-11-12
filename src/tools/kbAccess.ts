@@ -19,7 +19,7 @@ export const register: RegisterTool = (server) => {
       description:
         "Ask the user for access to a project when you are connected without a token, or for more access when you already have some (another project, read to write, explicit scopes). Give the space and project you work on, " +
         "read or write, and a clear reason. Nothing is granted until the user approves the request in the admin web; " +
-        "then check kb_access_status. Returns a request id and a short code the user matches in the admin.",
+        "then check kb_access_status. Returns a request id and a short code to show to the user.",
       inputSchema: {
         space: spaceArg.optional().describe("Space slug (with project and access; optional when scopes is given)"),
         project: projectArg.optional().describe("Project slug"),
@@ -46,10 +46,10 @@ export const register: RegisterTool = (server) => {
             toolResult: toolText(
               `Access requested${created ? "" : " (already pending)"}: ${requestedOf(request).map(formatScope).join(", ")}.\n` +
                 `Request id: ${request.id}\nCode: ${request.code}\n` +
-                `Ask the user to approve it in the admin web (Access requests page; they can match the code), then call kb_access_status with this request_id. ` +
+                `Ask the user to approve it in the admin web (Access requests page). Show them this code: they type it in the admin to approve. Then call kb_access_status with this request_id. ` +
                 `The request expires in ${mins} minutes.`,
             ),
-            audit: { detail: `${created ? "request" : "repeat"} ${access ?? "scopes"} ${request.id} code ${request.code}` },
+            audit: { detail: `${created ? "request" : "repeat"} ${access ?? "scopes"} ${request.id}` },
           };
         } catch (err) {
           if (err instanceof AccessError) return { toolResult: toolError(err.message), audit: { detail: err.message } };

@@ -14,7 +14,7 @@ import { listen } from "./listen";
 import { parseAutoArchiveInterval, startAutoArchive } from "./autoArchive";
 import { parseSpaceLimits } from "./limits";
 import { createMcpServer } from "./mcp";
-import { auditAuthFailure } from "./authFailure";
+import { auditAuthFailure, flushAuthAudit } from "./authFailure";
 import { anonLimits, AnonLimits, ipKey, RateLimiter } from "./rateLimit";
 import { makeSessionAuth } from "./sessionAuth";
 import { startSessionPruning } from "./auth/sessions";
@@ -650,7 +650,10 @@ export async function start(): Promise<{ server: Server; shutdown: (signal?: str
       stopSessions();
       trustedProxy.stop();
     },
-    closeDb: () => db.close(),
+    closeDb: () => {
+      flushAuthAudit();
+      db.close();
+    },
   });
   // A signal that landed between listen and here.
   if (stopRequested) void shutdown("SIGTERM");

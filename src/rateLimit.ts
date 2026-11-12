@@ -73,6 +73,12 @@ export class GlobalBudget {
     private readonly windowMs = 60_000,
     private readonly now: () => number = Date.now,
   ) {}
+  // Swallowed count not yet reported (shutdown flush); resets it.
+  drain(): number {
+    const n = this.swallowed;
+    this.swallowed = 0;
+    return n;
+  }
   take(): { log: boolean; summary: number } {
     const t = this.now();
     let summary = 0;

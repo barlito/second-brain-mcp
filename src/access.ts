@@ -197,7 +197,7 @@ export function createAccessRequest(sessionId: string, input: NewRequest, allow:
     db.prepare(
       "INSERT INTO access_requests (id, code, session_id, space, project, access, reason, status, created_at, expires_at, scopes, elevation) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)",
     ).run(row.id, row.code, row.session_id, row.space, row.project, row.access, row.reason, row.created_at, row.expires_at, row.scopes, row.elevation);
-    if (row.elevation) audit(`session:${sessionId}`, "access_elevation_request", row, "ok", `${row.access} code ${row.code}`);
+    if (row.elevation) audit(`session:${sessionId}`, "access_elevation_request", row, "ok", `${row.access ?? "scopes"}`);
     return { request: row, created: true };
   })();
 }
@@ -295,7 +295,7 @@ export function approveRequest(ref: string, opts: { scopes?: Scope[]; allowWildc
   const defaults = requestedOf(r);
   // Typing the code proves the admin compared it with what the agent displayed (a code ref is that proof).
   const byCode = ref.toUpperCase() === r.code && ref !== r.id;
-  if (!byCode && (opts.code ?? "").trim().toUpperCase() !== r.code) throw new AccessError(422, "Type the request code shown on the card to approve it. Nothing was granted.");
+  if (!byCode && (opts.code ?? "").trim().toUpperCase() !== r.code) throw new AccessError(422, "Type the request code your agent showed you to approve it. Nothing was granted.");
   let validated: { name: string; scopes: Scope[] };
   try {
     // Name from the scopes actually granted (after the admin's edits).

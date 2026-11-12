@@ -7,6 +7,17 @@ import { redact } from "./vault/git";
 const n = Number(process.env.AUTH_AUDIT_MAX_PER_MIN);
 export const authAuditBudget = new GlobalBudget(Number.isInteger(n) && n > 0 ? n : 30);
 
+// Best effort on shutdown: report failures swallowed by the cap that no later window would report.
+export function flushAuthAudit(): void {
+  const n = authAuditBudget.drain();
+  if (n === 0) return;
+  try {
+    logAuthFailure({ reason: `${n} further auth failures not logged (per-minute audit cap)` });
+  } catch {
+    /* DB may already be closing */
+  }
+}
+
 export function auditAuthFailure(clientIp: string | undefined, reason: string): void {
   const b = authAuditBudget.take();
   try {
