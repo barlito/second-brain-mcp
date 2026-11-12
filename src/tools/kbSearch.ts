@@ -28,7 +28,7 @@ export const register: RegisterTool = (server, { vaultRoot }) => {
       description:
         "Case-insensitive plain-text substring search over the notes this token can read. " +
         "Optionally narrow by space/project/section. Returns up to 50 notes with up to 3 matching lines each. " +
-        "Archived notes are skipped unless include_archived is true.",
+        "Archived notes are skipped unless include_archived is true or section 'archive' is requested explicitly.",
       inputSchema: {
         query: z.string().max(MAX_QUERY, `must be at most ${MAX_QUERY} characters`).describe("Text to find (2-200 chars)"),
         space: optSlug("space"),

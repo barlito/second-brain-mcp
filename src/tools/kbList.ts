@@ -14,7 +14,7 @@ export const register: RegisterTool = (server, { vaultRoot }) => {
       description:
         "List the knowledge base one level at a time, only what this token can read. " +
         "No args: spaces. space: projects. space+project: sections. space+project+section: notes " +
-        "(name, bytes, last modified). Archived notes (section 'archive') are hidden unless include_archived is true.",
+        "(name, bytes, last modified). Archived notes (section 'archive') are hidden unless include_archived is true or section 'archive' is requested explicitly.",
       inputSchema: {
         space: optSlug("space"),
         project: optSlug("project"),

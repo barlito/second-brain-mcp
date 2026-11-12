@@ -94,8 +94,13 @@ test("kb_list notes: names without .md, size and mtime; skips non-md, symlinks, 
   const n1 = res.text.split("\n").find((l) => l.startsWith("n1\t"))!.split("\t");
   assert.equal(n1[1], `${"Alpha NEEDLE one\nsecond line\nneedle again\n".length} bytes`);
   assert.match(n1[2], /^\d{4}-\d\d-\d\dT/);
+  // Naming the archive section explicitly includes it, with or without include_archived.
   const arch = await list("master", { space: "pro", project: "a", section: "archive" });
-  assert.equal(arch.text, "(empty)");
+  assert.deepEqual(names(arch.text), ["old"]);
+  assert.deepEqual(await list("exact", { space: "pro", project: "a", section: "archive" }), {
+    isError: true,
+    text: "Permission denied.",
+  });
   const arch2 = await list("master", { space: "pro", project: "a", section: "archive", include_archived: true });
   assert.deepEqual(names(arch2.text), ["old"]);
 });
@@ -175,6 +180,8 @@ test("kb_search master: archive is hidden by default, shown with include_archive
   assert.equal(m.text.split("\n").filter((l) => l.includes("PERSO")).length, 1); // y only once, not via symlinks
   const a = await search("master", { query: "needle", include_archived: true });
   assert.ok(a.text.includes("pro/a/archive/old: needle archived"));
+  const explicit = await search("master", { query: "needle", space: "pro", project: "a", section: "archive" });
+  assert.equal(explicit.text, "pro/a/archive/old: needle archived");
 });
 
 test("kb_search narrowing args are ACL-checked and limit the scope", async () => {

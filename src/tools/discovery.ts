@@ -69,8 +69,9 @@ export interface SectionRef {
 
 // The single ACL/archive rule for "children of <parts> this token may see":
 // parts=[] -> spaces, [space] -> projects, [space, project] -> sections.
-// `only` names one child instead of listing the directory. The ACL is applied
-// before any deeper directory is read.
+// `only` names one child instead of listing the directory; an explicitly named
+// archive section counts as included. The ACL is applied before any deeper
+// directory is read.
 export async function readableChildren(
   vaultRoot: string,
   scopes: Scope[],
@@ -82,7 +83,7 @@ export async function readableChildren(
   return names.filter((name) => {
     if (parts.length === 0) return canReadUnderSpace(scopes, name);
     if (parts.length === 1) return canReadUnderProject(scopes, parts[0], name);
-    return (includeArchived || name !== ARCHIVE_SECTION) && checkScope(scopes, parts[0], parts[1], name, "read");
+    return (includeArchived || only !== undefined || name !== ARCHIVE_SECTION) && checkScope(scopes, parts[0], parts[1], name, "read");
   });
 }
 
