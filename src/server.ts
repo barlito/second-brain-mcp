@@ -11,7 +11,7 @@ import { startAdmin, withAdmin } from "./admin";
 import { startWebAdmin } from "./admin/web";
 import { dbOk, getBootInfo, setBootInfo, vaultOk } from "./health";
 import { listen } from "./listen";
-import { startAutoArchive } from "./autoArchive";
+import { parseAutoArchiveInterval, startAutoArchive } from "./autoArchive";
 import { parseSpaceLimits } from "./limits";
 import { createMcpServer } from "./mcp";
 import {
@@ -571,6 +571,7 @@ export async function start(): Promise<{ server: Server; shutdown: (signal?: str
   const port = Number(process.env.PORT) || 3000;
   try {
     parseSpaceLimits(process.env.SPACE_LIMITS);
+    parseAutoArchiveInterval(process.env.AUTO_ARCHIVE_INTERVAL_MS);
   } catch (err) {
     console.error((err as Error).message);
     process.exit(1);

@@ -84,5 +84,5 @@ Working rules:
 - Archive instead of delete: kb_archive (needs read and write on the section, plus write on the archive section).
 - New project: kb_init_project creates overview/index from a template.
 - If unsure whether something deserves a note, prefer a short journal entry, or use \`kb_propose\` (needs propose or write); the user reviews proposals.
-- Space \`agents\` is per-agent scratch working memory (agents/<agent-name>), kept small by limits on notes and sizes and by auto-archive of stale notes. Keep its overview/index up to date: it is the handover note another agent resumes from. Durable knowledge belongs in the real project (kb_propose or kb_write), not in agents.
+- Space \`agents\` is per-agent scratch working memory (agents/<agent-name>). Its overview/index is the handover note another agent resumes from: keep it up to date. The server may cap notes and sizes there and auto-archive stale notes; a refused write says what to condense or kb_archive. Durable knowledge belongs in the real project (kb_propose or kb_write), not in agents.
 - Writes (kb_write) are direct and committed to git; re-read before overwriting a note you did not just read.`;

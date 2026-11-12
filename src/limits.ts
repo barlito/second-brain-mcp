@@ -60,7 +60,11 @@ export function getSpaceLimits(env: NodeJS.ProcessEnv = process.env): Map<string
 
 // A NoteRuleError, so every writer already maps it to a client error.
 export class SpaceLimitError extends NoteRuleError {
-  constructor(message: string) {
+  constructor(
+    message: string,
+    // Set for the per-note size limit, so callers can word it differently (e.g. template creation).
+    readonly noteBytes?: { space: string; bytes: number; limit: number },
+  ) {
     super(message, "space limit exceeded");
     this.name = "SpaceLimitError";
   }
@@ -80,14 +84,15 @@ function usage(
   let sections: string[] = [];
   try {
     sections = readdirSync(projectDir, { withFileTypes: true })
-      .filter((e) => e.isDirectory() && e.name !== ARCHIVE_SECTION)
+      .filter((e) => e.isDirectory() && e.name !== ARCHIVE_SECTION && isValidSlug(e.name))
       .map((e) => e.name);
   } catch {
     /* project does not exist yet */
   }
   for (const s of sections) {
     for (const e of readdirSync(path.join(projectDir, s), { withFileTypes: true })) {
-      if (!e.name.endsWith(".md")) continue;
+      // Same visibility rule as enumerate.ts: valid-slug .md names only.
+      if (!e.name.endsWith(".md") || !isValidSlug(e.name.slice(0, -3))) continue;
       const file = path.join(projectDir, s, e.name);
       const st = lstatSync(file);
       if (!st.isFile()) continue;
@@ -114,6 +119,7 @@ export function assertSpaceLimits(
   if (limits.maxNoteBytes !== undefined && newBytes > limits.maxNoteBytes) {
     throw new SpaceLimitError(
       `Note too large for ${t.space}: ${newBytes} bytes (limit ${limits.maxNoteBytes} per note). Make it shorter or split it.`,
+      { space: t.space, bytes: newBytes, limit: limits.maxNoteBytes },
     );
   }
   if (limits.maxNotes === undefined && limits.maxProjectBytes === undefined) return;

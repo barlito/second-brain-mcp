@@ -2,7 +2,7 @@ import { resolveNotePath } from "../vault/paths";
 import { NoteExistsError, syncWrite } from "../vault/git";
 import { NO_CHANGES_MESSAGE, toolError, toolText, ToolRunResult } from "./common";
 import { NoteRuleError, validateNoteContent } from "./conventions";
-import { assertSpaceLimits } from "../limits";
+import { assertSpaceLimits, SpaceLimitError } from "../limits";
 
 // Shared write path (kb_write, kb_init_project): content rules, then path
 // resolution, then the locked write. Call after the ACL check.
@@ -18,12 +18,22 @@ export async function writeNote(
     const absolutePath = resolveNotePath(vaultRoot, target.space, target.project, target.section, target.note);
     const { commitSha } = await syncWrite(vaultRoot, absolutePath, content, commitMessage, {
       ...opts,
-      precheck: () => assertSpaceLimits(vaultRoot, target, Buffer.byteLength(content, "utf8")),
+      check: (next) => assertSpaceLimits(vaultRoot, target, Buffer.byteLength(next, "utf8")),
     });
     // Identical content: nothing was committed; never report HEAD (someone else's commit) as ours.
     if (commitSha === null) return { toolResult: toolText(NO_CHANGES_MESSAGE), audit: { detail: "no changes (content identical)" } };
     return { toolResult: toolText(commitSha), audit: { gitCommit: commitSha || undefined } };
   } catch (err) {
+    if (err instanceof SpaceLimitError && err.noteBytes && opts.mustNotExist) {
+      // Creating from the template: the user cannot shorten it, the admin config is at fault.
+      const n = err.noteBytes;
+      return {
+        toolResult: toolError(
+          `The ${n.space} space limit maxNoteBytes (${n.limit}) is too small for the project template (${n.bytes} bytes); ask the admin to raise it.`,
+        ),
+        audit: { detail: err.detail },
+      };
+    }
     if (err instanceof NoteRuleError) {
       return { toolResult: toolError(err.message), audit: { detail: err.detail } };
     }
