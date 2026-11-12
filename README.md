@@ -284,7 +284,7 @@ Compose sets these; no `.env` file is needed. [.env.example](.env.example) docum
 | `GIT_AUTHOR_NAME`, `GIT_AUTHOR_EMAIL`, `GIT_COMMITTER_NAME`, `GIT_COMMITTER_EMAIL` | Git identity (git refuses to commit without one). | none | `second-brain-mcp` / `second-brain-mcp@noreply.local` | same |
 | `NODE_ENV` | Node mode. | `production` (set in the Dockerfile) | `development` | `production` |
 | `SB_PUSH_DEADLINE_MS` | Overall push deadline including retries (test override). | `150000` | unset | unset |
-| `IMAGE_TAG` | Compose-time only: image tag. Required in prod (`make deploy.prod IMAGE_TAG=<tag>`); `make deploy` sets a unique local one. | n/a | auto | required |
+| `TAG` / `IMAGE_TAG` | Compose-time only: image tag. Prod compose uses `TAG` (`make deploy.prod TAG=<tag>`, required); local `make deploy` sets `IMAGE_TAG` to a unique local one. | n/a | auto | required |
 
 ## Security notes
 

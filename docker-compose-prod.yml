@@ -7,15 +7,15 @@
 # with a registry image instead of `build:` (Swarm can't build), plus
 # the prod domain/TLS.
 #
-# Deployable once an image tagged IMAGE_TAG is published to
-# `ghcr.io/barlito/second-brain-mcp` (CI only builds it; publishing is part of
-# the deploy flow) and the `vault_deploy_key` secret exists.
-# Images are referenced by immutable tag: `IMAGE_TAG=<tag> make deploy.prod`.
+# Deployable once an image tagged TAG is published to Docker Hub
+# (`barlito/second-brain-mcp`, pushed by release.yaml when a GitHub Release is published)
+# and the `vault_deploy_key` secret exists.
+# Images are referenced by immutable tag: `TAG=<tag> make deploy.prod`.
 #
 # Prerequisite (once): docker secret create vault_deploy_key <private key file>
 services:
   second-brain-mcp:
-    image: ghcr.io/barlito/second-brain-mcp:${IMAGE_TAG:?IMAGE_TAG is required}
+    image: barlito/second-brain-mcp:${TAG:?TAG is required}
     environment:
       - NODE_ENV=production
       - PORT=3000

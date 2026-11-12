@@ -4,3 +4,6 @@ dist/
 
 # SQLite ACL token database (DB_PATH default /data/acl.db) must never be committed.
 data/
+
+# Deploy scratch (Makefile mark_service)
+.service-mark

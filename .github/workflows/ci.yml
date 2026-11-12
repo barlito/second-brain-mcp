@@ -5,6 +5,7 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_call:
 
 permissions:
   contents: read
@@ -42,4 +43,4 @@ jobs:
           ADMIN_WEB_SECRET: ci-dummy-admin-web-secret-0123456789abcdef
         run: |
           docker compose -f docker-compose.yaml config -q
-          IMAGE_TAG=ci docker compose -f docker-compose-prod.yml config -q
+          TAG=ci docker compose -f docker-compose-prod.yml config -q

@@ -1,0 +1,91 @@
+name: Deploy Workflow
+
+on:
+  workflow_dispatch:
+    inputs:
+      re-deploy:
+        description: "Full stack deploy (applies the whole docker-compose-prod.yml, rolling update with rollback) instead of the image-only update. Required for the first deploy."
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: prod-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    # A crash-looping container must not keep the job spinning
+    timeout-minutes: 15
+
+    env:
+      DOCKER_HOST: ssh://${{ vars.SERVER_USERNAME }}@${{ vars.SERVER_HOST }}:${{ vars.SERVER_PORT }}
+      SERVICE: second-brain-mcp_second-brain-mcp
+
+    steps:
+      - name: Require a tag ref
+        run: |
+          if [ "$GITHUB_REF_TYPE" != "tag" ]; then
+            echo "::error::Run this workflow on a release tag: gh workflow run deploy.yaml --ref vX.Y.Z"
+            exit 1
+          fi
+
+      - uses: actions/checkout@v7
+
+      - name: Set up SSH
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SERVER_HOST_KEY: ${{ vars.SERVER_HOST_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          if [ -n "$SERVER_HOST_KEY" ]; then
+            # Pinned host key (full known_hosts line, e.g. "[1.2.3.4]:3333 ssh-ed25519 AAAA...")
+            printf '%s\n' "$SERVER_HOST_KEY" >> ~/.ssh/known_hosts
+          else
+            echo "::warning::SERVER_HOST_KEY is not set: host key not pinned (trust on first use via ssh-keyscan)."
+            ssh-keyscan -p "${{ vars.SERVER_PORT }}" "${{ vars.SERVER_HOST }}" >> ~/.ssh/known_hosts
+          fi
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKER_HUB_USERNAME }}
+          password: ${{ secrets.DOCKER_HUB_READ_WRITE_DELETE_ACCESS_TOKEN }}
+
+      - name: Re-Deploy Stack
+        if: inputs.re-deploy
+        env:
+          VAULT_DEPLOY_KEY: ${{ secrets.VAULT_DEPLOY_KEY }}
+          # Substituted in docker-compose-prod.yml at stack deploy
+          ADMIN_PROXY_SECRET: ${{ secrets.ADMIN_PROXY_SECRET }}
+          ADMIN_WEB_SECRET: ${{ secrets.ADMIN_WEB_SECRET }}
+        # No `stack rm`: deploy.prod rolls the existing stack (creates it on a first deploy)
+        run: |
+          # Swarm secret created once, from stdin (never printed)
+          [ -n "$VAULT_DEPLOY_KEY" ] || { echo "::error::VAULT_DEPLOY_KEY unset"; exit 1; }
+          if ! docker secret inspect vault_deploy_key >/dev/null 2>&1; then
+            printf '%s\n' "$VAULT_DEPLOY_KEY" | docker secret create vault_deploy_key - >/dev/null
+            echo "Secret vault_deploy_key created."
+          fi
+          TAG=$GITHUB_REF_NAME make deploy.prod
+
+      - name: Update main service
+        if: ${{ ! inputs.re-deploy }}
+        run: |
+          make db.backup
+          make docker.service.update args="--image barlito/second-brain-mcp:$GITHUB_REF_NAME $SERVICE"
+          TAG=$GITHUB_REF_NAME make deploy.assert_image
+
+      - name: Smoke test
+        if: ${{ ! inputs.re-deploy }}
+        run: make smoke.test
+
+      - name: Remove stopped containers
+        if: ${{ ! inputs.re-deploy }}
+        run: make deploy.prune
