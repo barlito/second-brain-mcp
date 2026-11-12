@@ -46,10 +46,20 @@ export function entryNoteTooLargeMessage(bytes: number): string {
   );
 }
 
-export function entryNoteTemplate(project: string, summary: string): string {
+// Per-agent working memory space: overview/index doubles as the handover note.
+export const AGENTS_SPACE = "agents";
+
+export function entryNoteTemplate(project: string, summary: string, space?: string): string {
   const map = RESERVED_SECTIONS.filter((s) => s.section !== "overview")
     .map((s) => `- \`${s.section}\`: ${s.purpose}`)
     .join("\n");
+  if (space === AGENTS_SPACE) {
+    return (
+      `# ${project}\n\n${summary}\n\n## Role\n\n(what this agent is for)\n\n## Current state\n\n(where things stand)\n\n` +
+      `## Current task\n\n(what is being done now)\n\n## Next step\n\n(the very next action, so another agent can resume)\n\n` +
+      `## Key notes\n\n(links to the notes that matter; keep this index up to date)\n\n## Docs map\n\n${map}\n`
+    );
+  }
   return `# ${project}\n\n${summary}\n\n## Docs map\n\n${map}\n\nAdd key notes here as they are created (link them under the right section).\n`;
 }
 
@@ -74,4 +84,5 @@ Working rules:
 - Archive instead of delete: kb_archive (needs read and write on the section, plus write on the archive section).
 - New project: kb_init_project creates overview/index from a template.
 - If unsure whether something deserves a note, prefer a short journal entry, or use \`kb_propose\` (needs propose or write); the user reviews proposals.
+- Space \`agents\` is per-agent scratch working memory (agents/<agent-name>), kept small by limits on notes and sizes and by auto-archive of stale notes. Keep its overview/index up to date: it is the handover note another agent resumes from. Durable knowledge belongs in the real project (kb_propose or kb_write), not in agents.
 - Writes (kb_write) are direct and committed to git; re-read before overwriting a note you did not just read.`;

@@ -1126,6 +1126,55 @@ export function syncMove(
   });
 }
 
+// System job (auto-archive): `select` runs inside the lock after the pull and returns the moves;
+// all of them land in ONE commit. Unbounded: it must not count against the client write cap.
+// Returns null when there was nothing to move.
+export function syncMoveBatch(
+  vaultRoot: string,
+  select: () => Promise<Array<{ from: string; to: string }>>,
+  commitMessage: string,
+): Promise<{ commitSha: string; moved: number } | null> {
+  return withLock(
+    vaultRoot,
+    async () => {
+      const remote = await prepareLocked(vaultRoot);
+      const moves = await select();
+      if (moves.length === 0) return { value: null, push: false };
+      for (const m of moves) {
+        assertSafePath(vaultRoot, m.from);
+        assertSafePath(vaultRoot, m.to);
+        if (!existsSync(m.from) || lstatOrNull(m.to)) throw new Error(`auto-archive: unexpected state for ${m.from}`);
+      }
+      const rels = moves.flatMap((m) => [path.relative(vaultRoot, m.from), path.relative(vaultRoot, m.to)]);
+      const headBefore = await headOrEmpty(vaultRoot);
+      try {
+        for (const m of moves) {
+          mkdirSync(path.dirname(m.to), { recursive: true });
+          assertSafePath(vaultRoot, path.dirname(m.to));
+          await runGit(["mv", "--", path.relative(vaultRoot, m.from), path.relative(vaultRoot, m.to)], vaultRoot);
+        }
+        await runGit(["commit", "-m", commitMessage, "--", ...rels], vaultRoot);
+      } catch (err) {
+        if ((await headOrEmpty(vaultRoot)) === headBefore) {
+          await runGit(["reset", "-q", "--", ...rels], vaultRoot).catch(() => undefined);
+          for (const m of moves) {
+            try {
+              if (!existsSync(m.from) && existsSync(m.to)) renameSync(m.to, m.from);
+            } catch {
+              /* best effort */
+            }
+          }
+          throw err;
+        }
+        console.error(`git move batch: error after commit landed, keeping it: ${errText(err)}`);
+      }
+      const commitSha = await headOrEmpty(vaultRoot);
+      return finishLocked(vaultRoot, remote, { commitSha, moved: moves.length });
+    },
+    false,
+  );
+}
+
 // Leave the tree clean for the next call after a failed write/commit.
 async function restoreNote(
   vaultRoot: string,

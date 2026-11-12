@@ -8,6 +8,7 @@ import { isValidSlug, resolveNotePath, UnsafePathError } from "../vault/paths";
 import { NoteExistsError, noteHistory, NoteHistoryEntry, runGit, syncWrite } from "../vault/git";
 import { MAX_CONTENT_CHARS } from "../tools/common";
 import { NoteRuleError, validateNoteContent } from "../tools/conventions";
+import { assertSpaceLimits } from "../limits";
 import { archiveNote } from "../tools/archiveNote";
 import { ARCHIVE_SECTION } from "../tools/reserved";
 import { AdminError } from "./service";
@@ -133,6 +134,12 @@ export async function editNote(vaultRoot: string, t: NoteRef, content: string, b
   const out = before?.crlf ? content.replace(/\n/g, "\r\n") : content;
   const { commitSha } = await syncWrite(vaultRoot, abs, out, `web: edit ${t.space}/${t.project}/${t.section}/${t.note} by ${user}`, {
     precheck: async () => {
+      try {
+        assertSpaceLimits(vaultRoot, t, Buffer.byteLength(out, "utf8"));
+      } catch (err) {
+        if (err instanceof NoteRuleError) throw new AdminError(422, err.message);
+        throw err;
+      }
       const cur = await read();
       if (!cur || sha256Hex(cur.text) !== base || cur.crlf !== before?.crlf) throw new AdminError(409, STALE_MESSAGE);
       if (!cur.utf8) throw new AdminError(422, NOT_UTF8_MESSAGE);
@@ -148,9 +155,11 @@ export async function createNote(vaultRoot: string, t: NoteRef, content: string,
   try {
     const { commitSha } = await syncWrite(vaultRoot, abs, content, `web: create ${t.space}/${t.project}/${t.section}/${t.note} by ${user}`, {
       mustNotExist: true,
+      precheck: () => assertSpaceLimits(vaultRoot, t, Buffer.byteLength(content, "utf8")),
     });
     return commitSha;
   } catch (err) {
+    if (err instanceof NoteRuleError) throw new AdminError(422, err.message);
     if (err instanceof NoteExistsError) throw new AdminError(409, "a note with this name already exists");
     throw err;
   }

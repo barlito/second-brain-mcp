@@ -11,6 +11,8 @@ import { startAdmin, withAdmin } from "./admin";
 import { startWebAdmin } from "./admin/web";
 import { dbOk, getBootInfo, setBootInfo, vaultOk } from "./health";
 import { listen } from "./listen";
+import { startAutoArchive } from "./autoArchive";
+import { parseSpaceLimits } from "./limits";
 import { createMcpServer } from "./mcp";
 import {
   abortPendingPushes,
@@ -567,6 +569,12 @@ export async function start(): Promise<{ server: Server; shutdown: (signal?: str
     process.exit(1);
   }
   const port = Number(process.env.PORT) || 3000;
+  try {
+    parseSpaceLimits(process.env.SPACE_LIMITS);
+  } catch (err) {
+    console.error((err as Error).message);
+    process.exit(1);
+  }
 
   // Signal handlers first: a signal during bootstrap stops startup after the
   // current git step; once running, they trigger the graceful shutdown.
@@ -623,11 +631,14 @@ export async function start(): Promise<{ server: Server; shutdown: (signal?: str
   const intervalMs = intervalRaw === undefined || intervalRaw === "" ? 60_000 : Number(intervalRaw);
   const stopSync = intervalMs > 0 ? startPeriodicSync(vaultRoot, intervalMs) : undefined;
 
+  const stopArchive = startAutoArchive(vaultRoot);
+
   shutdown = createShutdown({
     server: withAdmin(withAdmin(server, adminServer), webAdminServer),
     lifecycle,
     stopSync: () => {
       stopSync?.();
+      stopArchive?.();
       trustedProxy.stop();
     },
     closeDb: () => db.close(),

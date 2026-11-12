@@ -3,6 +3,7 @@ import { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { resolveNotePath } from "../vault/paths";
 import { NoteNotUtf8Error, NoteTooLargeError, syncAppend } from "../vault/git";
 import { NoteRuleError, validateNoteContent } from "./conventions";
+import { assertSpaceLimits } from "../limits";
 import {
   kbArgsShape,
   MAX_CONTENT_CHARS,
@@ -61,7 +62,10 @@ export const register: RegisterTool = (server, { vaultRoot }) => {
             () => `- ${utcStamp(new Date())} [${ctx.name}] ${oneLine}`,
             `kb_append: ${space}/${project}/${section}/${note} via ${ctx.name}`,
             MAX_CONTENT_CHARS,
-            (next) => validateNoteContent({ section, note }, next),
+            (next) => {
+              validateNoteContent({ section, note }, next);
+              assertSpaceLimits(vaultRoot, { space, project, section, note }, Buffer.byteLength(next, "utf8"));
+            },
           );
           if (commitSha === null) return { toolResult: toolText(NO_CHANGES_MESSAGE), audit: { detail: "no changes" } };
           return { toolResult: toolText(commitSha), audit: { gitCommit: commitSha || undefined } };
