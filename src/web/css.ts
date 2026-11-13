@@ -161,6 +161,7 @@ textarea.cmd { min-height: 0; }
 .banner.ok { background: var(--ok-bg); color: var(--ok); border-color: transparent; }
 .banner.err { background: var(--err-bg); color: var(--err); border-color: transparent; }
 .banner.warn { background: var(--warn-bg); color: var(--warn); border-color: transparent; }
+.banner.live { flex-direction: row; align-items: center; justify-content: space-between; gap: 12px; }
 .note { padding: 12px; border-radius: 10px; background: var(--note-bg); border: 1px solid var(--note-line); color: var(--note-text); font-size: 13px; }
 .note ul { margin: 0; padding-left: 18px; }
 .callout { display: flex; flex-wrap: wrap; align-items: center; gap: 16px; padding: 16px 20px; border: 1px solid var(--accent-line); background: var(--accent-wash); border-radius: 12px; }

@@ -374,3 +374,129 @@ test("a grant released by the agent disappears from the active sessions list and
   const tok = db.prepare("SELECT revoked_at FROM tokens WHERE session_id = ?").all(s.id) as Array<{ revoked_at: string | null }>;
   assert.ok(tok.length > 0 && tok.every((t) => t.revoked_at !== null));
 });
+
+// ---- live refresh (SSE) ----
+
+interface AccessEvent {
+  rev: number;
+  pending: number;
+}
+interface Stream {
+  res: http.IncomingMessage;
+  events: AccessEvent[];
+  next(n: number): Promise<AccessEvent>;
+  close(): void;
+}
+function openStream(p: number, headers: Record<string, string> = ADMIN): Promise<Stream> {
+  return new Promise((resolve, reject) => {
+    const events: AccessEvent[] = [];
+    const waiters: Array<() => void> = [];
+    const r = http.request({ host: "127.0.0.1", port: p, method: "GET", path: "/access/events", headers }, (res) => {
+      let buf = "";
+      res.setEncoding("utf8");
+      res.on("data", (c: string) => {
+        buf += c;
+        let i: number;
+        while ((i = buf.indexOf("\n\n")) !== -1) {
+          const block = buf.slice(0, i);
+          buf = buf.slice(i + 2);
+          if (/^event: access$/m.test(block)) {
+            const d = /^data: (.*)$/m.exec(block);
+            if (d) events.push(JSON.parse(d[1]) as AccessEvent);
+          }
+        }
+        for (const w of waiters.splice(0)) w();
+      });
+      resolve({
+        res,
+        events,
+        close: () => r.destroy(),
+        next: (n) =>
+          new Promise((ok, fail) => {
+            const t = setTimeout(() => fail(new Error(`timeout waiting for event #${n}, got ${events.length}`)), 3000);
+            const check = (): void => {
+              if (events.length >= n) {
+                clearTimeout(t);
+                ok(events[n - 1]);
+              } else waiters.push(check);
+            };
+            check();
+          }),
+      });
+    });
+    r.on("error", (e) => {
+      if ((e as NodeJS.ErrnoException).code !== "ECONNRESET") reject(e);
+    });
+    r.end();
+  });
+}
+
+test("SSE: refused without the proxy header or the admins group (plain error, not a stream)", async () => {
+  const noProxy = await request(port, "GET", "/access/events", { "remote-user": "alice", "remote-groups": "admins" });
+  assert.equal(noProxy.status, 401);
+  assert.doesNotMatch(String(noProxy.headers["content-type"]), /event-stream/);
+  const noGroup = await request(port, "GET", "/access/events", { ...ADMIN, "remote-groups": "users" });
+  assert.equal(noGroup.status, 403);
+  assert.doesNotMatch(String(noGroup.headers["content-type"]), /event-stream/);
+});
+
+test("SSE: first event carries the current rev and pending count; ask, approve and deny each push a new one", async () => {
+  const st = await openStream(port);
+  try {
+    assert.equal(st.res.statusCode, 200);
+    assert.match(String(st.res.headers["content-type"]), /text\/event-stream/);
+    const first = await st.next(1);
+    assert.equal(first.rev, access.currentAccessRev());
+    assert.equal(first.pending, access.countPendingRequests());
+
+    const s = newSession();
+    const a = ask(s.id, "pro", "sse-a", "read");
+    const e2 = await st.next(2);
+    assert.deepEqual(e2, { rev: first.rev + 1, pending: first.pending + 1 });
+
+    const b = ask(s.id, "pro", "sse-b", "read");
+    const e3 = await st.next(3);
+    assert.deepEqual(e3, { rev: e2.rev + 1, pending: e2.pending + 1 });
+
+    await follow(await post(`/access/${a.id}/approve`, { scopes: "pro:sse-a:*:read", code: a.code }));
+    const e4 = await st.next(4);
+    assert.equal(e4.rev, e3.rev + 1);
+    assert.equal(e4.pending, e3.pending - 1);
+
+    await follow(await post(`/access/${b.id}/deny`, {}));
+    const e5 = await st.next(5);
+    assert.equal(e5.rev, e4.rev + 1);
+    assert.equal(e5.pending, e4.pending - 1);
+  } finally {
+    st.close();
+  }
+});
+
+test("access page body carries the current rev", async () => {
+  ask(newSession().id, "pro", "rev-page");
+  const page = await get("/access");
+  assert.match(page.body, new RegExp(`<body[^>]*data-access-rev="${access.currentAccessRev()}"`));
+});
+
+test("lifecycle: an open SSE stream is not counted in flight (page requests are, and return to 0)", async () => {
+  const { Lifecycle, createTrustedProxy } = await import("../server");
+  const lifecycle = new Lifecycle();
+  const app = web.createWebAdminApp({ vaultRoot: vault, trustedProxy: createTrustedProxy("127.0.0.1"), secret: SECRET, proxySecret: PROXY_SECRET, lifecycle });
+  const srv = await new Promise<http.Server>((r) => {
+    const s = app.listen(0, "127.0.0.1", () => r(s));
+  });
+  const p = (srv.address() as AddressInfo).port;
+  let st: Stream | undefined;
+  try {
+    st = await openStream(p);
+    await st.next(1);
+    assert.equal(lifecycle.inFlight, 0);
+    assert.equal((await request(p, "GET", "/access", ADMIN)).status, 200);
+    assert.equal(lifecycle.inFlight, 0);
+    lifecycle.shuttingDown = true;
+    assert.equal((await request(p, "GET", "/access/events", ADMIN)).status, 503);
+  } finally {
+    st?.close();
+    await new Promise((r) => srv.close(r));
+  }
+});

@@ -32,7 +32,7 @@ import {
   proposalView,
 } from "../web/views";
 import { EMPTY_TOKEN_FORM, newTokenView, TOKEN_STATUSES, tokenCreatedView, TokenForm, tokensView, TokenStatus } from "../web/tokenViews";
-import { AccessError, approveRequest, auditSessionRevoke, countPendingRequests, denyRequest, listPendingRequests } from "../access";
+import { AccessError, approveRequest, auditSessionRevoke, countPendingRequests, currentAccessRev, denyRequest, listPendingRequests, onAccessChange } from "../access";
 import { listActiveSessions, revokeSession } from "../auth/sessions";
 import { ConnectorKeyError, CONNECTOR_HEADER, createConnectorKey, listConnectorKeys, revealConnectorKey, revokeConnectorKey } from "../auth/connectorKeys";
 import { OneTimeStore } from "./onetime";
@@ -70,6 +70,8 @@ export const DEFAULT_SESSION_COOKIE = "authelia_session";
 const BUCKET_MS = 4 * 3_600_000;
 const DAY_MS = 86_400_000;
 const FLASH_TTL_MS = 5 * 60_000;
+export const ACCESS_EVENTS_PATH = "/access/events";
+const SSE_HEARTBEAT_MS = 25_000;
 const NONCE_TTL_MS = 30 * 60_000;
 
 const sha256 = (v: string): Buffer => createHash("sha256").update(v).digest();
@@ -210,14 +212,15 @@ export function createWebAdminApp(opts: WebAdminOptions): Express {
   app.disable("x-powered-by");
 
   // Tracked like /mcp requests so shutdown waits for them; new ones refused once it began.
-  app.use((_req, res, next) => {
+  app.use((req, res, next) => {
     if (lifecycle) {
       if (lifecycle.shuttingDown) {
         res.setHeader("Connection", "close");
         res.status(503).type("text/plain").send("server is shutting down");
         return;
       }
-      lifecycle.enter(res);
+      // The SSE stream never ends on its own: shutdown must not wait for it.
+      if (req.path !== ACCESS_EVENTS_PATH) lifecycle.enter(res);
     }
     next();
   });
@@ -301,7 +304,7 @@ export function createWebAdminApp(opts: WebAdminOptions): Express {
     } catch {
       /* DB trouble: no badge */
     }
-    res.locals.counts = { inbox, access };
+    res.locals.counts = { inbox, access, accessRev: currentAccessRev() };
     next();
   });
 
@@ -515,6 +518,29 @@ export function createWebAdminApp(opts: WebAdminOptions): Express {
   accessRouter.param("id", (_req, res, next, id: string) => {
     if (!UUID_RE.test(id)) return void send(res, errorView(ctxOf(res), 400, "invalid id"), 400);
     next();
+  });
+  // Live feed (SSE): one event on connect, then one per change; the client compares `rev` with the
+  // one its page was rendered at. Same auth as every page (proxy secret + admin group).
+  accessRouter.get("/events", (req, res) => {
+    res.status(200).set({ "Content-Type": "text/event-stream", "X-Accel-Buffering": "no" });
+    res.flushHeaders();
+    const push = (rev: number): void => {
+      let pending: number | null = null;
+      try {
+        pending = countPendingRequests();
+      } catch {
+        /* DB trouble: no count */
+      }
+      res.write(`event: access\ndata: ${JSON.stringify({ rev, pending })}\n\n`);
+    };
+    res.write("retry: 5000\n\n");
+    push(currentAccessRev());
+    const off = onAccessChange(push);
+    const beat = setInterval(() => void res.write(": ping\n\n"), SSE_HEARTBEAT_MS);
+    req.on("close", () => {
+      clearInterval(beat);
+      off();
+    });
   });
   accessRouter.get("/", (req, res) => {
     send(res, accessView(ctxOf(res), listPendingRequests(), listActiveSessions(), listConnectorKeys(), takeBanner(req, res)));
