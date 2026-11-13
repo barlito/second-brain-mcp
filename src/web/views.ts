@@ -105,6 +105,11 @@ export function scopeDescription(s: Pick<Scope, "space" | "project" | "section" 
 export const scopeChip = (s: Scope): SafeHtml =>
   html`<span class="scope" title="${scopeDescription(s)}"><span class="scope-path">${s.space}:${s.project}:${s.section}</span><span class="scope-perm p-${s.permission}">${PERM_LABEL[s.permission] ?? s.permission}</span></span>`;
 
+// Risk of a requested scope list beyond the default shape (the shared meta read is the default, not a risk).
+export function wildcardRisk(scopes: Scope[]): { whole: Scope[]; broad: Scope[] } {
+  const risky = scopes.filter((s) => !(s.space === "meta" && s.project === "*" && s.section === "*" && s.permission === "read"));
+  return { whole: risky.filter((s) => s.space === "*"), broad: risky.filter((s) => s.space !== "*" && s.project === "*") };
+}
 export const isWholeVault = (scopes: Scope[]): boolean => scopes.some((s) => s.space === "*" && s.project === "*" && s.section === "*");
 
 export const csrfField = (ctx: Ctx): SafeHtml =>
@@ -331,6 +336,10 @@ ${
             (r) => html`<div class="card pad stack g12">
 <div class="row g12">${r.elevation ? html`<span class="badge err">elevation</span>` : ""}<strong>${r.client_name}</strong><span class="muted">${r.client_version}</span><span class="muted small">${relTime(r.created_at)}, expires ${r.expires_at}</span><span class="muted mono small">${r.id}</span></div>
 <div class="stack"><span class="hint">Asks for</span>${r.requested_scopes.map((sc) => html`<div class="grant">${scopeChip(sc)}<span class="hint">${scopeDescription(sc)}</span></div>`)}</div>
+${(() => {
+              const k = wildcardRisk(r.requested_scopes);
+              return html`${k.whole.length ? html`<div class="row"><span class="badge err" title="Wildcard on every space: reaches the whole vault, including spaces created later.">${ICON.warn}Whole vault</span><span class="hint">${k.whole.map(formatScope).join(", ")}</span></div>` : ""}${k.broad.length ? html`<div class="row"><span class="badge warn" title="Wildcard on every project of a space, including projects created later.">${ICON.warn}Broad</span><span class="hint">${k.broad.map(formatScope).join(", ")}</span></div>` : ""}`;
+            })()}
 ${r.exceeds ? html`<div class="banner err" role="alert"><strong>scopes exceed the stated request</strong> (${r.access} on ${r.space}/${r.project}): review every scope above.</div>` : ""}
 <p>Client: <strong>${r.client_name}</strong> ${r.client_version} &nbsp; Key: <strong>${r.connector_key ?? "?"}</strong> &nbsp; IP: <span class="mono">${r.remote_ip ?? "?"}</span></p>
 <p>Reason: ${r.reason}</p>
@@ -343,7 +352,6 @@ ${r.exceeds ? html`<div class="banner err" role="alert"><strong>scopes exceed th
 ${csrfField(ctx)}
 <div class="stack"><label class="lbl" for="scopes-${r.id}">Scopes <span class="hint">(one per line; leave as is to grant the default; write includes read)</span></label>
 <textarea class="field" id="scopes-${r.id}" name="scopes" spellcheck="false" rows="4">${r.requested_scopes.map(formatScope).join("\n")}</textarea></div>
-<label class="check"><input type="checkbox" name="allow_wildcard" value="1"><span>Allow wildcard (required for any <code>*</code> scope beyond the default)</span></label>
 <div class="stack"><label class="lbl" for="code-${r.id}">Request code <span class="hint">(the 6 characters your agent showed you in the chat; deliberately not displayed here)</span></label>
 <input class="field w420" type="text" id="code-${r.id}" name="code" maxlength="6" required autocomplete="off" spellcheck="false"></div>
 <div class="actions"><button class="btn btn-primary" type="submit">Approve</button></div>

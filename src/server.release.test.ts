@@ -49,7 +49,7 @@ async function grant(sid: string, scopes: string[]): Promise<string> {
   assert.equal(r.isError, false, r.text);
   const id = /Request id: ([0-9a-f-]{36})/.exec(r.text)![1];
   const code = (db.prepare("SELECT code FROM access_requests WHERE id = ?").get(id) as { code: string }).code;
-  access.approveRequest(id, { actor: "admin:test", code, allowWildcard: true });
+  access.approveRequest(id, { actor: "admin:test", code });
   return id;
 }
 const tokenRows = (sid: string) => db.prepare("SELECT id, revoked_at FROM tokens WHERE session_id = ? AND kind = 'session' ORDER BY created_at, rowid").all(rowOf(sid).id) as Array<{ id: string; revoked_at: string | null }>;

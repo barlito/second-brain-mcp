@@ -3,7 +3,7 @@
 import { parseArgs as nodeParseArgs } from "node:util";
 import { adminUrl } from "./inbox";
 
-export const USAGE = "usage: access.js <list [--codes] | approve <code> | approve <id> --code <code>  [--scope s:p:sec:perm,...] [--allow-wildcard] | deny <id|code>>";
+export const USAGE = "usage: access.js <list [--codes] | approve <code> | approve <id> --code <code>  [--scope s:p:sec:perm,...] [--allow-wildcard (ignored)] | deny <id|code>>";
 
 async function call(base: string, method: string, path: string, body?: unknown): Promise<{ status: number; json: any }> {
   let res: Response;
@@ -58,7 +58,6 @@ export async function run(argv: string[], base = adminUrl()): Promise<string> {
       const body: Record<string, unknown> = {};
       if (values.scope) body.scope = values.scope;
       if (values.code) body.code = values.code;
-      if (values["allow-wildcard"]) body.allowWildcard = true;
       const r = need(await call(base, "POST", `/admin/access/${ref()}/approve`, body));
       return `Approved ${r.space}/${r.project} as ${r.tokenName}: ${r.scopes.map(fmt).join(", ")}${(r.notes as string[]).map((n) => `\nnote: ${n}`).join("")}`;
     }

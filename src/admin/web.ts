@@ -526,7 +526,6 @@ export function createWebAdminApp(opts: WebAdminOptions): Express {
       const text = str(body.scopes);
       const d = approveRequest(req.params.id as string, {
         scopes: text.trim() ? scopesFromText(text) : undefined,
-        allowWildcard: body.allow_wildcard === "1",
         code: str(body.code),
         actor: res.locals.actor as string,
       });
