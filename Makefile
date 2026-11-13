@@ -176,9 +176,9 @@ inbox-reject: ## Reject a proposal (make inbox-reject id=<id>)
 access-list: ## List pending access requests (token-less sessions) and active sessions (codes hidden; codes=1 shows them)
 	@$(call exec_in_service,node dist/cli/access.js list $(if $(codes),--codes))
 
-access-approve: ## Approve an access request (make access-approve id=<code> | id=<uuid> code=<code> [scope=s:p:sec:perm,...] [allow_wildcard=1]); default scopes: meta read + the project
+access-approve: ## Approve an access request (make access-approve id=<code> | id=<uuid> code=<code> [scope=s:p:sec:perm,...]); default scopes: meta read + the project
 	@test -n "$(id)" || { echo "id is required (make access-approve id=<id|code>)" >&2; exit 1; }
-	@$(call exec_in_service,node dist/cli/access.js approve "$(id)" $(if $(code),--code "$(code)") $(if $(scope),--scope "$(scope)") $(if $(allow_wildcard),--allow-wildcard))
+	@$(call exec_in_service,node dist/cli/access.js approve "$(id)" $(if $(code),--code "$(code)") $(if $(scope),--scope "$(scope)"))
 
 access-deny: ## Deny an access request (make access-deny id=<id|code>)
 	@test -n "$(id)" || { echo "id is required (make access-deny id=<id|code>)" >&2; exit 1; }

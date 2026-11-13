@@ -274,12 +274,6 @@ function requireDecidable(ref: string): RequestRow & { client_name: string; sess
   return r;
 }
 
-export class WildcardConfirmError extends AccessError {
-  constructor(lines: string[]) {
-    super(422, 'Wildcard scopes grant broad access. Tick "Allow wildcard" to confirm. Nothing was granted.', lines);
-  }
-}
-
 export interface Decision {
   id: string;
   space?: string;
@@ -293,7 +287,8 @@ function audit(actor: string, action: string, r: RequestRow, result: "ok" | "err
   safeAudit({ tokenId: actor, tokenName: actor, action, space: r.space ?? undefined, project: r.project ?? undefined, result, detail: `${r.id} ${detail}` }, actor);
 }
 
-// Approves with `scopes` (default: defaultAccessScopes). Wildcards beyond the defaults need allowWildcard.
+// Approves with `scopes` (default: defaultAccessScopes). Wildcards need no confirmation (the admin sees the risk badge); warnings are returned in notes.
+// `allowWildcard` is accepted and ignored (legacy callers).
 export function approveRequest(ref: string, opts: { scopes?: Scope[]; allowWildcard?: boolean; actor: string; code?: string }): Decision {
   const r = requireDecidable(ref);
   const explicit = requestedScopes(r);
@@ -315,7 +310,6 @@ export function approveRequest(ref: string, opts: { scopes?: Scope[]; allowWildc
   // The default shape is pre-confirmed; an explicit agent-requested list never is.
   const own = explicit ? [] : defaults.map(formatScope);
   const warnings = wildcardWarnings(kept.filter((s) => !own.includes(formatScope(s))));
-  if (warnings.length > 0 && !opts.allowWildcard) throw new WildcardConfirmError(warnings);
   const grant = db.transaction(() => {
     // Re-check inside the write lock: a concurrent decision must win exactly once.
     const cur = db.prepare("SELECT status FROM access_requests WHERE id = ?").get(r.id) as { status: string } | undefined;

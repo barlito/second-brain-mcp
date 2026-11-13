@@ -532,18 +532,18 @@ test("audit: approve/deny/revoke rows carry the actor, no row or log line contai
   for (const s of [sid, sid2, sessions.hashSid(sid)]) assert.equal(dump.includes(s), false);
 });
 
-test("approve guards: unknown ref, wildcard confirmation, invalid scopes, concurrent decision", async () => {
+test("approve guards: unknown ref, invalid scopes, concurrent decision", async () => {
   const sid = await connect();
   const id = reqId((await request(sid, "sp", "proj-a", "read")).text);
   assert.throws(() => approve("ZZZZZZ", { actor: "t" }), /not found/);
   const wild = [{ space: "sp", project: "*", section: "*", permission: "write" as const }];
-  assert.throws(() => approve(id, { actor: "t", scopes: wild }), (e: any) => e.status === 422 && /Wildcard/.test(e.message) && e.lines.length === 1);
   assert.throws(() => approve(id, { actor: "t", scopes: [{ space: "*", project: "x", section: "*", permission: "read" }] }), /invalid scope/);
   assert.throws(() => approve(id, { actor: "t", scopes: [] }), /at least one scope/);
   // Nothing was granted by the failed attempts.
   assert.equal(listGrants(sid), 0);
-  const d = approve(id, { actor: "t", scopes: wild, allowWildcard: true });
+  const d = approve(id, { actor: "t", scopes: wild });
   assert.equal(d.scopes.length, 1);
+  assert.equal(d.notes.length, 1, "wildcard warning is returned, not blocking");
   assert.throws(() => approve(id, { actor: "t" }), /already approved/);
   function listGrants(s: string): number {
     return sessions.listGrants(sidRow(s)!.id).length;
@@ -598,13 +598,11 @@ test("explicit scopes: validated, never pre-confirmed wildcards, approved list r
   assert.equal(ok.isError, false, ok.text);
   const p = access.listPendingRequests().find((r) => r.id === reqId(ok.text))!;
   assert.deepEqual(p.requested_scopes.map((s) => `${s.section}:${s.permission}`), ["notes:read", "*:write"]);
-  // A wildcard request needs the admin's confirmation even though it is only a request.
+  // A wildcard request needs no confirmation flag; the warnings come back in the decision.
   const w = await call(sid, "kb_request_access", { space: "sp", project: "proj-b", access: "read", reason: "r", scopes: ["sp:*:*:read"] });
   assert.equal(w.isError, false, w.text);
-  assert.throws(() => approve(reqId(w.text), { actor: "t" }), /Wildcard/);
-  approve(reqId(w.text), { actor: "t", allowWildcard: true });
-  assert.throws(() => approve(reqId(ok.text), { actor: "t" }), /Wildcard/, "section wildcard in an explicit list is confirmed too");
-  approve(reqId(ok.text), { actor: "t", allowWildcard: true });
+  assert.ok(approve(reqId(w.text), { actor: "t" }).notes.length > 0);
+  assert.ok(approve(reqId(ok.text), { actor: "t" }).notes.length > 0);
   const granted = sessions.listGrants(sidRow(sid)!.id).flatMap((g) => g.scopes.map((s) => `${s.space}:${s.project}:${s.section}:${s.permission}`));
   assert.ok(granted.includes("sp:proj-a:notes:read") && granted.includes("sp:*:*:read"));
   assert.ok(!granted.includes("meta:*:*:read"), "explicit list replaces the default shape");
@@ -816,7 +814,7 @@ test("explicit scopes only: space/project/access optional, card and grant name c
   const r2 = await call(sid, "kb_request_access", { space: "sp", project: "proj-a", access: "read", reason: "sneaky", scopes: ["sp:proj-a:*:read", "sp:proj-b:notes:write"] });
   const p2 = access.listPendingRequests().find((r) => r.id === reqId(r2.text))!;
   assert.equal(p2.exceeds, true);
-  assert.equal(approve(p2.id, { actor: "t", allowWildcard: true }).tokenName, "session-claude-code-multi");
+  assert.equal(approve(p2.id, { actor: "t" }).tokenName, "session-claude-code-multi");
   // Within the stated request: not flagged.
   const r3 = await call(sid, "kb_request_access", { space: "sp", project: "proj-b", access: "write", reason: "fine", scopes: ["sp:proj-b:notes:write"] });
   assert.equal(access.listPendingRequests().find((r) => r.id === reqId(r3.text))!.exceeds, false);

@@ -134,10 +134,8 @@ test("approve via the page with editable scopes, then active sessions + revoke; 
   assert.match((await follow(await post(path, { scopes, code: "AAAAAA" }))).body, /Type the request code/);
   assert.equal(sessions.listGrants(s.id).length, 0);
 
-  // Wildcard beyond the default needs the confirmation box.
-  const wild = await follow(await post(path, { scopes: "pro:*:*:write", code }));
-  assert.match(wild.body, /Wildcard scopes grant broad access/);
-  assert.equal(sessions.listGrants(s.id).length, 0);
+  // The page shows no wildcard checkbox.
+  assert.doesNotMatch((await get("/access")).body, /allow_wildcard|Allow wildcard/);
 
   const ok = await follow(await post(path, { scopes, code }));
   assert.match(ok.body, /Approved pro\/beta as session-claude-desktop-pro-beta/);
@@ -213,7 +211,18 @@ test("tokens page marks session grants; revoking one there cuts the session", as
 
 // ---- CLI over the loopback admin listener ----
 
-test("CLI: access list / approve (code or id, scope override, wildcard confirm) / deny", async () => {
+test("approving a *:*:*:write request needs no flag; the page showed a Whole vault badge first", async () => {
+  const s = newSession("Claude Desktop");
+  const r = ask(s.id, "pro", "wild", "read", { scopes: ["*:*:*:write"] });
+  const page = (await get("/access")).body;
+  assert.match(page, /Whole vault/);
+  assert.doesNotMatch(page, /allow_wildcard|Allow wildcard/);
+  const res = await follow(await post(`/access/${r.id}/approve`, { scopes: "*:*:*:write", code: r.code }));
+  assert.match(res.body, /Approved pro\/wild/);
+  assert.equal(sessions.listGrants(s.id).length, 1);
+});
+
+test("CLI: access list / approve (code or id, scope override, wildcard without flag) / deny", async () => {
   const { run } = await import("../cli/access");
   const base = `http://127.0.0.1:${(adminSrv.address() as AddressInfo).port}`;
   const s = newSession("Claude Code");
@@ -230,9 +239,8 @@ test("CLI: access list / approve (code or id, scope override, wildcard confirm) 
   // by code, default scopes
   const a = await run(["approve", r1.code.toLowerCase()], base);
   assert.match(a, /Approved pro\/cli-a as session-claude-code-pro-cli-a: meta:\*:\*:read, pro:cli-a:\*:read, pro:cli-a:\*:write/);
-  // by id, explicit scope; wildcard needs --allow-wildcard
+  // by id, explicit scope; wildcard needs no flag
   await assert.rejects(run(["approve", r2.id, "--scope", "pro:*:*:read"], base), /Type the request code/);
-  await assert.rejects(run(["approve", r2.id, "--code", r2.code, "--scope", "pro:*:*:read"], base), /Wildcard[\s\S]*pro:\*:\*:read/);
   assert.equal(sessions.listGrants(s.id).length, 1);
   assert.match(await run(["approve", r2.id, "--code", r2.code, "--scope", "pro:*:*:read", "--allow-wildcard"], base), /Approved pro\/cli-b/);
   await assert.rejects(run(["approve", r2.id], base), /already approved/);
