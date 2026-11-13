@@ -40,10 +40,12 @@ export function notifyAccessChange(): void {
       /* a broken subscriber must not break the caller */
     }
   }
+  for (const id of [...watchers.keys()]) dispatch(id);
 }
 
 // setTimeout caps at 2^31-1 ms; a longer TTL would fire at once.
 const MAX_TIMER_MS = 2 ** 31 - 1;
+export const clampTimer = (ms: number): number => Math.min(Math.max(ms, 0), MAX_TIMER_MS);
 
 export class AccessError extends Error {
   constructor(
@@ -235,7 +237,7 @@ export function createAccessRequest(sessionId: string, input: NewRequest, allow:
   if (result.created) {
     notifyAccessChange();
     // Expiry is time-based (no write): tell the UI once the request has lapsed.
-    setTimeout(notifyAccessChange, Math.min(Date.parse(result.request.expires_at) - Date.now() + 1000, MAX_TIMER_MS)).unref();
+    setTimeout(notifyAccessChange, clampTimer(Date.parse(result.request.expires_at) - Date.now() + 1000)).unref();
   }
   return result;
 }
@@ -267,28 +269,64 @@ export function requestWord(requestId: string): RequestWord | null {
   return r.status === "pending" && !isLive(r) ? "expired" : r.status;
 }
 
-// Calls `fn` with the current word at once, then on each change, until a terminal word or the returned stop.
-// Expiry is not a write, so a timer re-checks at the deadline. An unknown id never calls `fn`.
-export function watchRequest(requestId: string, fn: (word: RequestWord) => void): () => void {
-  const row = db.prepare("SELECT expires_at FROM access_requests WHERE id = ?").get(requestId) as { expires_at: string } | undefined;
-  if (!row) return () => {};
-  let last: RequestWord | undefined;
-  const stop = (): void => {
-    off();
-    clearTimeout(timer);
-  };
-  const check = (): void => {
-    const w = requestWord(requestId) as RequestWord;
-    if (w === last) return;
-    last = w;
-    fn(w);
-    if (isTerminal(w)) stop();
-  };
-  const off = onAccessChange(check);
-  const timer = setTimeout(check, Math.min(Math.max(Date.parse(row.expires_at) - Date.now(), 0) + 50, MAX_TIMER_MS));
+interface Watcher {
+  last: RequestWord;
+  fn: (word: RequestWord) => void;
+  end: () => void;
+  stop: () => void;
+}
+const watchers = new Map<string, Set<Watcher>>();
+
+// A request that vanished (its session was deleted) is final: report it as expired.
+function dispatch(id: string): void {
+  const set = watchers.get(id);
+  if (!set) return;
+  const word = requestWord(id) ?? "expired";
+  for (const w of [...set]) {
+    if (w.last === word) continue;
+    w.last = word;
+    try {
+      w.fn(word);
+    } catch {
+      /* a broken watcher must not break the caller */
+    }
+    if (isTerminal(word)) w.stop();
+  }
+}
+
+// Current word of a request, then `fn` on each change until a terminal word or `stop`. `end` runs on closeWatchers.
+// Expiry is not a write, so a timer re-checks at the deadline. A request already terminal is not watched; null = unknown id.
+export function watchRequest(requestId: string, fn: (word: RequestWord) => void, end: () => void): { word: RequestWord; stop: () => void } | null {
+  const word = requestWord(requestId);
+  if (word === null) return null;
+  if (isTerminal(word)) return { word, stop: () => {} };
+  const row = db.prepare("SELECT expires_at FROM access_requests WHERE id = ?").get(requestId) as { expires_at: string };
+  const set = watchers.get(requestId) ?? new Set<Watcher>();
+  watchers.set(requestId, set);
+  const timer = setTimeout(() => dispatch(requestId), clampTimer(Date.parse(row.expires_at) - Date.now() + 50));
   timer.unref();
-  check();
-  return stop;
+  const w: Watcher = {
+    last: word,
+    fn,
+    end,
+    stop: () => {
+      clearTimeout(timer);
+      set.delete(w);
+      if (set.size === 0 && watchers.get(requestId) === set) watchers.delete(requestId);
+    },
+  };
+  set.add(w);
+  return { word, stop: w.stop };
+}
+
+// Graceful shutdown: end every open wait and stream (they must not hold the drain).
+export function closeWatchers(): void {
+  for (const set of [...watchers.values()]) {
+    for (const w of [...set]) {
+      w.stop();
+      w.end();
+    }
+  }
 }
 
 export interface PendingRequest extends RequestRow {

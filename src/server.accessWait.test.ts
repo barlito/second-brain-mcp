@@ -10,6 +10,7 @@ process.env.ACCESS_MAX_PENDING_PER_IP = "1000";
 process.env.ACCESS_MAX_PENDING_TOTAL = "1000";
 process.env.ACCESS_MAX_PENDING_PER_SESSION = "1000";
 process.env.SESSION_BASELINE_SCOPES = "none";
+process.env.PUBLIC_MCP_URL = "https://second-brain.local.barlito.fr/api/mcp";
 
 type Db = typeof import("./db").db;
 type App = Awaited<ReturnType<typeof listen>>;
@@ -50,6 +51,7 @@ const sessionRowId = (sid: string): string => (db.prepare("SELECT id FROM sessio
 const approve = (id: string) => access.approveRequest(id, { code: (db.prepare("SELECT code FROM access_requests WHERE id = ?").get(id) as { code: string }).code, actor: "admin:test" });
 const expireIn = (id: string, ms: number) => db.prepare("UPDATE access_requests SET expires_at = ? WHERE id = ?").run(new Date(Date.now() + ms).toISOString(), id);
 const stillWaiting = async (p: Promise<unknown>): Promise<boolean> => Promise.race([p.then(() => false), sleep(60).then(() => true)]);
+const owner = (session: string, ip = "ip-a") => ({ session, ip });
 const newSession = () => sessions.createSession({ clientName: "Claude Code", clientVersion: "1", ip: "203.0.113.7" }).id;
 const ask = (sessionId: string, project = "p") => access.createAccessRequest(sessionId, { space: "sp", project, access: "read", reason: "r" }).request.id;
 
@@ -153,33 +155,56 @@ test("a client that goes away frees its wait slot", async () => {
   await sleep(150);
   const session = sessionRowId(sid);
   const holders = Array.from({ length: wait.MAX_WAITS_PER_SESSION }, () => new AbortController());
-  const waits = holders.map((h) => wait.waitForDecision(session, id, 50, h.signal));
+  const waits = holders.map((h) => wait.waitForDecision(owner(session), id, 50, h.signal));
   for (const w of waits) assert.equal(await stillWaiting(w), true, "every slot was free again");
   holders.forEach((h) => h.abort());
   await Promise.all(waits);
 });
 
-test("waits are capped per session and globally; over the cap answers at once", async () => {
+test("waits are capped per session, per client and globally; over a cap the wait is skipped", async () => {
   const holders: AbortController[] = [];
-  const hold = (session: string, id: string): Promise<void> => {
+  const hold = (session: string, id: string, ip = "ip-a"): Promise<boolean> => {
     const h = new AbortController();
     holders.push(h);
-    return wait.waitForDecision(session, id, 50, h.signal);
+    return wait.waitForDecision(owner(session, ip), id, 50, h.signal);
   };
   const s = newSession();
   const id = ask(s, "cap-1");
   const held = Array.from({ length: wait.MAX_WAITS_PER_SESSION }, () => hold(s, id));
-  assert.equal(await stillWaiting(hold(s, id)), false, "per-session cap");
-  const others = Array.from({ length: wait.MAX_WAITS_TOTAL - wait.MAX_WAITS_PER_SESSION }, (_, i) => {
+  assert.equal(await hold(s, id), false, "per-session cap");
+  const perIp = Array.from({ length: wait.MAX_WAITS_PER_IP - wait.MAX_WAITS_PER_SESSION }, (_, i) => {
     const o = newSession();
-    return hold(o, ask(o, `cap-o${i}`));
+    return hold(o, ask(o, `cap-i${i}`));
+  });
+  const sameIp = newSession();
+  assert.equal(await hold(sameIp, ask(sameIp, "cap-ip")), false, "per-client cap");
+  const others = Array.from({ length: wait.MAX_WAITS_TOTAL - wait.MAX_WAITS_PER_IP }, (_, i) => {
+    const o = newSession();
+    return hold(o, ask(o, `cap-o${i}`), `ip-${i}`);
   });
   const extra = newSession();
-  assert.equal(await stillWaiting(hold(extra, ask(extra, "cap-x"))), false, "global cap");
+  assert.equal(await hold(extra, ask(extra, "cap-x"), "ip-x"), false, "global cap");
   holders.forEach((h) => h.abort());
-  await Promise.all([...held, ...others]);
-  assert.equal(await stillWaiting(hold(extra, ask(extra, "cap-y"))), true, "slots released");
+  assert.deepEqual(await Promise.all([...held, ...perIp, ...others]), [...held, ...perIp, ...others].map(() => true));
+  assert.equal(await stillWaiting(hold(extra, ask(extra, "cap-y"), "ip-x")), true, "slots released");
   holders.forEach((h) => h.abort());
+});
+
+test("over the cap the status answer says the wait was skipped and when to retry", async () => {
+  const sid = await connect();
+  const { id } = await requestAccess(sid, "w-busy");
+  const session = sessionRowId(sid);
+  const holders = Array.from({ length: wait.MAX_WAITS_PER_SESSION }, () => new AbortController());
+  const waits = holders.map((h) => wait.waitForDecision(owner(session, "127.0.0.1"), id, 50, h.signal));
+  const t = Date.now();
+  const r = await call(sid, "kb_access_status", { request_id: id, wait_seconds: 50 });
+  assert.match(r.text, /^pending/);
+  assert.match(r.text, /server is busy.*wait was skipped.*about 10 s/);
+  assert.ok(Date.now() - t < 800);
+  const plain = await call(sid, "kb_access_status", { request_id: id });
+  assert.doesNotMatch(plain.text, /busy/);
+  holders.forEach((h) => h.abort());
+  await Promise.all(waits);
 });
 
 test("no watcher is left behind by many finished waits", async () => {
@@ -187,7 +212,7 @@ test("no watcher is left behind by many finished waits", async () => {
   for (let i = 0; i < 30; i++) {
     const id = ask(s, `leak-${i}`);
     const ctl = new AbortController();
-    const p = wait.waitForDecision(s, id, 50, ctl.signal);
+    const p = wait.waitForDecision(owner(s), id, 50, ctl.signal);
     if (i % 2) access.denyRequest(id, "admin:test");
     else ctl.abort();
     await p;
@@ -201,7 +226,7 @@ test("no watcher is left behind by many finished waits", async () => {
   }
   const id = ask(s, "leak-last");
   const holders = Array.from({ length: wait.MAX_WAITS_PER_SESSION }, () => new AbortController());
-  const waits = holders.map((h) => wait.waitForDecision(s, id, 50, h.signal));
+  const waits = holders.map((h) => wait.waitForDecision(owner(s), id, 50, h.signal));
   for (const w of waits) assert.equal(await stillWaiting(w), true, "every slot was released");
   holders.forEach((h) => h.abort());
   await Promise.all(waits);
@@ -209,19 +234,12 @@ test("no watcher is left behind by many finished waits", async () => {
 
 // ---- kb_request_access text ----
 
-test("the success text carries the absolute events URL and the new wait rule", async () => {
+test("the success text carries the absolute events URL (sibling of /mcp) and the new wait rule", async () => {
   const sid = await connect();
   const r = await requestAccess(sid, "text-a");
-  assert.ok(r.text.includes(`Events URL: https://second-brain.barlito.fr/access-requests/${r.id}/events`), r.text);
+  assert.ok(r.text.includes(`Events URL: https://second-brain.local.barlito.fr/api/access-requests/${r.id}/events`), r.text);
   assert.match(r.text, /curl -sN <events URL>/);
   assert.match(r.text, /wait_seconds=50/);
-  process.env.PUBLIC_MCP_URL = "https://second-brain.local.barlito.fr/mcp";
-  try {
-    const l = await requestAccess(sid, "text-b");
-    assert.ok(l.text.includes(`Events URL: https://second-brain.local.barlito.fr/access-requests/${l.id}/events`), l.text);
-  } finally {
-    delete process.env.PUBLIC_MCP_URL;
-  }
 });
 
 // ---- GET /access-requests/:id/events ----
@@ -347,4 +365,59 @@ test("events: per-client rate limit and concurrent-stream cap answer 429", async
   } finally {
     await limited.close();
   }
+});
+
+test("events: a request that vanishes is reported as expired, never as null", async () => {
+  const s = newSession();
+  const id = ask(s, "sse-vanish");
+  const st = await openStream(id);
+  await st.read(/data: pending/);
+  db.prepare("DELETE FROM access_requests WHERE id = ?").run(id);
+  access.notifyAccessChange();
+  const body = await st.read(/never/);
+  assert.match(body, /data: expired\n\n/);
+  assert.equal(body.includes("null"), false);
+});
+
+test("events: nothing is written after the stream ended (heartbeats stop)", async () => {
+  const s = newSession();
+  const id = ask(s, "sse-after-end");
+  const st = await openStream(id);
+  await st.read(/data: pending/);
+  access.denyRequest(id, "admin:test");
+  await st.read(/never/);
+  await sleep(150);
+  assert.equal(st.isEnded(), true);
+});
+
+test("shutdown ends every open wait (answering pending) and every stream", async () => {
+  const { createShutdown, Lifecycle } = await import("./server");
+  const sid = await connect();
+  const { id } = await requestAccess(sid, "w-shutdown");
+  const pending = call(sid, "kb_access_status", { request_id: id, wait_seconds: 50 });
+  const s = newSession();
+  const st = await openStream(ask(s, "sse-shutdown"));
+  await st.read(/data: pending/);
+  await sleep(100);
+  const lifecycle = new Lifecycle();
+  let ended = 0;
+  const shutdown = createShutdown({
+    server: { close: (cb?: (err?: Error) => void) => (cb?.(), undefined as never) },
+    lifecycle,
+    closeDb: () => {},
+    abortPushes: () => {},
+    drain: async () => {},
+    endWatchers: () => {
+      ended++;
+      access.closeWatchers();
+    },
+    exit: () => {},
+  });
+  const t = Date.now();
+  await shutdown("test");
+  assert.equal(ended, 1);
+  assert.match((await pending).text, /^pending/);
+  assert.ok(Date.now() - t < 1500);
+  await st.read(/never/);
+  assert.equal(st.isEnded(), true);
 });
