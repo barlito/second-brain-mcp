@@ -12,10 +12,10 @@ export const NOGRANT_IDLE_MS = 60 * 60_000;
 const LAST_SEEN_THROTTLE_MS = 60_000;
 const DAY_MS = 86_400_000;
 
-// SESSION_IDLE_DAYS: sliding idle expiry of a session that holds grants (default 5).
+// SESSION_IDLE_DAYS: sliding idle expiry of a session that holds grants (default 1, i.e. 24 h).
 export function sessionIdleMs(env: NodeJS.ProcessEnv = process.env): number {
   const n = Number(env.SESSION_IDLE_DAYS);
-  return Number.isFinite(n) && n > 0 ? n * DAY_MS : 5 * DAY_MS;
+  return Number.isFinite(n) && n > 0 ? n * DAY_MS : 1 * DAY_MS;
 }
 
 // SESSION_MAX_DAYS: absolute lifetime of a session from its first grant (default 30), on top of the idle expiry.

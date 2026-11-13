@@ -27,7 +27,7 @@ services:
       - VAULT_SYNC_INTERVAL_MS=60000
       # Per-agent working memory stays small (see README "Space limits")
       # Token-less sessions: sliding idle expiry and abuse limits (defaults shown)
-      - SESSION_IDLE_DAYS=5
+      - SESSION_IDLE_DAYS=1
       - ACCESS_MAX_PENDING_TOTAL=20
       - ANON_INIT_PER_MIN=10
       - ANON_ACCESS_REQUESTS_PER_HOUR=10
