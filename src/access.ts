@@ -18,6 +18,32 @@ export type AccessKind = (typeof ACCESS_KINDS)[number];
 const CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
 const CODE_LEN = 6;
 
+// Live change feed for the admin UI (SSE). In-process only: the server runs as a single replica.
+type AccessListener = (rev: number) => void;
+const listeners = new Set<AccessListener>();
+let accessRev = 0;
+
+export const currentAccessRev = (): number => accessRev;
+
+export function onAccessChange(fn: AccessListener): () => void {
+  listeners.add(fn);
+  return () => void listeners.delete(fn);
+}
+
+export function notifyAccessChange(): void {
+  accessRev++;
+  for (const fn of listeners) {
+    try {
+      fn(accessRev);
+    } catch {
+      /* a broken subscriber must not break the caller */
+    }
+  }
+}
+
+// setTimeout caps at 2^31-1 ms; a longer TTL would fire at once.
+const MAX_TIMER_MS = 2 ** 31 - 1;
+
 export class AccessError extends Error {
   constructor(
     readonly status: 400 | 404 | 409 | 422 | 429,
@@ -154,7 +180,7 @@ export function createAccessRequest(sessionId: string, input: NewRequest, allow:
   }
   const { perSession, perIp, total, ttlMs } = accessLimits();
 
-  return db.transaction(() => {
+  const result = db.transaction(() => {
     const nowMs = Date.now();
     const nowIso = new Date(nowMs).toISOString();
     const mine = db
@@ -205,6 +231,12 @@ export function createAccessRequest(sessionId: string, input: NewRequest, allow:
     if (row.elevation) audit(`session:${sessionId}`, "access_elevation_request", row, "ok", `${row.access ?? "scopes"}`);
     return { request: row, created: true };
   })();
+  if (result.created) {
+    notifyAccessChange();
+    // Expiry is time-based (no write): tell the UI once the request has lapsed.
+    setTimeout(notifyAccessChange, Math.min(Date.parse(result.request.expires_at) - Date.now() + 1000, MAX_TIMER_MS)).unref();
+  }
+  return result;
 }
 
 export interface AccessStatus {
@@ -319,6 +351,7 @@ export function approveRequest(ref: string, opts: { scopes?: Scope[]; allowWildc
     return g;
   }).immediate();
   audit(opts.actor, r.elevation ? "access_elevation_approve" : "access_approve", r, "ok", `token ${grant.id} ${grant.name} [${kept.map(formatScope).join(",")}]`);
+  notifyAccessChange();
   return {
     id: r.id,
     space: r.space ?? undefined,
@@ -334,10 +367,12 @@ export function denyRequest(ref: string, actor: string): { id: string; space?: s
   const res = db.prepare("UPDATE access_requests SET status = 'denied', decided_at = ?, decided_by = ? WHERE id = ? AND status = 'pending'").run(new Date().toISOString(), actor, r.id);
   if (res.changes === 0) throw new AccessError(409, "access request already decided");
   audit(actor, r.elevation ? "access_elevation_deny" : "access_deny", r, "ok", "denied");
+  notifyAccessChange();
   return { id: r.id, space: r.space ?? undefined, project: r.project ?? undefined };
 }
 
 // Revoking a session kills all its grants at once (see revokeSession); audited here.
 export function auditSessionRevoke(actor: string, sessionId: string, ok: boolean): void {
   safeAudit({ tokenId: actor, tokenName: actor, action: "access_revoke", result: ok ? "ok" : "error", detail: ok ? `session ${sessionId}` : `session ${sessionId} not found or already revoked` }, actor);
+  if (ok) notifyAccessChange();
 }

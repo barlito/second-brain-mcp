@@ -23,7 +23,8 @@ export interface Ctx {
   // Fresh one-time form nonce (consumed on POST).
   nonce: () => string;
   // Sidebar badges: pending proposals / pending access requests (null: unknown, no badge).
-  counts?: { inbox: number | null; access: number | null };
+  // accessRev: live-feed revision the page was rendered at (see /access/events).
+  counts?: { inbox: number | null; access: number | null; accessRev?: number };
 }
 
 export interface Banner {
@@ -140,7 +141,7 @@ export function layout(ctx: Ctx, active: string, title: string, body: SafeHtml):
 <script src="/static/theme.js"></script>
 <script src="/static/app.js" defer></script>
 </head>
-<body>
+<body data-access-rev="${ctx.counts?.accessRev ?? ""}">
 <div class="app">
 <div class="side">
 <a class="brand" href="/"><span class="brand-mark">${ICON.brand}</span><span class="brand-name"><b>second-brain</b><span>admin</span></span></a>

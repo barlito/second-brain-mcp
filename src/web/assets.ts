@@ -308,4 +308,72 @@ document.addEventListener("click", function (e) {
   render();
   summary();
 })();
+
+// Live access feed (SSE): keeps the Access badge current on every page and refreshes /access when
+// requests change, unless a form there holds unsent input (then a reload banner is shown instead).
+(function () {
+  if (!window.EventSource) return;
+  var body = document.body;
+  var rendered = body.getAttribute("data-access-rev");
+  if (rendered === null || rendered === "") return;
+  var onAccess = location.pathname === "/access";
+  var dirty = false;
+  var leaving = false;
+  var notice = null;
+  var delay = 5000;
+  if (onAccess) {
+    document.addEventListener("input", function (e) {
+      if (e.target && e.target.closest && e.target.closest("form")) dirty = true;
+    });
+    // Our own submit triggers an event too: let its redirect (and flash) win over a reload.
+    document.addEventListener("submit", function (e) {
+      if (!e.defaultPrevented) leaving = true;
+    });
+  }
+  function badge(n) {
+    var link = document.querySelector('.nav a[href="/access"]');
+    if (!link || typeof n !== "number") return;
+    var c = link.querySelector(".count");
+    if (!n) { if (c) c.remove(); return; }
+    if (!c) { c = document.createElement("span"); c.className = "count"; link.appendChild(c); }
+    c.textContent = String(n);
+    c.setAttribute("aria-label", n + " pending");
+  }
+  function showNotice() {
+    if (notice) return;
+    var wrap = document.querySelector(".main .wrap");
+    if (!wrap) return;
+    notice = document.createElement("div");
+    notice.className = "banner warn live";
+    notice.setAttribute("role", "status");
+    var t = document.createElement("strong");
+    t.textContent = "Access requests changed.";
+    var b = document.createElement("button");
+    b.type = "button";
+    b.className = "btn btn-sm";
+    b.textContent = "Reload";
+    b.addEventListener("click", function () { location.reload(); });
+    notice.appendChild(t);
+    notice.appendChild(b);
+    wrap.insertBefore(notice, wrap.firstChild);
+  }
+  function connect() {
+    var es = new EventSource("/access/events");
+    es.addEventListener("access", function (e) {
+      delay = 5000;
+      var d;
+      try { d = JSON.parse(e.data); } catch (err) { return; }
+      badge(d.pending);
+      if (!onAccess || leaving || String(d.rev) === rendered) return;
+      if (dirty) showNotice(); else location.reload();
+    });
+    // A non-200 answer (redeploy, expired SSO session) closes the stream for good: retry with backoff.
+    es.addEventListener("error", function () {
+      if (es.readyState !== EventSource.CLOSED) return;
+      setTimeout(connect, delay);
+      delay = Math.min(delay * 2, 60000);
+    });
+  }
+  connect();
+})();
 `;
