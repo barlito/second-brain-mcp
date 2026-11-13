@@ -130,7 +130,7 @@ test("initialize result carries the public instructions with the access flow and
   const r = await rpc(app.baseUrl, INIT);
   const text: string = r.json.result.instructions;
   assert.match(text, /kb_request_access/);
-  assert.match(text, /kb_access_status/);
+  assert.match(text, /No access for this session/);
   assert.doesNotMatch(text, /sb_[A-Za-z0-9_-]{10}|Bearer|password|secret|barlito|https?:\/\//i);
 });
 
@@ -611,10 +611,15 @@ test("explicit scopes: validated, never pre-confirmed wildcards, approved list r
 });
 
 test("instructions: access is on demand, not up front, and can be requested again later", async () => {
-  const r = await rpc(app.baseUrl, INIT);
-  const text: string = r.json.result.instructions;
-  assert.match(text, /do NOT have to request access up front/);
-  assert.match(text, /request again later in the same session/);
+  const sid = await connect();
+  const r = await rpc(app.baseUrl, { jsonrpc: "2.0", id: 2, method: "tools/list" }, { "mcp-session-id": sid });
+  const tools: { name: string; description: string }[] = r.json.result.tools;
+  const req = tools.find((t) => t.name === "kb_request_access")!.description;
+  assert.match(req, /Do NOT request up front/);
+  assert.match(req, /request again later in the same session/);
+  assert.match(req, /kb_access_status/);
+  assert.match(req, /denial changes nothing/);
+  assert.match(tools.find((t) => t.name === "kb_access_status")!.description, /denial changes nothing/);
 });
 
 // ---- connector keys ----

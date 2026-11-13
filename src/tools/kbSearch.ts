@@ -28,7 +28,7 @@ export const register: RegisterTool = (server, { vaultRoot }) => {
     {
       description:
         "Case-insensitive plain-text substring search over the notes this token can read. " +
-        "Optionally narrow by space/project/section. Returns up to 50 notes with up to 3 matching lines each. " +
+        "Find notes by text (or browse with kb_list). Optionally narrow by space/project/section. Returns up to 50 notes with up to 3 matching lines each. " +
         "Matches the note body (frontmatter excluded); optional `type` keeps only notes whose frontmatter type matches. " +
         "Archived notes are skipped unless include_archived is true or section 'archive' is requested explicitly.",
       inputSchema: {

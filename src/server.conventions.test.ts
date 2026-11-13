@@ -40,6 +40,7 @@ test("server instructions are exposed to clients", async () => {
   const { client, transport } = await connectClient(baseUrl, tokenW);
   try {
     assert.equal(client.getInstructions(), conv.SERVER_INSTRUCTIONS);
+    assert.ok(conv.SERVER_INSTRUCTIONS.length <= 1000, `core too long: ${conv.SERVER_INSTRUCTIONS.length}`);
     assert.match(client.getInstructions()!, /overview\/index/);
     assert.ok(conv.SERVER_INSTRUCTIONS.split("\n").length <= 40);
   } finally {
@@ -119,9 +120,11 @@ test("every tool named in the instructions is registered", async () => {
   try {
     const registered = new Set((await client.listTools()).tools.map((t) => t.name));
     const mentioned = new Set(conv.SERVER_INSTRUCTIONS.match(/\bkb_[a-z_]+/g));
-    assert.ok(mentioned.size >= 6);
+    assert.ok(mentioned.size >= 3);
     for (const name of mentioned) assert.ok(registered.has(name), `${name} not registered`);
-    for (const r of conv.RESERVED_SECTIONS) assert.ok(conv.SERVER_INSTRUCTIONS.includes(`- ${r.section}:`));
+    const tools = (await client.listTools()).tools;
+    const kbWrite = tools.find((t) => t.name === "kb_write")!.description!;
+    for (const r of conv.RESERVED_SECTIONS) assert.ok(kbWrite.includes(`${r.section} (`));
   } finally {
     await transport.close();
   }

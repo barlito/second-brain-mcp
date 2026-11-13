@@ -151,7 +151,7 @@ test("initialize appends the readable meta entry notes as a User context, for se
   const { instructions } = await connect(withBaseline.baseUrl);
   assert.match(instructions, /kb_request_access/);
   assert.match(instructions, /User context: /);
-  const m = /\[note meta\/profil\/overview\/index ([0-9a-f]{12})\]\n# profil\n\nRéponses en français, commits en anglais\.\n\[end ([0-9a-f]{12})\]/.exec(instructions);
+  const m = /\[note meta\/profil ([0-9a-f]{8})\]\n# profil\n\nRéponses en français, commits en anglais\.\n\[end ([0-9a-f]{8})\]/.exec(instructions);
   assert.ok(m, instructions);
   assert.equal(m[1], m[2]);
   // The marker is drawn per response, so a note cannot guess it.
@@ -176,18 +176,19 @@ test("a token without meta read gets no User context", async () => {
   assert.doesNotMatch(r.json.result.instructions, /User context: |français/);
 });
 
-test("the User context stays within its size budget and names the entry notes it left out", async () => {
-  const { USER_CONTEXT_MAX_BYTES } = await import("./userContext");
+test("the total instructions stay within the budget; left-out notes are named, never cut", async () => {
+  const { INSTRUCTIONS_MAX_CHARS } = await import("./instructions");
   const big = "x".repeat(3000);
   for (const p of ["z1", "z2", "z3"]) {
     const r = await call(withBaseline.baseUrl, bearer(), "kb_write", { space: "meta", project: p, section: "overview", note: "index", content: big });
     assert.equal(r.isError, false, r.text);
   }
   const { instructions } = await connect(withBaseline.baseUrl);
-  const ctx = instructions.slice(instructions.indexOf("User context: "));
-  assert.ok(Buffer.byteLength(ctx) < USER_CONTEXT_MAX_BYTES + 1024, `context too large: ${Buffer.byteLength(ctx)}`);
-  assert.match(ctx, /\[note meta\/profil\/overview\/index /);
-  assert.match(ctx, /Not included \(size budget\), read them with kb_read if needed: meta\/z3\/overview\/index\./);
+  assert.ok(instructions.length <= INSTRUCTIONS_MAX_CHARS, `instructions too long: ${instructions.length}`);
+  assert.match(instructions, /\[note meta\/profil /);
+  assert.match(instructions, /Not included \(size\), kb_read overview\/index of: .*meta\/z3/);
+  for (const run of instructions.match(/x{2,}/g) ?? []) assert.equal(run.length, 3000, "a note is never cut");
+  assert.ok((instructions.match(/x{3000}/g) ?? []).length < 3, "not every big note fits");
 });
 
 test("symlinked meta projects or entry notes never reach the User context; a non-meta baseline gives none", async () => {

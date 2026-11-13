@@ -63,29 +63,16 @@ export function entryNoteTemplate(project: string, summary: string, space?: stri
   return `# ${project}\n\n${summary}\n\n## Docs map\n\n${map}\n\nAdd key notes here as they are created (link them under the right section).\n`;
 }
 
-const SECTION_BULLETS = RESERVED_SECTIONS.map((r) => `- ${r.section}: ${r.purpose}`).join("\n");
+// Compact on purpose: clients cut instructions at a size cap (see src/instructions.ts). The per-tool
+// rules (frontmatter, Docs map, access flow, ...) live in the descriptions of the tools they concern.
+export const SERVER_INSTRUCTIONS = `Knowledge base (git vault): <space>/<project>/<section>/<note>, lowercase slugs; you only see what your token allows. Rules for each action are in that tool's description.
+Starting on a project: kb_read <space>/<project>/overview/index; kb_list journal, then kb_read the latest YYYY-MM note with tail.
+Meta (how the user works): if a "User context" section follows, it holds meta's entry notes; otherwise kb_list/kb_read meta if you have access.
+No token: kb_* answer "No access for this session"; call kb_request_access only when you need it (see its description).`;
 
-export const SERVER_INSTRUCTIONS = `Shared knowledge base (git-backed vault). Layout: <space>/<project>/<section>/<note>.md. Spaces, projects, sections and notes are lowercase slugs (a-z, 0-9, hyphen). You only see what your token allows.
-
-Reserved sections in every project (overview/index has a hard ${ENTRY_NOTE_MAX_BYTES / 1024} KB cap):
-${SECTION_BULLETS}
-
-Starting a session on a project:
-1. kb_read <space>/<project>/overview/index.
-2. kb_list the journal section to find the latest month note, then kb_read it with the tail option.
-3. The meta space holds short notes on how the user works (preferences, conventions). If a "User context" section ends these instructions, it already holds meta's entry notes; otherwise, if you have access, kb_list and read the meta space.
-
-Working rules:
-- Find notes with kb_search (or kb_list to browse).
-- kb_history shows a note's git history (who changed what, when), following archive moves.
-- Keep notes short and focused: one topic per note, link to related notes.
-- Notes (except overview, journal, archive) carry a YAML frontmatter: type (decision|convention|note|guide|reference|gotcha; default from the section, fixed in decisions/conventions), sources, author, created, updated. Send content with or without it (without: the existing frontmatter is kept); the server fills author and dates. Recommended: set \`sources\` (list of URLs/refs, max 20) to where the knowledge comes from. kb_search accepts a \`type\` filter.
-- Add journal entries with kb_append (journal/YYYY-MM); it writes one timestamped line.
-- When you add an important note, update the Docs map in overview/index. Keep that note small; move detail elsewhere.
-- Archive instead of delete: kb_archive (needs write on the section (includes read), plus write on the archive section).
-- New project: kb_init_project creates overview/index from a template.
-- If unsure whether something deserves a note, prefer a short journal entry, or use \`kb_propose\` (needs propose or write); the user reviews proposals.
-- Space \`agents\` is per-agent scratch working memory (agents/<agent-name>). Its overview/index is the handover note another agent resumes from: keep it up to date. The server may cap notes and sizes there and auto-archive stale notes; a refused write says what to condense or kb_archive. Durable knowledge belongs in the real project (kb_propose or kb_write), not in agents.
-- Writes (kb_write) are direct and committed to git; re-read before overwriting a note you did not just read.
-
-Access without a token: if you are connected without a token, kb_* tools answer "No access for this session" (some read access, usually the meta space, may be open to every session without a request). You do NOT have to request access up front: work without the knowledge base when you do not need it, and call kb_request_access only when you actually need it (with the space and project you work on, read or write, and a clear reason). Then ask the user to approve it in their admin web and call kb_access_status with the returned request_id until it says approved. You can request again later in the same session to get more (another project, read to write, or an explicit scopes list); each approval adds to what you already have, a denial changes nothing. Only the user grants access, and can revoke it.`;
+// Shared tool-description fragments (kept here so the text exists once).
+export const DOCS_MAP_RULE =
+  "When you add an important note, update the Docs map in overview/index (keep that note small, move detail elsewhere).";
+export const AGENTS_SPACE_RULE =
+  "Space `agents` is per-agent scratch working memory (agents/<agent-name>): its overview/index is the handover note another agent resumes from, keep it up to date. " +
+  "The server may cap notes and sizes there and auto-archive stale notes (a refused write says what to condense or kb_archive); durable knowledge belongs in the real project (kb_propose or kb_write), not in agents.";

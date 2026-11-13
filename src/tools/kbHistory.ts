@@ -14,7 +14,7 @@ export const register: RegisterTool = (server, { vaultRoot }) => {
     "kb_history",
     {
       description:
-        "Show the git history of a note (newest first, follows renames such as archiving): the current path, then `<short sha> <ISO date> <subject>` per line.",
+        "Show the git history of a note: who changed what and when (newest first, follows renames such as archiving): the current path, then `<short sha> <ISO date> <subject>` per line.",
       inputSchema: {
         ...kbArgsShape,
         limit: z.number().int().min(1).max(100).optional().describe(`Max entries (default ${DEFAULT_LIMIT}, max 100)`),
