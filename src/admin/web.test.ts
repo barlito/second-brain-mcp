@@ -140,7 +140,7 @@ test("auth: missing or wrong proxy secret -> 401 even from a trusted peer", asyn
   assert.equal((await get("/", { ...ADMIN, "x-sb-admin-proxy": PROXY_SECRET.slice(1) })).status, 401);
   assert.equal((await get("/", { ...ADMIN, "x-sb-admin-proxy": "" })).status, 401);
   assert.equal((await get("/static/style.css", noSecret)).status, 401);
-  assert.equal((await post("/tokens", { name: "no-secret", preset: "master-ro", allow_wildcard: "1" }, { headers: noSecret, nonce: "a".repeat(32) })).status, 401);
+  assert.equal((await post("/tokens", { name: "no-secret", preset: "master-ro" }, { headers: noSecret, nonce: "a".repeat(32) })).status, 401);
   assert.equal(tokens.listTokens().filter((t) => t.name === "no-secret").length, 0);
 });
 
@@ -218,7 +218,7 @@ test("dashboard renders health, sync, counts and the user", async () => {
 });
 
 test("csrf: missing/bad token, wrong or missing Origin -> 403 and nothing happens", async () => {
-  const f = { name: "csrf-victim", preset: "master-ro", allow_wildcard: "1" };
+  const f = { name: "csrf-victim", preset: "master-ro" };
   assert.equal((await post("/tokens", f, { csrf: null })).status, 403);
   assert.equal((await post("/tokens", f, { csrf: "a".repeat(64) })).status, 403);
   assert.equal((await post("/tokens", f, { csrf: csrf("someone-else") })).status, 403);
@@ -246,7 +246,7 @@ test("csrf: token is per user and per session and rotates every 4 hours", () => 
 });
 
 test("csrf: a new Authelia session invalidates old tokens; no session cookie refuses POSTs", async () => {
-  const f = { name: "sess-victim", preset: "master-ro", allow_wildcard: "1" };
+  const f = { name: "sess-victim", preset: "master-ro" };
   const { cookie: _c, ...noCookie } = ADMIN;
   const other = { ...ADMIN, cookie: "authelia_session=session-two; other=1" };
   assert.equal((await post("/tokens", f, { csrf: csrf("barlito", "session-old") })).status, 403);
@@ -298,26 +298,23 @@ test("tokens: create shows plaintext once, never stored in audit or logs", async
   assert.match(a.detail, /web-tok/);
 });
 
-test("tokens: wildcard scopes and presets need the explicit checkbox", async () => {
-  const before = tokens.listTokens().length;
+test("tokens: wildcard scopes and presets need no checkbox; the warnings are shown after creation", async () => {
+  assert.doesNotMatch((await get("/tokens/new")).body, /allow_wildcard|Allow wildcard/);
   for (const f of [
     { name: "w1", preset: "master" },
     { name: "w2", preset: "master-ro" },
     { name: "w3", scopes: "sp:*:*:read" },
     { name: "w4", scopes: "*:*:*:write" },
   ] as Record<string, string>[]) {
-    const r = await post("/tokens", f);
-    assert.equal(r.status, 422, JSON.stringify(f));
-    assert.match(r.body, /Allow wildcard/);
-    assert.match(r.body, /value="w\d"/, "form keeps the input");
+    const r = await follow(await post("/tokens", f));
+    assert.equal(r.status, 200, JSON.stringify(f));
+    assert.match(r.body, /WARNING/);
   }
-  assert.equal(tokens.listTokens().length, before);
-  const ok = await follow(await post("/tokens", { name: "w-ok", scopes: "sp:*:*:read\nsp:pj:notes:read", allow_wildcard: "1" }));
+  const ok = await follow(await post("/tokens", { name: "w-ok", scopes: "sp:*:*:read\nsp:pj:notes:read" }));
   assert.equal(ok.status, 200);
   assert.match(ok.body, /Dropped redundant scope sp:pj:notes:read/);
   const t = tokens.listTokens().find((x) => x.name === "w-ok")!;
   assert.deepEqual(t.scopes.map((s) => `${s.space}:${s.project}:${s.section}:${s.permission}`), ["sp:*:*:read"]);
-  assert.equal((await post("/tokens", { name: "w-preset", preset: "master-ro", allow_wildcard: "1" })).status, 303);
 });
 
 test("tokens: validation errors are shown inline and escaped", async () => {
@@ -571,7 +568,7 @@ test("tokens: expiry field on create, expiry/expired in the table, dashboard cou
   assert.match(expired.body, new RegExp(`/tokens/${row.id}/revoke`), "revoke still offered");
 });
 
-test("tokens: preset project grants meta read + own project, needs no wildcard checkbox, shows the claude command", async () => {
+test("tokens: preset project grants meta read + own project, no wildcard warning, shows the claude command", async () => {
   const ok = await follow(await post("/tokens", { name: "proj-tok", preset: "project", project: "pro/my-proj", dir: "/home/me/my proj" }));
   assert.equal(ok.status, 200);
   const t = tokens.listTokens().find((x) => x.name === "proj-tok")!;
@@ -608,7 +605,6 @@ test("tokens: preset project validation, extras and the dir field", async () => 
     [{ name: "x", preset: "project", project: "pro/My Proj" }, /two slugs/],
     [{ name: "x", preset: "project", project: "../x" }, /two slugs/],
     [{ name: "x", preset: "project", project: "pro/p", dir: "a\nb" }, /control characters/],
-    [{ name: "x", preset: "project", project: "pro/p", scopes: "sp:*:*:read" }, /Allow wildcard/],
   ];
   for (const [f, re] of bad) {
     const r = await post("/tokens", f);
@@ -617,8 +613,8 @@ test("tokens: preset project validation, extras and the dir field", async () => 
   }
   assert.equal(tokens.listTokens().length, before);
   assert.match((await get("/tokens/new")).body, /<datalist id="projects">/);
-  // Extras combine; confirmed wildcard extras are allowed.
-  const ok = await post("/tokens", { name: "proj-extra", preset: "project", project: "pro/p", scopes: "sp:pj:notes:read\nsp:*:*:read", allow_wildcard: "1" });
+  // Extras combine, wildcard extras included.
+  const ok = await post("/tokens", { name: "proj-extra", preset: "project", project: "pro/p", scopes: "sp:pj:notes:read\nsp:*:*:read" });
   assert.equal(ok.status, 303);
   const scopes = tokens.listTokens().find((x) => x.name === "proj-extra")!.scopes.map((s) => `${s.space}:${s.project}:${s.section}:${s.permission}`);
   assert.ok(scopes.includes("pro:p:*:write") && scopes.includes("sp:*:*:read") && !scopes.includes("sp:pj:notes:read"));
@@ -629,7 +625,7 @@ test("tokens: preset project refuses meta; project field without the project pre
   const meta = await post("/tokens", { name: "x", preset: "project", project: "meta/x" });
   assert.equal(meta.status, 422);
   assert.match(meta.body, /shared space/);
-  for (const f of <Array<Record<string, string>>>[{ name: "x", preset: "master-ro", project: "pro/p", allow_wildcard: "1" }, { name: "x", scopes: "sp:pj:notes:read", project: "pro/p" }]) {
+  for (const f of <Array<Record<string, string>>>[{ name: "x", preset: "master-ro", project: "pro/p" }, { name: "x", scopes: "sp:pj:notes:read", project: "pro/p" }]) {
     const r = await post("/tokens", f);
     assert.equal(r.status, 422, JSON.stringify(f));
     assert.match(r.body, /only valid with the/);
@@ -684,13 +680,17 @@ test("tokens list: ?status= and ?q= filter server-side, with counts", async () =
   assert.match((await get("/tokens?status=all&sessions=1")).body, /Hide them/, "sessions toggle kept");
 });
 
+test("layout shows the running version in the sidebar (dev outside a release image)", async () => {
+  assert.match((await get("/")).body, /<span class="version" title="Running version">dev<\/span>/);
+});
+
 test("GET /tokens/new renders the form (fields, presets, scope lines, projects data block)", async () => {
   mkdirSync(join(vault, "pro", "form-proj", "notes"), { recursive: true });
   const r = await get("/tokens/new");
   assert.equal(r.status, 200);
   assert.match(r.body, /<form method="post" action="\/tokens" id="tokform"/);
   for (const v of ["", "project", "agent", "master-ro", "master"]) assert.match(r.body, new RegExp(`<input type="radio" name="preset" value="${v}"`));
-  for (const n of ["name", "scopes", "project", "dir", "allow_wildcard"]) assert.match(r.body, new RegExp(`name="${n}"`));
+  for (const n of ["name", "scopes", "project", "dir"]) assert.match(r.body, new RegExp(`name="${n}"`));
   assert.match(r.body, /<input type="radio" name="expires_in_days" value="90" checked>/, "90 days preselected");
   assert.match(r.body, /<script type="application\/json" id="sb-projects">\[[^\]]*pro\/form-proj[^\]]*\]<\/script>/);
   assert.match(r.body, /Everything read allows, plus create, edit, append and archive notes/);

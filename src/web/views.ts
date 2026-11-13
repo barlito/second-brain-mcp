@@ -7,6 +7,7 @@ import type { ActiveSession } from "../auth/sessions";
 import { CONNECTOR_HEADER, type ConnectorKeyEntry } from "../auth/connectorKeys";
 import type { Scope, TokenListEntry } from "../auth/tokens";
 import { formatScope } from "../cli/token";
+import { APP_VERSION } from "../version";
 import { html, raw, SafeHtml } from "./html";
 
 // html:false drops raw HTML in notes; markdown-it's default link validation blocks
@@ -147,6 +148,7 @@ export function layout(ctx: Ctx, active: string, title: string, body: SafeHtml):
 <button type="button" data-theme-set="light" aria-pressed="false">Light</button>
 <button type="button" data-theme-set="dark" aria-pressed="false">Dark</button>
 </div>
+<span class="version" title="Running version">${APP_VERSION}</span>
 <div class="who"><span class="avatar" aria-hidden="true">${initials}</span><span class="who-text"><b>${ctx.user}</b><span>Signed in</span></span></div>
 </div>
 </div>

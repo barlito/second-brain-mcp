@@ -84,6 +84,10 @@ RUN mkdir -p /data /vault && chown appuser:appgroup /data /vault
 
 USER appuser
 
+# Release tag shown in the admin UI (release.yaml passes it); last so it does not bust the cache.
+ARG APP_VERSION=dev
+ENV APP_VERSION=$APP_VERSION
+
 EXPOSE 3000
 
 # Probe every 2s during start so Traefik routes to a new task quickly (stop-first rollouts).

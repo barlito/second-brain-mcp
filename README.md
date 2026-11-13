@@ -314,12 +314,12 @@ make inbox-reject id=<id>                # remove the proposal
 
 ## Web admin UI
 
-`https://second-brain-admin.local.barlito.fr` (local), `https://second-brain-admin.barlito.fr` (prod). Served by the same process on `ADMIN_WEB_PORT` (3002), behind Traefik and Authelia.
+`https://second-brain-admin.local.barlito.fr` (local), `https://second-brain-admin.barlito.fr` (prod). Served by the same process on `ADMIN_WEB_PORT` (3002), behind Traefik and Authelia. The sidebar shows the running version (`APP_VERSION`, set to the release tag by `release.yaml`; `dev` otherwise).
 
 - Dashboard: DB/vault/sync status, unpushed commits, last push, conflict branches, active tokens, pending proposals, audit rows in the last 24 h.
-- Tokens: list (expiry, active/expired/revoked); create with a preset or scopes (one per line), the wildcard confirmation and an optional expiry; the plaintext is shown once on a one-time page; revoke. Audit actions `admin_token_create`/`admin_token_revoke`, actor `admin:<user>`.
+- Tokens: list (expiry, active/expired/revoked); create with a preset or scopes (one per line) and an optional expiry (no wildcard checkbox: the summary flags broad access and the wildcard warnings are listed after creation); the plaintext is shown once on a one-time page; revoke. Audit actions `admin_token_create`/`admin_token_revoke`, actor `admin:<user>`.
 - Inbox: list, view a proposal rendered or raw, accept (optionally overwriting) or reject.
-- Access requests: pending requests from token-less sessions (client, IP, requested project/scopes, reason, code, age, the session's current grants, an "elevation" label), approve with editable scopes (wildcard confirmation as for tokens) or deny; active sessions with revoke. Audit actions `access_approve`/`access_deny`/`access_revoke` and `access_elevation_request`/`_approve`/`_deny`. The dashboard shows the pending count.
+- Access requests: pending requests from token-less sessions (client, IP, requested project/scopes, reason, code, age, the session's current grants, an "elevation" label), approve with editable scopes (a `*` scope beyond the default needs the "Allow wildcard" checkbox) or deny; active sessions with revoke. Audit actions `access_approve`/`access_deny`/`access_revoke` and `access_elevation_request`/`_approve`/`_deny`. The dashboard shows the pending count.
 - Vault browser: browse spaces/projects/sections/notes, view, edit (optimistic concurrency: the form carries a hash of the version it loaded; if the note changed meanwhile the save is refused with a conflict instead of overwriting), create, archive, history, and view a note at a past commit. Archived notes are read-only. Writes go through the same write lock as the tools; commits `web: edit|create|archive <space>/<project>/<section>/<note> by <user>`; audit actions `web_note_create`/`web_note_edit`/`web_note_archive`, actor `web:<user>`.
 - Audit viewer: read-only, newest first, 50 rows per page, exact-match filters on token name and action.
 

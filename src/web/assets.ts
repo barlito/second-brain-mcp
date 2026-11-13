@@ -275,13 +275,6 @@ document.addEventListener("click", function (e) {
       can.appendChild(r);
     });
     box.appendChild(can);
-    var wb = document.getElementById("wild-box");
-    var wc = document.getElementById("allow-wildcard");
-    if (wb) wb.hidden = !wild;
-    var submit = document.getElementById("create-btn");
-    if (submit && wc) submit.disabled = wild && !wc.checked;
-    var hint = document.getElementById("wild-hint");
-    if (hint) hint.hidden = !(submit && submit.disabled);
     var pf = document.getElementById("project-field");
     if (pf) pf.hidden = pr !== "project";
     var exp = form.querySelector('input[name="expires_in_days"]:checked');
@@ -303,7 +296,7 @@ document.addEventListener("click", function (e) {
   });
   form.addEventListener("change", function (e) {
     var t = e.target;
-    if (t && (t.name === "preset" || t.name === "expires_in_days" || t.id === "allow-wildcard")) { render(); sync(); }
+    if (t && (t.name === "preset" || t.name === "expires_in_days")) { render(); sync(); }
   });
   ["name", "project"].forEach(function (id) {
     var n = document.getElementById(id);
