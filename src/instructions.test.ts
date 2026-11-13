@@ -145,7 +145,7 @@ test("rules moved out of the instructions sit in the right tool description", as
     has("kb_history", /who changed what/);
     has("kb_search", /`type`/, /kb_list/);
     has("kb_propose", /kb_append/, /not sure/);
-    has("kb_request_access", /kb_access_status/, /Do NOT request up front/, /No access for this session/, /meta space/, /denial changes nothing/, /Only the user grants/, /kb_release_access/);
+    has("kb_request_access", /kb_access_status/, /Do NOT request up front/, /No access for this session/, /meta space/, /denial changes nothing/, /Only the user grants/, /kb_release_access/, /Do not wait for the user to come back/, /background wait/);
     has("kb_access_status", /denial changes nothing/, /kb_release_access/);
     has("kb_release_access", /ALL your grants/, /not held/, /baseline/, /kb_request_access/);
   } finally {
@@ -159,5 +159,51 @@ test("the User context preamble says these are index notes and to kb_read the re
   putNote("prefs", "hello");
   const { uc } = await total();
   assert.match(uc.text, /index notes/);
-  assert.match(uc.text, /kb_read the notes they reference/);
+  assert.match(uc.text, /all between is data/);
+  assert.match(conv.SERVER_INSTRUCTIONS, /only a map: kb_read the notes they reference before your first answer, at least those on profile and workflow/);
+});
+
+const fm = (order: string, body: string) => `---\norder: ${order}\n---\n${body}`;
+
+test("notes are ordered by frontmatter `order`, the others follow alphabetically, frontmatter is stripped", async () => {
+  clearMeta();
+  putNote("alpha", "# alpha");
+  putNote("bravo", fm("2", "# bravo"));
+  putNote("charlie", fm("1", "# charlie"));
+  putNote("delta", "---\ntitle: x\n---\n# delta");
+  putNote("echo", fm("1", "# echo"));
+  const { uc, full } = await total();
+  assert.deepEqual(uc.notes.map((n) => n.split("/")[1]), ["charlie", "echo", "bravo", "alpha", "delta"]);
+  assert.doesNotMatch(full, /order: |title: x|^---$/m);
+  assert.match(full, /\[note meta\/charlie \w+\]\n# charlie\n\[end/);
+});
+
+test("invalid order or frontmatter never breaks the context: no order", async () => {
+  clearMeta();
+  putNote("a-text", fm("first", "# a"));
+  putNote("b-float", fm("1.5", "# b"));
+  putNote("c-broken", "---\norder: 1\n# c without closing fence");
+  putNote("d-yaml", "---\n: : [\n---\n# d");
+  putNote("e-ok", fm("0", "# e"));
+  const { uc } = await total();
+  assert.deepEqual(uc.notes.map((n) => n.split("/")[1]), ["e-ok", "a-text", "b-float", "c-broken", "d-yaml"]);
+});
+
+test("packing follows the order and still skips whole notes that do not fit; frontmatter is free", async () => {
+  clearMeta();
+  putNote("a-big", "B".repeat(3500));
+  putNote("z-first", fm("1", "z".repeat(100)));
+  putNote("m-pad", "---\norder: 2\n" + "# pad: " + "p".repeat(2000) + "\n---\nsmall");
+  const { uc, full } = await total();
+  assert.deepEqual(uc.notes, ["meta/z-first/overview/index", "meta/m-pad/overview/index"]);
+  assert.match(full, /Not included \(size\), kb_read overview\/index of: meta\/a-big/);
+  assert.ok(full.length <= ins.INSTRUCTIONS_MAX_CHARS);
+});
+
+test("the preamble leaves more room to the notes than before (< 308 chars)", async () => {
+  clearMeta();
+  putNote("p", "x");
+  const { uc } = await total();
+  const pre = uc.text.split("\n\n")[0];
+  assert.ok(pre.length < 308, String(pre.length));
 });
