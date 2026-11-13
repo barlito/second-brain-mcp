@@ -79,6 +79,7 @@ pre { background: var(--code-bg); padding: 12px 14px; border-radius: 8px; overfl
 .nav a span.label { flex: 1; }
 .count { min-width: 20px; height: 20px; padding: 0 6px; border-radius: 999px; background: var(--accent); color: var(--accent-text); font-size: 12px; font-weight: 600; display: inline-flex; align-items: center; justify-content: center; }
 .side-foot { margin-top: auto; display: flex; flex-direction: column; gap: 12px; padding: 12px 8px 0; border-top: 1px solid var(--border-soft); }
+.version { font-size: 12px; color: var(--muted); font-family: var(--mono); }
 .who { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .avatar { width: 28px; height: 28px; flex: none; border-radius: 50%; background: var(--seg-bg); color: var(--text-2); font-size: 12px; font-weight: 600; display: inline-flex; align-items: center; justify-content: center; text-transform: uppercase; }
 .who-text { display: flex; flex-direction: column; line-height: 1.2; min-width: 0; }

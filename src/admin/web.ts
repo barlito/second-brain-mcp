@@ -386,7 +386,6 @@ export function createWebAdminApp(opts: WebAdminOptions): Express {
       name: str(body.name),
       scopes: str(body.scopes),
       preset: str(body.preset),
-      allowWildcard: body.allow_wildcard === "1",
       expiresInDays: str(body.expires_in_days).trim(),
       project: str(body.project).trim(),
       dir: str(body.dir).trim(),
@@ -413,9 +412,6 @@ export function createWebAdminApp(opts: WebAdminOptions): Express {
       const validated = validateTokenInput(form.name, scopes);
       const { kept, dropped } = dropRedundantScopes(validated.scopes);
       const warnings = wildcardWarnings(confirmableWildcards(kept, form.preset, validated.name, form.project));
-      if (warnings.length > 0 && !form.allowWildcard) {
-        return fail("Wildcard scopes and presets grant broad access. Tick \"Allow wildcard\" to confirm. No token created.", warnings);
-      }
       let expiresInDays: number | undefined;
       if (form.expiresInDays) {
         if (!/^\d{1,4}$/.test(form.expiresInDays)) return fail("Expires in (days) must be an integer between 1 and 3650.");

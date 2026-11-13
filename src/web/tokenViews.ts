@@ -98,19 +98,18 @@ export interface TokenForm {
   name: string;
   scopes: string;
   preset: string;
-  allowWildcard: boolean;
   expiresInDays: string;
   project: string;
   dir: string;
 }
 
-export const EMPTY_TOKEN_FORM: TokenForm = { name: "", scopes: "", preset: "", allowWildcard: false, expiresInDays: "90", project: "", dir: "" };
+export const EMPTY_TOKEN_FORM: TokenForm = { name: "", scopes: "", preset: "", expiresInDays: "90", project: "", dir: "" };
 
 const TEMPLATES: Array<[string, string, string]> = [
   ["project", "Project", "Read the shared meta space, read & write one project. For a Claude Code instance."],
   ["agent", "Agent", "Read & write its own agents/<name> space. Extra scopes can be added."],
-  ["master-ro", "Read-only everywhere", "Read the whole vault. Wildcard: needs confirmation."],
-  ["master", "Full access", "Read & write the whole vault. Wildcard: needs confirmation."],
+  ["master-ro", "Read-only everywhere", "Read the whole vault, including spaces created later."],
+  ["master", "Full access", "Read & write the whole vault, including spaces created later."],
   ["", "Custom", "No preset: build every scope yourself."],
 ];
 const EXPIRIES: Array<[string, string]> = [["7", "7 days"], ["30", "30 days"], ["90", "90 days · recommended"], ["365", "1 year"], ["", "Never"]];
@@ -158,7 +157,7 @@ ${csrfField(ctx)}
 <div class="stack g4"><span class="permtag p-write">write</span><span class="hint">Everything read allows, plus create, edit, append and archive notes. Each change is a commit.</span></div>
 <div class="stack g4"><span class="permtag p-propose">propose</span><span class="hint">Send changes to your Inbox. Nothing is written until you accept.</span></div>
 </div>
-<ul class="hint"><li><code>*</code> means "all", and only at the end: <code>pro:*:*</code> works, <code>*:atlas-api:notes</code> does not.</li><li>Wildcards also match spaces and projects created later, so they need an explicit confirmation.</li></ul>
+<ul class="hint"><li><code>*</code> means "all", and only at the end: <code>pro:*:*</code> works, <code>*:atlas-api:notes</code> does not.</li><li>Wildcards also match spaces and projects created later.</li></ul>
 </div>
 </details>
 <details class="fold" id="lines-details" open>
@@ -183,12 +182,8 @@ ${csrfField(ctx)}
 </div>
 <aside class="card pad ntf-side" aria-label="Summary">
 <div class="stack g16" id="sum"><h2>Summary</h2><span class="hint">Choose a template and the scopes appear here (needs JavaScript). The server checks everything on submit.</span></div>
-<div class="stack" id="wild-box">
-<label class="check"><input type="checkbox" id="allow-wildcard" name="allow_wildcard" value="1"${f.allowWildcard ? raw(" checked") : ""}><span>Allow wildcard: I understand a <code>*</code> scope or a master preset also covers spaces, projects or sections created later.</span></label>
-</div>
 <div class="stack">
 <button class="btn btn-primary btn-block" type="submit" id="create-btn">Create token</button>
-<span class="hint" id="wild-hint" hidden>Confirm the wildcard access above to continue.</span>
 <a class="btn btn-ghost btn-block" href="/tokens">Cancel</a>
 </div>
 </aside>
