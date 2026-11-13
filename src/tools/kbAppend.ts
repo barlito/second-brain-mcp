@@ -35,7 +35,7 @@ export const register: RegisterTool = (server, { vaultRoot }) => {
     "kb_append",
     {
       description:
-        "Append one timestamped log line to a note (created if missing). The server writes " +
+        "Append one timestamped log line (journal entries: what was done and why) to a note (created if missing). The server writes " +
         "`- <YYYY-MM-DD HH:MM UTC> [<token name>] <entry>`. Entries are short: 1-3 sentences " +
         "(what was done and why); details go to `notes`/`decisions`. Line breaks and control characters are collapsed to spaces. " +
         "Convention: section `journal`, note = current month `YYYY-MM` (e.g. 2026-11). " +

@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { kbArgsShape, MAX_CONTENT_CHARS, RegisterTool, registerKbTool, withAclAndAudit } from "./common";
-import { ENTRY_NOTE_MAX_BYTES, RESERVED_SECTIONS_SUMMARY } from "./conventions";
+import { AGENTS_SPACE_RULE, DOCS_MAP_RULE, ENTRY_NOTE_MAX_BYTES, RESERVED_SECTIONS_SUMMARY } from "./conventions";
 import { rejectReservedSection } from "./reserved";
 import { NOTE_TYPES } from "./frontmatter";
 import { writeNote } from "./writeNote";
@@ -17,7 +17,11 @@ export const register: RegisterTool = (server, { vaultRoot }) => {
         "you may send content with or without it: the server sets author/created/updated, defaults type from the section " +
         "(decisions, conventions, notes) and keeps `sources` (optional list of up to 20 strings, e.g. URLs) and other keys. " +
         "Content without frontmatter keeps the existing note's type, sources and other keys (only the body changes); content with frontmatter replaces them. " +
-        `${RESERVED_SECTIONS_SUMMARY} overview/index is capped at ${ENTRY_NOTE_MAX_BYTES} bytes.`,
+        "Recommended: set `sources` to where the knowledge comes from. " +
+        "Writes are direct git commits: re-read a note you did not just read before overwriting it. " +
+        "Keep notes short and focused (one topic per note, link related notes). " +
+        `${DOCS_MAP_RULE} ${RESERVED_SECTIONS_SUMMARY} overview/index is capped at ${ENTRY_NOTE_MAX_BYTES} bytes. ` +
+        AGENTS_SPACE_RULE,
       inputSchema: {
         ...kbArgsShape,
         content: z

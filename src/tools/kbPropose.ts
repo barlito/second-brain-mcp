@@ -21,7 +21,7 @@ export const register: RegisterTool = (server, { vaultRoot }) => {
     {
       description:
         "Propose a note for the user to review instead of writing it, when you are not sure it deserves to be in the " +
-        "knowledge base. Nothing is written to the target; the proposal waits in a private inbox the user reviews " +
+        "knowledge base (if unsure, a short journal entry via kb_append is the other option). Nothing is written to the target; the proposal waits in a private inbox the user reviews " +
         "(accept or reject). Needs propose or write on the target section. Same content rules as kb_write. " +
         "Returns the proposal id.",
       inputSchema: {

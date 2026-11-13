@@ -17,9 +17,11 @@ export const register: RegisterTool = (server) => {
     "kb_request_access",
     {
       description:
-        "Ask the user for access to a project when you are connected without a token, or for more access when you already have some (another project, read to write, explicit scopes). Give the space and project you work on, " +
-        "read or write, and a clear reason. Nothing is granted until the user approves the request in the admin web; " +
-        "then check kb_access_status. Returns a request id and a short code to show to the user.",
+        "Ask the user for access when you are connected without a token (kb_* then answer \"No access for this session\"; some read access, usually the meta space, may be open to every session without a request), or for more access when you already have some. " +
+        "Do NOT request up front: work without the knowledge base when you do not need it, and call this only when you actually need it. " +
+        "Give the space and project you work on, read or write, and a clear reason. Nothing is granted until the user approves the request in the admin web: ask them to, then poll kb_access_status with the request id until it says approved. " +
+        "You can request again later in the same session to get more (another project, read to write, or an explicit scopes list); each approval adds to what you already have, a denial changes nothing. Only the user grants and can revoke access. " +
+        "Returns a request id and a short code to show to the user.",
       inputSchema: {
         space: spaceArg.optional().describe("Space slug (with project and access; optional when scopes is given)"),
         project: projectArg.optional().describe("Project slug"),
@@ -63,7 +65,7 @@ export const register: RegisterTool = (server) => {
     "kb_access_status",
     {
       description:
-        "Check an access request made with kb_request_access: pending, approved (with the granted scopes), denied or expired.",
+        "Check an access request made with kb_request_access: pending, approved (with the granted scopes), denied or expired. Poll it after the user approves in the admin web; a denial changes nothing, only the user grants or revokes access.",
       inputSchema: { request_id: z.string().max(64, "too long").describe("Request id returned by kb_request_access") },
     },
     async ({ request_id }): Promise<CallToolResult> =>

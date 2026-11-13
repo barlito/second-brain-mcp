@@ -287,9 +287,10 @@ test("auto-archive treats uncommitted edits as fresh", async () => {
 });
 
 test("server instructions mention the agents space", async () => {
-  const { SERVER_INSTRUCTIONS } = await import("./tools/conventions");
-  assert.match(SERVER_INSTRUCTIONS, /agents/);
-  assert.match(SERVER_INSTRUCTIONS, /handover/);
+  const { AGENTS_SPACE_RULE } = await import("./tools/conventions");
+  assert.match(AGENTS_SPACE_RULE, /agents/);
+  assert.match(AGENTS_SPACE_RULE, /handover/);
+  assert.match(AGENTS_SPACE_RULE, /auto-archive/);
 });
 
 test("agent preset: read+write on agents:<name>:*, extras allowed, bounded (no wildcard confirmation)", async () => {

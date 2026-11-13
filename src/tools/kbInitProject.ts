@@ -2,7 +2,10 @@ import { z } from "zod";
 import { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { projectArg, RegisterTool, registerKbTool, spaceArg, withAclAndAudit } from "./common";
 import {
+  AGENTS_SPACE_RULE,
+  DOCS_MAP_RULE,
   ENTRY_NOTE,
+  ENTRY_NOTE_MAX_BYTES,
   entryNoteTemplate,
   OVERVIEW_SECTION,
   RESERVED_SECTIONS_SUMMARY,
@@ -17,7 +20,7 @@ export const register: RegisterTool = (server, { vaultRoot }) => {
     {
       description:
         "Create a project's entry note (<space>/<project>/overview/index) from a template: title, summary and a docs map. " +
-        `Fails if it already exists (edit it with kb_write). Requires write access on the overview section. ${RESERVED_SECTIONS_SUMMARY}`,
+        `Fails if it already exists (edit it with kb_write). Requires write access on the overview section. ${DOCS_MAP_RULE} ${RESERVED_SECTIONS_SUMMARY} overview/index is capped at ${ENTRY_NOTE_MAX_BYTES / 1024} KB. ${AGENTS_SPACE_RULE}`,
       inputSchema: {
         space: spaceArg,
         project: projectArg,

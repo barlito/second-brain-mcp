@@ -22,6 +22,8 @@ import { startSessionPruning } from "./auth/sessions";
 import { sessionBaselineScopes } from "./auth/baseline";
 import { Scope } from "./auth/types";
 import { buildUserContext } from "./userContext";
+import { userContextBudget } from "./instructions";
+import { SERVER_INSTRUCTIONS } from "./tools/conventions";
 import { safeAudit } from "./tools/common";
 import {
   abortPendingPushes,
@@ -384,7 +386,7 @@ export function createApp(opts: AppOptions): Express {
     let userContext = "";
     const ctx = res.locals.tokenContext as TokenContext | undefined;
     if (ctx && isInitializeRequest(req.body)) {
-      const uc = await buildUserContext(vaultRoot, ctx.scopes);
+      const uc = await buildUserContext(vaultRoot, ctx.scopes, userContextBudget(SERVER_INSTRUCTIONS));
       userContext = uc.text;
       if (uc.notes.length) safeAudit({ tokenId: ctx.tokenId, tokenName: ctx.name, action: "user_context", result: "ok", space: "meta", detail: uc.notes.join(" ").slice(0, 200), clientIp: ctx.clientIp }, ctx.name);
       // The client may have gone away during the read: nothing to answer, nothing to clean up yet.
