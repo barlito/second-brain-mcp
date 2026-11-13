@@ -351,3 +351,18 @@ test("connector key CLI: create, show (audited), list, revoke", async () => {
     delete process.env.ADMIN_WEB_SECRET;
   }
 });
+
+test("a grant released by the agent disappears from the active sessions list and the token shows revoked", async () => {
+  const s = newSession("Releasing Agent");
+  const r = ask(s.id, "pro", "gamma", "write");
+  access.approveRequest(r.id, { actor: "admin:test", code: r.code });
+  let page = await get("/access");
+  assert.match(page.body, /Releasing Agent/);
+  assert.match(page.body, /pro:gamma:\*/);
+  const res = sessions.releaseGrants(s.id);
+  assert.ok(res.revokedGrants >= 1);
+  page = await get("/access");
+  assert.doesNotMatch(page.body, /Releasing Agent/);
+  const tok = db.prepare("SELECT revoked_at FROM tokens WHERE session_id = ?").all(s.id) as Array<{ revoked_at: string | null }>;
+  assert.ok(tok.length > 0 && tok.every((t) => t.revoked_at !== null));
+});

@@ -145,8 +145,9 @@ test("rules moved out of the instructions sit in the right tool description", as
     has("kb_history", /who changed what/);
     has("kb_search", /`type`/, /kb_list/);
     has("kb_propose", /kb_append/, /not sure/);
-    has("kb_request_access", /kb_access_status/, /Do NOT request up front/, /No access for this session/, /meta space/, /denial changes nothing/, /Only the user grants/);
-    has("kb_access_status", /denial changes nothing/);
+    has("kb_request_access", /kb_access_status/, /Do NOT request up front/, /No access for this session/, /meta space/, /denial changes nothing/, /Only the user grants/, /kb_release_access/);
+    has("kb_access_status", /denial changes nothing/, /kb_release_access/);
+    has("kb_release_access", /ALL your grants/, /not held/, /baseline/, /kb_request_access/);
   } finally {
     await transport.close();
     await app.close();

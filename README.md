@@ -3,7 +3,7 @@
 An MCP server that exposes a git-backed, Obsidian-compatible knowledge-base vault to Claude and other agents. Access is gated by Bearer tokens with hierarchical space/project/section `read`, `write` and `propose` scopes (stored in SQLite), and every call is audit-logged.
 
 - Transport: stateless Streamable HTTP at `POST /mcp` (TypeScript, Express 5, MCP SDK).
-- Nine tools: `kb_read`, `kb_write`, `kb_append`, `kb_archive`, `kb_list`, `kb_search`, `kb_history`, `kb_init_project`, `kb_propose`.
+- Twelve tools: nine vault tools (`kb_read`, `kb_write`, `kb_append`, `kb_archive`, `kb_list`, `kb_search`, `kb_history`, `kb_init_project`, `kb_propose`) and three access tools for token-less sessions (`kb_request_access`, `kb_access_status`, `kb_release_access`).
 - Admin: a [web admin UI](#web-admin-ui) behind Traefik + Authelia (tokens, access requests, proposals inbox, vault browser, audit log) and `make` targets for tokens, access requests and the inbox.
 - Clients can also connect [without a token](#connecting-without-a-token) and ask the user for access, which the user approves in the admin.
 - Deployed with Docker Swarm (`docker stack deploy`, driven by the Makefile) behind the [traefik-base](https://github.com/barlito/traefik-base) stack (network `traefik_traefik_proxy`).
@@ -260,7 +260,7 @@ claude mcp add --scope user --transport http second-brain https://second-brain.b
 
 Without a valid, non-revoked key every token-less request gets a generic `401` before anything else happens (no session, no rate-limit bucket, only the coalesced auth-failure audit row), and with no key at all token-less access is disabled. The key is checked first and these failures never block anyone: a request with a valid key (or a valid Bearer token) is not refused because others fail from the same, possibly shared, address (e.g. a cloud egress IP). A session is bound to the key that opened it (another key gets `404`); revoking a key ends its sessions and their grants immediately. Requests with an `Authorization` header ignore the connector key entirely.
 
-With the key, a client can initialize, read the server instructions, list the tools and call the access tools `kb_request_access` and `kb_access_status`, plus the read-only tools (`kb_read`, `kb_list`, `kb_search`, `kb_history`) on `meta` (baseline, see below). Every other tool is refused until a grant exists. The user stays the only one managing access and the agent never sees a token.
+With the key, a client can initialize, read the server instructions, list the tools and call the access tools `kb_request_access`, `kb_access_status` and `kb_release_access`, plus the read-only tools (`kb_read`, `kb_list`, `kb_search`, `kb_history`) on `meta` (baseline, see below). Every other tool is refused until a grant exists. The user stays the only one managing access and the agent never sees a token.
 
 Baseline: every session can read `meta` from its first request, with no access request. It holds the user's short notes on how they work, so an agent that does not need any project still has them. `SESSION_BASELINE_SCOPES` overrides it (comma-separated, e.g. `meta:*:*:read,idees:x:*:read`; `none` turns it off). Only `read` scopes are accepted and the space must be named (no `*:*:*:read`); an invalid value stops the server at startup. This is what a leaked connector key exposes, so keep secrets out of those spaces. Calls the baseline alone allows are signed `session-<client>` (also after a grant exists, when no grant covers them). A session with only the baseline follows the grantless expiry (1 h idle, `ANON_SESSION_MAX_HOURS`); the client re-initializes on `404` and keeps reading `meta`.
 
@@ -272,6 +272,7 @@ Flow:
 2. When it actually needs the knowledge base (it need not ask up front), the agent calls `kb_request_access({space, project, access: "read"|"write", reason, scopes?})`. It gets a request id and a short code (6 characters), and is told to ask the user to approve. `scopes` is an optional explicit list (`space:project:section:permission`), validated like token scopes; wildcards are accepted only as a request, the admin must confirm them.
 3. The user opens the admin web (Access requests), identifies the card (client, connector key, IP, scopes, reason, age; the code is deliberately NOT shown there), optionally edits the scopes, types the code from the agent's chat and approves (or denies). CLI: `make access-list` (codes hidden, `codes=1` shows them), `make access-approve id=<id|code> [scope=s:p:sec:perm,...] [allow_wildcard=1]`, `make access-deny id=<id|code>`.
 4. The agent polls `kb_access_status({request_id})` (pending / approved with the scopes / denied / expired / revoked) and then uses the normal tools.
+5. When the user says the work is done (or right after a one-off elevation), the agent gives its access back with `kb_release_access({scopes?})`: no `scopes` releases every grant of the session, otherwise only the listed ones (exact `space:project:section:permission` match, no wildcard expansion; scopes it does not hold are reported as "not held"). A grant left without scope is revoked, exactly like an admin revoke (token shown revoked, gone from "Active sessions"); other sessions and Bearer tokens are never touched, and the effect is immediate. The session stays alive with its baseline read scopes (not grants, cannot be released); without grants it follows the usual no-grant idle expiry. Audited as `kb_release_access`; it can be called without any grant (answers "nothing to release").
 
 Grants:
 
@@ -292,7 +293,7 @@ Limits on the unauthenticated surface (all per IP unless noted, in memory):
 
 Security notes:
 
-- No unauthenticated path reads or writes the vault: until a grant exists, every tool except the two access tools is refused centrally (`No access for this session: call kb_request_access ...`), whatever its own gate says.
+- No unauthenticated path reads or writes the vault: until a grant exists, every tool except the three access tools is refused centrally (`No access for this session: call kb_request_access ...`), whatever its own gate says.
 - The connector key is a shared secret: treat it like a password (it is a header value, not a token for the vault). The server instructions never mention it. If it leaks, revoke it; defense in depth remains (limits above, nothing granted without your approval).
 - The server instructions and the tool list are public (anyone can fetch them without a token): they hold only generic conventions, never project names, URLs or secrets. Keep it that way when editing them.
 - Session ids and token secrets are never logged or audited (audit rows use an internal session row id). Free text from the client (client name, reason) is length-capped and HTML-escaped in the admin.

@@ -249,3 +249,50 @@ export function insertGrant(sessionId: string, name: string, scopes: Scope[]): {
   db.prepare("UPDATE sessions SET first_grant_at = COALESCE(first_grant_at, ?) WHERE id = ?").run(new Date().toISOString(), sessionId);
   return { id, name: v.name, scopes: v.scopes };
 }
+
+export interface ReleaseResult {
+  released: Scope[];
+  notHeld: Scope[];
+  revokedGrants: number;
+}
+
+// Agent-side give-back. Only touches grant tokens (kind='session') of `sessionId`, never other
+// sessions or Bearer tokens. Without `scopes`: revokes every active grant. With `scopes`: deletes the
+// exactly matching scope rows (no wildcard expansion); a grant left with no scope is revoked, like an
+// admin revoke. The session itself stays alive (baseline scopes are not grants).
+export function releaseGrants(sessionId: string, scopes?: Scope[]): ReleaseResult {
+  const key = (s: Scope): string => `${s.space}:${s.project}:${s.section}:${s.permission}`;
+  return db.transaction(() => {
+    const at = new Date().toISOString();
+    const grants = listGrants(sessionId);
+    const revoke = db.prepare("UPDATE tokens SET revoked_at = ? WHERE id = ? AND session_id = ? AND kind = 'session' AND revoked_at IS NULL");
+    if (!scopes) {
+      const held = new Map<string, Scope>();
+      for (const g of grants) {
+        for (const s of g.scopes) held.set(key(s), s);
+        revoke.run(at, g.tokenId, sessionId);
+      }
+      return { released: [...held.values()], notHeld: [], revokedGrants: grants.length };
+    }
+    const del = db.prepare("DELETE FROM scopes WHERE token_id = ? AND space = ? AND project = ? AND section = ? AND permission = ?");
+    const released: Scope[] = [];
+    const notHeld: Scope[] = [];
+    const touched = new Set<string>();
+    for (const want of scopes) {
+      let hit = false;
+      for (const g of grants) {
+        if (del.run(g.tokenId, want.space, want.project, want.section, want.permission).changes > 0) {
+          hit = true;
+          touched.add(g.tokenId);
+        }
+      }
+      (hit ? released : notHeld).push(want);
+    }
+    let revokedGrants = 0;
+    for (const id of touched) {
+      const left = db.prepare("SELECT COUNT(*) AS n FROM scopes WHERE token_id = ?").get(id) as { n: number };
+      if (left.n === 0) revokedGrants += revoke.run(at, id, sessionId).changes;
+    }
+    return { released, notHeld, revokedGrants };
+  })();
+}
