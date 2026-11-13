@@ -106,6 +106,15 @@ function newCode(): string {
   throw new Error("cannot generate a unique access code");
 }
 
+// "space:project:section:permission" strings -> validated, de-duplicated scopes (TokenValidationError on bad input).
+export function parseScopeStrings(list: string[]): Scope[] {
+  return validateTokenInput("x", list.map((x) => {
+    const p = x.split(":");
+    if (p.length !== 4) throw new TokenValidationError(`invalid scope ${JSON.stringify(x.slice(0, 80))}, expected space:project:section:permission`);
+    return { space: p[0], project: p[1], section: p[2], permission: p[3] as Scope["permission"] };
+  })).scopes;
+}
+
 export interface NewRequest {
   space?: string;
   project?: string;
@@ -137,11 +146,7 @@ export function createAccessRequest(sessionId: string, input: NewRequest, allow:
       throw new AccessError(400, "scopes must be 1-10 strings of the form space:project:section:permission.");
     }
     try {
-      explicit = validateTokenInput("x", (input.scopes as string[]).map((x) => {
-        const p = x.split(":");
-        if (p.length !== 4) throw new TokenValidationError(`invalid scope ${JSON.stringify(x.slice(0, 80))}, expected space:project:section:permission`);
-        return { space: p[0], project: p[1], section: p[2], permission: p[3] as Scope["permission"] };
-      })).scopes;
+      explicit = parseScopeStrings(input.scopes as string[]);
     } catch (err) {
       if (err instanceof TokenValidationError) throw new AccessError(400, err.message);
       throw err;

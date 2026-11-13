@@ -426,7 +426,7 @@ test("rate limits per IP: initialize, access requests, and the open-session cap"
   db.prepare("DELETE FROM access_requests").run();
 });
 
-test("sliding expiry: 5 days with a grant, 1 hour without; use refreshes the window", async () => {
+test("sliding expiry: 24 h with a grant, 1 hour without; use refreshes the window", async () => {
   const day = 86_400_000;
   const setSeen = (sid: string, agoMs: number): void => void db.prepare("UPDATE sessions SET last_seen_at = ? WHERE sid_hash = ?").run(new Date(Date.now() - agoMs).toISOString(), sessions.hashSid(sid));
   const list = { jsonrpc: "2.0", id: 2, method: "tools/list" };
@@ -440,17 +440,17 @@ test("sliding expiry: 5 days with a grant, 1 hour without; use refreshes the win
 
   const granted = await connect();
   approve(reqId((await request(granted, "sp", "proj-a", "read")).text), { actor: "t" });
-  setSeen(granted, 4 * day);
-  assert.equal((await rpc(app.baseUrl, list, { "mcp-session-id": granted })).status, 200, "4 days idle is fine with a grant");
+  setSeen(granted, 23 * 3_600_000);
+  assert.equal((await rpc(app.baseUrl, list, { "mcp-session-id": granted })).status, 200, "23 h idle is fine with a grant");
   assert.ok(Date.now() - Date.parse(sidRow(granted)!.last_seen_at) < 5000, "last_seen refreshed (sliding)");
-  setSeen(granted, 5 * day + 1000);
+  setSeen(granted, day + 1000);
   assert.equal((await rpc(app.baseUrl, list, { "mcp-session-id": granted })).status, 404);
   // Expiry revoked the grant too.
   assert.equal((db.prepare("SELECT COUNT(*) c FROM tokens WHERE name = 'session-claude-code-sp-proj-a' AND revoked_at IS NULL AND session_id NOT IN (SELECT id FROM sessions)").get() as { c: number }).c, 0);
 
   assert.equal(sessions.sessionIdleMs({ SESSION_IDLE_DAYS: "2" } as NodeJS.ProcessEnv), 2 * day);
-  assert.equal(sessions.sessionIdleMs({ SESSION_IDLE_DAYS: "nope" } as NodeJS.ProcessEnv), 5 * day);
-  assert.equal(sessions.sessionIdleMs({} as NodeJS.ProcessEnv), 5 * day);
+  assert.equal(sessions.sessionIdleMs({ SESSION_IDLE_DAYS: "nope" } as NodeJS.ProcessEnv), day);
+  assert.equal(sessions.sessionIdleMs({} as NodeJS.ProcessEnv), day);
 });
 
 test("sessions survive a restart (DB-backed); pruning removes expired ones and revokes their grants", async () => {
@@ -871,7 +871,7 @@ test("granted sessions have an absolute lifetime from the first grant (SESSION_M
   const list = { jsonrpc: "2.0", id: 2, method: "tools/list" };
   const live = sessions.listActiveSessions().find((s) => s.id === sidRow(sid)!.id)!;
   const exp = Date.parse(live.expires_at) - Date.now();
-  assert.ok(exp > 4.9 * day && exp <= 5 * day, "idle expiry is the nearer one at first");
+  assert.ok(exp > 0.99 * day && exp <= day, "idle expiry is the nearer one at first");
   assert.equal(live.connector_key, "test-key");
   db.prepare("UPDATE sessions SET first_grant_at = ? WHERE sid_hash = ?").run(new Date(Date.now() - 31 * day).toISOString(), sessions.hashSid(sid));
   assert.equal((await rpc(app.baseUrl, list, { "mcp-session-id": sid })).status, 404, "used daily, still ends 30 days after the first grant");

@@ -12,10 +12,10 @@ export const NOGRANT_IDLE_MS = 60 * 60_000;
 const LAST_SEEN_THROTTLE_MS = 60_000;
 const DAY_MS = 86_400_000;
 
-// SESSION_IDLE_DAYS: sliding idle expiry of a session that holds grants (default 5).
+// SESSION_IDLE_DAYS: sliding idle expiry of a session that holds grants (default 1, i.e. 24 h).
 export function sessionIdleMs(env: NodeJS.ProcessEnv = process.env): number {
   const n = Number(env.SESSION_IDLE_DAYS);
-  return Number.isFinite(n) && n > 0 ? n * DAY_MS : 5 * DAY_MS;
+  return Number.isFinite(n) && n > 0 ? n * DAY_MS : 1 * DAY_MS;
 }
 
 // SESSION_MAX_DAYS: absolute lifetime of a session from its first grant (default 30), on top of the idle expiry.
@@ -248,4 +248,51 @@ export function insertGrant(sessionId: string, name: string, scopes: Scope[]): {
   // Starts the absolute lifetime clock on the first grant only.
   db.prepare("UPDATE sessions SET first_grant_at = COALESCE(first_grant_at, ?) WHERE id = ?").run(new Date().toISOString(), sessionId);
   return { id, name: v.name, scopes: v.scopes };
+}
+
+export interface ReleaseResult {
+  released: Scope[];
+  notHeld: Scope[];
+  revokedGrants: number;
+}
+
+// Agent-side give-back. Only touches grant tokens (kind='session') of `sessionId`, never other
+// sessions or Bearer tokens. Without `scopes`: revokes every active grant. With `scopes`: deletes the
+// exactly matching scope rows (no wildcard expansion); a grant left with no scope is revoked, like an
+// admin revoke. The session itself stays alive (baseline scopes are not grants).
+export function releaseGrants(sessionId: string, scopes?: Scope[]): ReleaseResult {
+  const key = (s: Scope): string => `${s.space}:${s.project}:${s.section}:${s.permission}`;
+  return db.transaction(() => {
+    const at = new Date().toISOString();
+    const grants = listGrants(sessionId);
+    const revoke = db.prepare("UPDATE tokens SET revoked_at = ? WHERE id = ? AND session_id = ? AND kind = 'session' AND revoked_at IS NULL");
+    if (!scopes) {
+      const held = new Map<string, Scope>();
+      for (const g of grants) {
+        for (const s of g.scopes) held.set(key(s), s);
+        revoke.run(at, g.tokenId, sessionId);
+      }
+      return { released: [...held.values()], notHeld: [], revokedGrants: grants.length };
+    }
+    const del = db.prepare("DELETE FROM scopes WHERE token_id = ? AND space = ? AND project = ? AND section = ? AND permission = ?");
+    const released: Scope[] = [];
+    const notHeld: Scope[] = [];
+    const touched = new Set<string>();
+    for (const want of scopes) {
+      let hit = false;
+      for (const g of grants) {
+        if (del.run(g.tokenId, want.space, want.project, want.section, want.permission).changes > 0) {
+          hit = true;
+          touched.add(g.tokenId);
+        }
+      }
+      (hit ? released : notHeld).push(want);
+    }
+    let revokedGrants = 0;
+    for (const id of touched) {
+      const left = db.prepare("SELECT COUNT(*) AS n FROM scopes WHERE token_id = ?").get(id) as { n: number };
+      if (left.n === 0) revokedGrants += revoke.run(at, id, sessionId).changes;
+    }
+    return { released, notHeld, revokedGrants };
+  })();
 }
