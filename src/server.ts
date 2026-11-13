@@ -16,6 +16,7 @@ import { parseAutoArchiveInterval, startAutoArchive } from "./autoArchive";
 import { parseSpaceLimits } from "./limits";
 import { createMcpServer } from "./mcp";
 import { auditAuthFailure, flushAuthAudit } from "./authFailure";
+import { AccessEventsOptions, mountAccessEvents } from "./accessEvents";
 import { anonLimits, AnonLimits, ipKey, RateLimiter } from "./rateLimit";
 import { makeSessionAuth } from "./sessionAuth";
 import { startSessionPruning } from "./auth/sessions";
@@ -211,6 +212,7 @@ export interface AppOptions {
   anonLimits?: AnonLimits;
   // Read scopes of every token-less session (default: meta read, or env SESSION_BASELINE_SCOPES; see auth/baseline.ts).
   sessionBaseline?: Scope[];
+  accessEvents?: AccessEventsOptions;
 }
 
 // Bearer-token auth, mounted before the MCP route. No MCP involved on failure.
@@ -350,6 +352,8 @@ export function createApp(opts: AppOptions): Express {
       },
     });
   });
+
+  mountAccessEvents(app, opts.accessEvents);
 
   // Track in-flight /mcp requests from the very start (before auth and body
   // parsing) and refuse new ones once shutdown began.

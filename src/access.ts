@@ -12,6 +12,7 @@ import { safeAudit } from "./tools/common";
 import { isValidSlug } from "./vault/paths";
 
 export const MAX_REASON_CHARS = 500;
+export const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 export const ACCESS_KINDS = ["read", "write"] as const;
 export type AccessKind = (typeof ACCESS_KINDS)[number];
 // No 0/O/1/I/L: the code is read aloud / compared by eye.
@@ -254,6 +255,40 @@ export function accessStatus(sessionId: string, requestId: string): AccessStatus
     return g ? { status: "approved", scopes: g.scopes } : { status: "revoked" };
   }
   return { status: isLive(r) ? "pending" : "expired" };
+}
+
+export type RequestWord = "pending" | "approved" | "denied" | "expired";
+export const isTerminal = (w: RequestWord): boolean => w !== "pending";
+
+// Outcome of a request by id alone (null = unknown); carries nothing but the status word.
+export function requestWord(requestId: string): RequestWord | null {
+  const r = db.prepare("SELECT * FROM access_requests WHERE id = ?").get(requestId) as unknown as RequestRow | undefined;
+  if (!r) return null;
+  return r.status === "pending" && !isLive(r) ? "expired" : r.status;
+}
+
+// Calls `fn` with the current word at once, then on each change, until a terminal word or the returned stop.
+// Expiry is not a write, so a timer re-checks at the deadline. An unknown id never calls `fn`.
+export function watchRequest(requestId: string, fn: (word: RequestWord) => void): () => void {
+  const row = db.prepare("SELECT expires_at FROM access_requests WHERE id = ?").get(requestId) as { expires_at: string } | undefined;
+  if (!row) return () => {};
+  let last: RequestWord | undefined;
+  const stop = (): void => {
+    off();
+    clearTimeout(timer);
+  };
+  const check = (): void => {
+    const w = requestWord(requestId) as RequestWord;
+    if (w === last) return;
+    last = w;
+    fn(w);
+    if (isTerminal(w)) stop();
+  };
+  const off = onAccessChange(check);
+  const timer = setTimeout(check, Math.min(Math.max(Date.parse(row.expires_at) - Date.now(), 0) + 50, MAX_TIMER_MS));
+  timer.unref();
+  check();
+  return stop;
 }
 
 export interface PendingRequest extends RequestRow {
