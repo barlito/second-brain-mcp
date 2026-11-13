@@ -84,14 +84,16 @@ test("approve, deny and a successful session revoke notify; a failed revoke does
 
 test("a request notifies again shortly after it expires", (t) => {
   t.after(() => mock.timers.reset());
-  mock.timers.enable({ apis: ["setTimeout"] });
+  mock.timers.enable({ apis: ["setTimeout", "Date"], now: Date.now() });
   let n = 0;
   const off = access.onAccessChange(() => n++);
   try {
     const { request } = ask(newSession(), "feed-expiry");
     assert.equal(n, 1);
     const ttl = Date.parse(request.expires_at) - Date.now();
-    mock.timers.tick(ttl + 1000);
+    mock.timers.tick(ttl + 999);
+    assert.equal(n, 1);
+    mock.timers.tick(1);
     assert.equal(n, 2);
   } finally {
     off();
