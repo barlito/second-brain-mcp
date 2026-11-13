@@ -16,6 +16,8 @@ import { parseAutoArchiveInterval, startAutoArchive } from "./autoArchive";
 import { parseSpaceLimits } from "./limits";
 import { createMcpServer } from "./mcp";
 import { auditAuthFailure, flushAuthAudit } from "./authFailure";
+import { closeWatchers } from "./access";
+import { AccessEventsOptions, mountAccessEvents } from "./accessEvents";
 import { anonLimits, AnonLimits, ipKey, RateLimiter } from "./rateLimit";
 import { makeSessionAuth } from "./sessionAuth";
 import { startSessionPruning } from "./auth/sessions";
@@ -211,6 +213,7 @@ export interface AppOptions {
   anonLimits?: AnonLimits;
   // Read scopes of every token-less session (default: meta read, or env SESSION_BASELINE_SCOPES; see auth/baseline.ts).
   sessionBaseline?: Scope[];
+  accessEvents?: AccessEventsOptions;
 }
 
 // Bearer-token auth, mounted before the MCP route. No MCP involved on failure.
@@ -350,6 +353,8 @@ export function createApp(opts: AppOptions): Express {
       },
     });
   });
+
+  mountAccessEvents(app, { ...opts.accessEvents, isShuttingDown: () => lifecycle.shuttingDown });
 
   // Track in-flight /mcp requests from the very start (before auth and body
   // parsing) and refuse new ones once shutdown began.
@@ -520,6 +525,8 @@ export interface ShutdownDeps {
   stopSync?: () => void;
   closeDb: () => void;
   abortPushes?: () => void;
+  // Ends open access waits and streams (default: all of them).
+  endWatchers?: () => void;
   drain?: () => Promise<void>;
   // One overall cap for waiting on in-flight requests AND the write queue.
   drainTimeoutMs?: number;
@@ -547,6 +554,7 @@ export function createShutdown(deps: ShutdownDeps): (signal?: string) => Promise
 
     // Stop accepting: new /mcp requests get 503, the listener closes.
     if (deps.lifecycle) deps.lifecycle.shuttingDown = true;
+    (deps.endWatchers ?? closeWatchers)();
     const closed = new Promise<void>((resolve) => deps.server.close(() => resolve()));
     deps.stopSync?.();
 

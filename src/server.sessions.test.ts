@@ -223,7 +223,7 @@ test("request -> pending -> approve -> read; read grant cannot write; default sc
   const r = await request(sid, "sp", "proj-a", "read");
   assert.equal(r.isError, false, r.text);
   assert.match(r.text, /ask the user to approve/i);
-  assert.match(r.text, /Do not wait for the user to come back by message.*until approved, denied or expired/);
+  assert.match(r.text, /Do not wait for the user to come back by message.*wait_seconds=50.*until approved, denied or expired/);
   assert.match(r.text, /kb_access_status/);
   const id = reqId(r.text);
   const code = reqCode(r.text);

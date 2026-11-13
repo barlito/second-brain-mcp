@@ -32,6 +32,7 @@ import {
   proposalView,
 } from "../web/views";
 import { EMPTY_TOKEN_FORM, newTokenView, TOKEN_STATUSES, tokenCreatedView, TokenForm, tokensView, TokenStatus } from "../web/tokenViews";
+import { startSse } from "../sse";
 import { AccessError, approveRequest, auditSessionRevoke, countPendingRequests, currentAccessRev, denyRequest, listPendingRequests, onAccessChange } from "../access";
 import { listActiveSessions, revokeSession } from "../auth/sessions";
 import { ConnectorKeyError, CONNECTOR_HEADER, createConnectorKey, listConnectorKeys, revealConnectorKey, revokeConnectorKey } from "../auth/connectorKeys";
@@ -521,9 +522,9 @@ export function createWebAdminApp(opts: WebAdminOptions): Express {
   });
   // Live feed (SSE): one event on connect, then one per change; the client compares `rev` with the
   // one its page was rendered at. Same auth as every page (proxy secret + admin group).
-  accessRouter.get("/events", (req, res) => {
-    res.status(200).set({ "Content-Type": "text/event-stream", "X-Accel-Buffering": "no" });
-    res.flushHeaders();
+  accessRouter.get("/events", (_req, res) => {
+    let off = (): void => {};
+    const stream = startSse(res, SSE_HEARTBEAT_MS, () => off());
     const push = (rev: number): void => {
       let pending: number | null = null;
       try {
@@ -531,16 +532,10 @@ export function createWebAdminApp(opts: WebAdminOptions): Express {
       } catch {
         /* DB trouble: no count */
       }
-      res.write(`event: access\ndata: ${JSON.stringify({ rev, pending })}\n\n`);
+      stream.send("access", JSON.stringify({ rev, pending }));
     };
-    res.write("retry: 5000\n\n");
     push(currentAccessRev());
-    const off = onAccessChange(push);
-    const beat = setInterval(() => void res.write(": ping\n\n"), SSE_HEARTBEAT_MS);
-    req.on("close", () => {
-      clearInterval(beat);
-      off();
-    });
+    off = onAccessChange(push);
   });
   accessRouter.get("/", (req, res) => {
     send(res, accessView(ctxOf(res), listPendingRequests(), listActiveSessions(), listConnectorKeys(), takeBanner(req, res)));

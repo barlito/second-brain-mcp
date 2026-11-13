@@ -2,7 +2,10 @@
 // granted anything. They touch the DB only (never the vault).
 import { z } from "zod";
 import { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import { accessLimits, AccessError, accessStatus, createAccessRequest, MAX_REASON_CHARS, parseScopeStrings, requestedOf } from "../access";
+import { accessLimits, AccessError, accessStatus, createAccessRequest, MAX_REASON_CHARS, parseScopeStrings, requestedOf, UUID_RE } from "../access";
+import { MAX_WAIT_SECONDS, waitForDecision } from "../accessWait";
+import { mcpUrl } from "../mcpCommand";
+import { ipKey } from "../rateLimit";
 import { listGrants, releaseGrants } from "../auth/sessions";
 import { TokenValidationError } from "../auth/tokens";
 import { formatScope } from "../cli/token";
@@ -11,9 +14,14 @@ import { Gate, projectArg, RegisterTool, registerKbTool, spaceArg, toolError, to
 const SESSION_ONLY = "This tool is only for sessions connected without a token; your token already defines your access.";
 const sessionGate: Gate = (ctx) => (ctx.session ? undefined : { result: "error", message: SESSION_ONLY, detail: "not a token-less session" });
 const RELEASE_HINT = "Keep it for the whole conversation while the work may still need it (re-asking means the user approves again). Give it back with kb_release_access only when the user says the work is done or ending, or right after a one-off elevation (e.g. one write on meta); unused sessions expire on their own.";
-const WAIT_RULE = "Do not wait for the user to come back by message: start a background wait (~20 s, with a notification if the client supports it), call kb_access_status at each wake-up until approved, denied or expired, then resume the work on your own.";
+const WAIT_RULE =
+  "Do not wait for the user to come back by message. If you can run a background shell command that notifies you when it exits, run `curl -sN <events URL>` in the background (it ends when the user decides), then call kb_access_status once. " +
+  "Otherwise call kb_access_status with wait_seconds=50 again until approved, denied or expired. Then resume the work on your own.";
+// Sibling of the /mcp endpoint, so a path prefix in PUBLIC_MCP_URL is kept.
+const EVENTS_BASE = mcpUrl().replace(/\/mcp\/?$/, "");
+const eventsUrl = (id: string): string => `${EVENTS_BASE}/access-requests/${id}/events`;
+const BUSY_NOTE = "\nThe server is busy, so the wait was skipped: call kb_access_status again in about 10 s.";
 const INVALID_REQUEST_ID = "Invalid request_id.";
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 export const register: RegisterTool = (server) => {
   registerKbTool(
@@ -23,7 +31,7 @@ export const register: RegisterTool = (server) => {
       description:
         "Ask the user for access when you are connected without a token (kb_* then answer \"No access for this session\"; some read access, usually the meta space, may be open to every session without a request), or for more access when you already have some. " +
         "Do NOT request up front: work without the knowledge base when you do not need it, and call this only when you actually need it. " +
-        "Give the space and project you work on, read or write, and a clear reason. Nothing is granted until the user approves the request in the admin web: ask them to, then poll kb_access_status with the request id until it says approved. " +
+        "Give the space and project you work on, read or write, and a clear reason. Nothing is granted until the user approves the request in the admin web: ask them to. " +
         WAIT_RULE + " " +
         "You can request again later in the same session to get more (another project, read to write, or an explicit scopes list); each approval adds to what you already have, a denial changes nothing. Only the user grants and can revoke access. " +
         "Returns a request id and a short code to show to the user. " +
@@ -54,7 +62,7 @@ export const register: RegisterTool = (server) => {
             toolResult: toolText(
               `Access requested${created ? "" : " (already pending)"}: ${requestedOf(request).map(formatScope).join(", ")}.\n` +
                 `Request id: ${request.id}\nCode: ${request.code}\n` +
-                `Ask the user to approve it in the admin web (Access requests page). Show them this code: they type it in the admin to approve. Then call kb_access_status with this request_id. ${WAIT_RULE} ` +
+                `Ask the user to approve it in the admin web (Access requests page). Show them this code: they type it in the admin to approve.\nEvents URL: ${eventsUrl(request.id)}\n${WAIT_RULE} ` +
                 `The request expires in ${mins} minutes.`,
             ),
             audit: { detail: `${created ? "request" : "repeat"} ${access ?? "scopes"} ${request.id}` },
@@ -71,14 +79,22 @@ export const register: RegisterTool = (server) => {
     "kb_access_status",
     {
       description:
-        "Check an access request made with kb_request_access: pending, approved (with the granted scopes), denied or expired. Poll it after the user approves in the admin web; a denial changes nothing, only the user grants or revokes access. " +
+        "Check an access request made with kb_request_access: pending, approved (with the granted scopes), denied or expired. With wait_seconds (0-50, default 0) a pending request is held until the user decides or the time is up; a denial changes nothing, only the user grants or revokes access. " +
         RELEASE_HINT,
-      inputSchema: { request_id: z.string().max(64, "too long").describe("Request id returned by kb_request_access") },
+      inputSchema: {
+        request_id: z.string().max(64, "too long").describe("Request id returned by kb_request_access"),
+        wait_seconds: z.number().int().min(0).max(MAX_WAIT_SECONDS).optional().describe(`Hold a pending request up to this many seconds (0-${MAX_WAIT_SECONDS}, default 0)`),
+      },
     },
-    async ({ request_id }): Promise<CallToolResult> =>
+    async ({ request_id, wait_seconds }, signal): Promise<CallToolResult> =>
       auditedCall("kb_access_status", {}, sessionGate, async (ctx) => {
         if (!UUID_RE.test(request_id)) return { toolResult: toolError(INVALID_REQUEST_ID), audit: { detail: "invalid request id" } };
-        const st = accessStatus(ctx.session!.id, request_id);
+        let waited = true;
+        let st = accessStatus(ctx.session!.id, request_id);
+        if (st?.status === "pending" && wait_seconds) {
+          waited = await waitForDecision({ session: ctx.session!.id, ip: ipKey(ctx.clientIp) }, request_id, wait_seconds, signal);
+          st = accessStatus(ctx.session!.id, request_id);
+        }
         if (!st) return { toolResult: toolError("Unknown request_id for this session."), audit: { detail: "unknown request" } };
         const lines: Record<string, string> = {
           pending: "pending: the user has not decided yet. Ask them to approve it in the admin web, then check again.",
@@ -88,7 +104,7 @@ export const register: RegisterTool = (server) => {
           revoked: "revoked: this access was withdrawn by the user.",
         };
         const scopes = st.scopes?.length ? `\nScopes: ${st.scopes.map(formatScope).join(", ")}` : "";
-        return { toolResult: toolText(lines[st.status] + scopes + (st.status === "approved" ? `\n${RELEASE_HINT}` : "")), audit: { detail: `${request_id} ${st.status}` } };
+        return { toolResult: toolText(lines[st.status] + scopes + (st.status === "approved" ? `\n${RELEASE_HINT}` : "") + (waited ? "" : BUSY_NOTE)), audit: { detail: `${request_id} ${st.status}` } };
       }),
   );
 

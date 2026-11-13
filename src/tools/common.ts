@@ -170,12 +170,12 @@ export function registerKbTool<S extends z.ZodRawShape>(
   server: McpServer,
   name: string,
   config: ToolConfig<S>,
-  handler: (args: z.output<z.ZodObject<S>>) => Promise<CallToolResult>,
+  handler: (args: z.output<z.ZodObject<S>>, signal: AbortSignal) => Promise<CallToolResult>,
 ): void {
   const shape = Object.fromEntries(Object.entries(config.inputSchema).map(([k, s]) => [k, lenient(s as z.ZodType)]));
-  const cb = async (args: Record<string, unknown>): Promise<CallToolResult> => {
+  const cb = async (args: Record<string, unknown>, extra: { signal: AbortSignal }): Promise<CallToolResult> => {
     const invalid = invalidArgMessage(args, config.inputSchema);
-    if (invalid === undefined) return handler(args as z.output<z.ZodObject<S>>);
+    if (invalid === undefined) return handler(args as z.output<z.ZodObject<S>>, extra.signal);
     const str = (k: string): string | undefined => (typeof args[k] === "string" ? (args[k] as string) : undefined);
     const target = { space: str("space"), project: str("project"), section: str("section"), note: str("note") };
     return auditedCall(
