@@ -11,6 +11,7 @@ import { Gate, projectArg, RegisterTool, registerKbTool, spaceArg, toolError, to
 const SESSION_ONLY = "This tool is only for sessions connected without a token; your token already defines your access.";
 const sessionGate: Gate = (ctx) => (ctx.session ? undefined : { result: "error", message: SESSION_ONLY, detail: "not a token-less session" });
 const RELEASE_HINT = "Keep it for the whole conversation while the work may still need it (re-asking means the user approves again). Give it back with kb_release_access only when the user says the work is done or ending, or right after a one-off elevation (e.g. one write on meta); unused sessions expire on their own.";
+const WAIT_RULE = "Do not wait for the user to come back by message: start a background wait (~20 s, with a notification if the client supports it), call kb_access_status at each wake-up until approved, denied or expired, then resume the work on your own.";
 const INVALID_REQUEST_ID = "Invalid request_id.";
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
@@ -23,6 +24,7 @@ export const register: RegisterTool = (server) => {
         "Ask the user for access when you are connected without a token (kb_* then answer \"No access for this session\"; some read access, usually the meta space, may be open to every session without a request), or for more access when you already have some. " +
         "Do NOT request up front: work without the knowledge base when you do not need it, and call this only when you actually need it. " +
         "Give the space and project you work on, read or write, and a clear reason. Nothing is granted until the user approves the request in the admin web: ask them to, then poll kb_access_status with the request id until it says approved. " +
+        WAIT_RULE + " " +
         "You can request again later in the same session to get more (another project, read to write, or an explicit scopes list); each approval adds to what you already have, a denial changes nothing. Only the user grants and can revoke access. " +
         "Returns a request id and a short code to show to the user. " +
         RELEASE_HINT,
@@ -52,7 +54,7 @@ export const register: RegisterTool = (server) => {
             toolResult: toolText(
               `Access requested${created ? "" : " (already pending)"}: ${requestedOf(request).map(formatScope).join(", ")}.\n` +
                 `Request id: ${request.id}\nCode: ${request.code}\n` +
-                `Ask the user to approve it in the admin web (Access requests page). Show them this code: they type it in the admin to approve. Then call kb_access_status with this request_id. ` +
+                `Ask the user to approve it in the admin web (Access requests page). Show them this code: they type it in the admin to approve. Then call kb_access_status with this request_id. ${WAIT_RULE} ` +
                 `The request expires in ${mins} minutes.`,
             ),
             audit: { detail: `${created ? "request" : "repeat"} ${access ?? "scopes"} ${request.id}` },
