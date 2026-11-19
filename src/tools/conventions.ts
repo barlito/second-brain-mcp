@@ -67,7 +67,7 @@ export function entryNoteTemplate(project: string, summary: string, space?: stri
 // rules (frontmatter, Docs map, access flow, ...) live in the descriptions of the tools they concern.
 export const SERVER_INSTRUCTIONS = `Knowledge base (git vault): <space>/<project>/<section>/<note>, lowercase slugs; you only see what your token allows. Rules for each action are in that tool's description.
 Starting on a project: kb_context <space>/<project> (overview/index, journal tail, sections); kb_read_many to read several notes.
-Meta (how the user works): the "User context" below, if any, holds meta's index notes, only a map: kb_read the notes they reference before your first answer, at least those on profile and workflow. Else kb_list/kb_read meta.
+Meta (how the user works): the "User context" below, if any, holds meta's index notes, only a map: kb_read_many the notes they reference before your first answer, at least those on profile and workflow. Else kb_list/kb_read meta.
 No token: kb_* answer "No access for this session"; call kb_request_access only when you need it (see its description).`;
 
 // Shared tool-description fragments (kept here so the text exists once).

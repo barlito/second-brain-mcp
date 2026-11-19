@@ -121,20 +121,20 @@ All note-addressed tools take `space`, `project`, `section`, `note` (strings, ma
 - Args: `space`, `project`, `section`, `note`; optional `tail` (integer 1-500); optional `rev` (7-40 lowercase hex, a sha from `kb_history`).
 - Permission: `read` on the section.
 - Returns the note as text. With `tail`, only the last N lines (a trailing newline is not counted as a line). Use it for recent journal history. With `rev`, the note as it was at that commit (`tail` works too). The commit must be in the main history (an ancestor of HEAD; parked conflict branches and unmerged commits give `Unknown revision.`), and renames are followed like `kb_history`: the note's path at that commit must also be readable by the token (e.g. reading an archived note at a pre-archive sha needs `read` on the original section). A second text block `version: <sha>` is the version of the bytes returned (the git blob SHA-1, as `git hash-object`; for `rev`, that revision's blob), also for `tail` reads; pass it as `base_version` to `kb_write`/`kb_edit`.
-- Errors: `Note not found.`; `Unknown revision.`; `Note not found at this revision.`; `Note is too large to read (<n> bytes, max 2097152).` (only for files that did not come through `kb_write`, e.g. pushed by a human).
+- Errors: `Note not found.` (also the per-item error of `kb_read_many`); `Unknown revision.`; `Note not found at this revision.`; `Note is too large to read (<n> bytes, max 2097152).` (only for files that did not come through `kb_write`, e.g. pushed by a human).
 
 ### `kb_context`
 
 - Args: `space`, `project`; optional `journal_lines` (integer 1-200, default 30).
 - Permission: `read` on each part's section, checked separately; unreadable parts are omitted. If nothing is readable: `Permission denied.` (existence is not revealed).
 - Returns blocks in one text: `## <space>/<project>/overview/index` with the note (or `(missing: create it with kb_init_project)`); `## <space>/<project>/journal/<YYYY-MM> (last N lines)` for the latest month note (or `(no journal yet)`); and `Sections: decisions (11), conventions (4), ...` with note counts of the readable sections, `archive` excluded.
-- Audit: `kb_context` rows for the index note, the journal listing, the journal note read, and the sections listing.
+- Audit: one `kb_context` row for the call (project level, `denied` only when no part at all is readable) plus one per note read: the index and the latest journal note (`latest=<YYYY-MM>` in its detail). Unreadable parts are skipped silently, without a `denied` row. Only notes named `YYYY-MM` (month 01-12) count as journal months.
 
 ### `kb_read_many`
 
 - Args: `notes` (1-20 objects `{space, project, section, note}`), optional `tail` (integer 1-500, applied to each note).
 - Permission: `read` on each note's section, checked per item (the `archive` section needs `read` on `archive`, as in `kb_read`).
-- Partial success: one `## <space>/<project>/<section>/<note>` block per item, followed by the content or that item's error (`Permission denied.`, `Note not found.`, `Invalid space/project/section/note name.`, too large), same messages as `kb_read`. Total output is capped at 1 MiB; later items show `(skipped: output limit reached, read it separately)`.
+- Partial success: one `## <space>/<project>/<section>/<note>` block per item, followed by the content or that item's error (`Permission denied.`, `Note not found.`, `Invalid space/project/section/note name.`, too large), same messages as `kb_read` (in a token-less session a denied item also carries the `kb_request_access` hint). If every item is refused before any read (no access, invalid names), the call returns that single error instead of one block per item. Headers echo the names with anything but letters, digits and hyphens replaced by `?`. Total output is capped at 1 MiB: a note that no longer fits is skipped from its size (`(skipped: output limit reached, read it separately)`, not read) and later, smaller items are still returned.
 - Audit: one `kb_read_many` row per note (allowed or denied), so per-path audit stays accurate.
 
 ### `kb_write`

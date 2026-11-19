@@ -14,6 +14,7 @@ type App = Awaited<ReturnType<typeof listen>>;
 let db: typeof import("./db").db;
 let app: App;
 let baselineApp: App;
+let fencedApp: App;
 let KEY: string;
 let full: string;
 let noJournal: string;
@@ -54,6 +55,14 @@ before(async () => {
       sessionBaseline: [sc("meta", "*", "*")],
     }),
   );
+  fencedApp = await listen(
+    createApp({
+      vaultRoot: vault,
+      authLimiter: new AuthFailureLimiter(100_000),
+      anonLimits: { ...anonLimits(), initPerMin: 1000, requestsPerHour: 1000, maxSessions: 1000, sessionsPerIp: 1000, ipCallsPerMin: 100000, sessionCallsPerMin: 100000 },
+      sessionBaseline: [],
+    }),
+  );
   put("pro/p/overview/index.md", "# p\n\nthe index\n");
   put("pro/p/decisions/d1.md", "d1");
   put("pro/p/decisions/d2.md", "d2");
@@ -70,6 +79,7 @@ before(async () => {
 after(async () => {
   await app.close();
   await baselineApp.close();
+  await fencedApp.close();
   cleanup();
 });
 
@@ -124,13 +134,29 @@ test("kb_context: nothing readable is denied without revealing existence", async
   assert.match(bad.text, /Invalid space\/project\/section\/note name/);
 });
 
-test("kb_context audits the index and the journal note read", async () => {
+test("kb_context audit rows: exact counts, no denied row for unreadable parts", async () => {
+  let b = audits("kb_context").length;
   await ctx(full);
-  const rows = audits("kb_context");
-  assert.ok(rows.some((r) => r.section === "overview" && r.note === "index" && r.result === "ok"));
-  assert.ok(rows.some((r) => r.section === "journal" && r.note === "2026-11" && r.result === "ok"));
+  let rows = audits("kb_context").slice(b);
+  assert.equal(rows.length, 3);
+  assert.deepEqual(rows.map((r) => `${r.section}/${r.note}/${r.result}`).sort(), ["journal/2026-11/ok", "null/null/ok", "overview/index/ok"]);
+  b = audits("kb_context").length;
+  await ctx(noJournal);
+  rows = audits("kb_context").slice(b);
+  assert.equal(rows.length, 2);
+  assert.ok(rows.every((r) => r.result === "ok"));
+  b = audits("kb_context").length;
   await ctx(nothing);
-  assert.ok(audits("kb_context").some((r) => r.section === "overview" && r.note === "index" && r.result === "denied"));
+  rows = audits("kb_context").slice(b);
+  assert.deepEqual(rows.map((r) => r.result), ["denied"]);
+  assert.equal(rows[0].project, "p");
+});
+
+test("kb_context: journal with only non-month names (or month 13) has no journal yet", async () => {
+  put("pro/jx/journal/readme.md", "x");
+  put("pro/jx/journal/2026-13.md", "x");
+  const r = await ctx(full, "pro", "jx");
+  assert.match(r.text, /## pro\/jx\/journal\n\(no journal yet\)/);
 });
 
 test("kb_read_many: mixed ok, denied, missing, invalid; one audit row per item", async () => {
@@ -163,6 +189,25 @@ test("kb_read_many: archive needs read on archive", async () => {
   assert.match((await many(archiveOnly, [n("archive", "old")])).text, /archived/);
 });
 
+test("kb_read_many: an oversized item is skipped without reading, later items still returned", async () => {
+  put("pro/p/notes/huge.md", "h".repeat(1024 * 1024 + 10));
+  const b = audits("kb_read_many").length;
+  const r = await many(full, [n("notes", "huge"), n("notes", "n1")]);
+  assert.match(r.text, /^## pro\/p\/notes\/huge\n\(skipped: output limit reached/);
+  assert.match(r.text, /## pro\/p\/notes\/n1\nline1/);
+  const rows = audits("kb_read_many").slice(b);
+  assert.deepEqual(rows.map((x) => x.result), ["error", "ok"]);
+});
+
+test("kb_read_many: all items refused gives one error, headers are sanitized", async () => {
+  const r = await many(nothing, [n("notes", "a"), n("notes", "b")]);
+  assert.equal(r.isError, true);
+  assert.equal(r.text, "Permission denied.");
+  const bad = await many(full, [{ space: "pro", project: "p", section: "notes", note: "a\n## evil" }, n("notes", "n1")]);
+  assert.doesNotMatch(bad.text, /\n## evil/);
+  assert.match(bad.text, /## pro\/p\/notes\/a\?\?\?\?evil\nInvalid space/);
+});
+
 test("kb_read_many: total output is capped", async () => {
   const big = "x".repeat(400 * 1024);
   for (const i of [1, 2, 3, 4]) put(`pro/p/notes/big${i}.md`, big);
@@ -173,8 +218,8 @@ test("kb_read_many: total output is capped", async () => {
   assert.match(r.text, /## pro\/p\/notes\/big4\n\(skipped: output limit reached/);
 });
 
-test("baseline session reads meta with kb_context / kb_read_many but nothing else", async () => {
-  const init = await fetch(`${baselineApp.baseUrl}/mcp`, {
+async function anonSession(a: App) {
+  const init = await fetch(`${a.baseUrl}/mcp`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream", "x-api-key": KEY },
     body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "t", version: "1" } } }),
@@ -182,7 +227,7 @@ test("baseline session reads meta with kb_context / kb_read_many but nothing els
   const sid = init.headers.get("mcp-session-id") as string;
   let id = 2;
   const call = async (name: string, args: unknown) => {
-    const res = await fetch(`${baselineApp.baseUrl}/mcp`, {
+    const res = await fetch(`${a.baseUrl}/mcp`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream", "x-api-key": KEY, "mcp-session-id": sid },
       body: JSON.stringify({ jsonrpc: "2.0", id: id++, method: "tools/call", params: { name, arguments: args } }),
@@ -191,8 +236,22 @@ test("baseline session reads meta with kb_context / kb_read_many but nothing els
     const data = /^data: (.*)$/m.exec(body);
     return JSON.parse(data ? data[1] : body).result.content[0].text as string;
   };
+  return call;
+}
+
+test("baseline session reads meta with kb_context / kb_read_many but nothing else", async () => {
+  const call = await anonSession(baselineApp);
   assert.match(await call("kb_context", { space: "meta", project: "m" }), /# meta index/);
   assert.match(await call("kb_read_many", { notes: [n("overview", "index", "m", "meta")] }), /# meta index/);
   assert.match(await call("kb_context", { space: "pro", project: "p" }), /Permission denied\./);
   assert.match(await call("kb_read_many", { notes: [n("overview", "index")] }), /Permission denied\./);
+});
+
+test("a session without grant or baseline is fenced on kb_context and kb_read_many", async () => {
+  const call = await anonSession(fencedApp);
+  const b = audits("kb_context").length;
+  assert.match(await call("kb_context", { space: "meta", project: "m" }), /^No access for this session/);
+  assert.match(await call("kb_read_many", { notes: [n("overview", "index", "m", "meta")] }), /^No access for this session/);
+  assert.equal(audits("kb_context").length - b, 1);
+  assert.doesNotMatch(await call("kb_context", { space: "meta", project: "m" }), /meta index/);
 });
