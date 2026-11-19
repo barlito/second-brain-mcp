@@ -137,6 +137,27 @@ test("with a baseline, a session without any grant reads meta but nothing else, 
   assert.equal(req.isError, false, req.text);
 });
 
+test("kb_backlinks and kb_lint work on meta under the baseline and are refused elsewhere", async () => {
+  const base = withBaseline.baseUrl;
+  const h = anon(base, (await connect(base)).sid);
+  const meta = { space: "meta", project: "profil" };
+  const bl = await call(base, h, "kb_backlinks", { ...meta, section: "notes", note: "outils" });
+  assert.equal(bl.isError, false, bl.text);
+  assert.equal(bl.text, "No backlinks.");
+  const lint = await call(base, h, "kb_lint", meta);
+  assert.equal(lint.isError, false, lint.text);
+  assert.doesNotMatch(lint.text, /proj-a/);
+  const other = { space: "sp", project: "proj-a" };
+  for (const [name, args] of [
+    ["kb_backlinks", { ...other, section: "notes", note: "n1" }],
+    ["kb_lint", other],
+  ] as const) {
+    const r = await call(base, h, name, args);
+    assert.equal(r.isError, true, name);
+    assert.match(r.text, /Permission denied\. For another project, call kb_request_access\./, name);
+  }
+});
+
 test("with the baseline turned off, a session without grant gets 'No access' for meta", async () => {
   const base = without.baseUrl;
   const { sid, instructions } = await connect(base);

@@ -33,7 +33,7 @@ function fencedRanges(text: string): Range[] {
   let fence: { ch: string; len: number; from: number } | undefined;
   let pos = 0;
   for (const raw of text.split("\n")) {
-    const m = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(raw.replace(/\r$/, ""));
+    const m = /^[ \t]*(?:>[ \t]*)*(`{3,}|~{3,})(.*)$/.exec(raw.replace(/\r$/, ""));
     if (!fence) {
       if (m && !(m[1][0] === "`" && m[2].includes("`"))) fence = { ch: m[1][0], len: m[1].length, from: pos };
     } else if (m && m[1][0] === fence.ch && m[1].length >= fence.len && m[2].trim() === "") {
@@ -58,12 +58,38 @@ function blank(text: string, ranges: Range[]): string {
   return out + text.slice(at);
 }
 
+// Inline code spans per line: a backtick run closes at the next run of the same length (linear time).
+function inlineCodeRanges(text: string): Range[] {
+  const out: Range[] = [];
+  let pos = 0;
+  for (const line of text.split("\n")) {
+    const runs = [...line.matchAll(/`+/g)].map((m) => ({ at: pos + m.index, len: m[0].length }));
+    const next: Array<number | undefined> = new Array(runs.length);
+    const seen = new Map<number, number>();
+    for (let i = runs.length - 1; i >= 0; i--) {
+      next[i] = seen.get(runs[i].len);
+      seen.set(runs[i].len, i);
+    }
+    for (let i = 0; i < runs.length; ) {
+      const j = next[i];
+      if (j === undefined) i++;
+      else {
+        out.push([runs[i].at, runs[j].at + runs[j].len]);
+        i = j + 1;
+      }
+    }
+    pos += line.length + 1;
+  }
+  return out;
+}
+
+// Indented code blocks are not masked.
 function maskIgnored(text: string): string {
   const fm = frontmatterRange(text);
-  const masked = blank(text, [...(fm ? [fm] : []), ...fencedRanges(text)]);
-  const inline: Range[] = [];
-  for (const m of masked.matchAll(/(?<!`)(`+)(?!`)[^\n]*?(?<!`)\1(?!`)/g)) inline.push([m.index, m.index + m[0].length]);
-  return blank(masked, inline);
+  // Frontmatter first: a fence inside a YAML block scalar must not pair with body fences.
+  const noFm = fm ? blank(text, [fm]) : text;
+  const noFences = blank(noFm, fencedRanges(noFm));
+  return blank(noFences, inlineCodeRanges(noFences));
 }
 
 // Links outside frontmatter, fenced code blocks and inline code. Offsets refer to `text`.
@@ -73,7 +99,8 @@ export function parseLinks(text: string): WikiLink[] {
     const inner = m[1];
     const innerStart = m.index + 2;
     const pipe = inner.indexOf("|");
-    const targetPart = pipe < 0 ? inner : inner.slice(0, pipe);
+    // `\|` (escaped pipe in a table cell) ends the target without the backslash.
+    const targetPart = (pipe < 0 ? inner : inner.slice(0, pipe)).replace(/\\$/, "");
     const hash = targetPart.indexOf("#");
     const name = hash < 0 ? targetPart : targetPart.slice(0, hash);
     const target = name.trim();
@@ -116,6 +143,11 @@ export type Resolution =
 
 export const noteKey = (n: NoteRef): string => `${n.space}/${n.project}/${n.section}/${n.name}`;
 
+// Path parts of a link target: trimmed, lowercase, without a `.md` suffix.
+export function splitTarget(target: string): string[] {
+  return target.trim().toLowerCase().replace(/\.md$/, "").split("/").map((p) => p.trim());
+}
+
 export type LinkResolver = (from: { space: string; project: string }, target: string) => Resolution;
 
 // Resolver over `notes` (archived notes never resolve). A 1-part name is looked up in the
@@ -124,10 +156,12 @@ export function createResolver(notes: NoteRef[]): LinkResolver {
   const byName = new Map<string, NoteRef[]>();
   for (const n of notes) {
     if (n.section === ARCHIVE_SECTION) continue;
-    byName.set(n.name, [...(byName.get(n.name) ?? []), n]);
+    const list = byName.get(n.name);
+    if (list) list.push(n);
+    else byName.set(n.name, [n]);
   }
   return (from, target) => {
-    const parts = target.trim().toLowerCase().replace(/\.md$/, "").split("/");
+    const parts = splitTarget(target);
     const all = byName.get(parts[parts.length - 1]) ?? [];
     const levels: Array<(n: NoteRef) => boolean> =
       parts.length === 1

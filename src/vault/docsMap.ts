@@ -15,6 +15,8 @@ export function docsMapPaths(indexBody: string): string[] {
     while (stack.length && stack[stack.length - 1].indent >= indent) stack.pop();
     const parent = stack[stack.length - 1];
     stack.push({ indent, token: m[2] });
+    // Only two levels count: section bullets and their direct children.
+    if (stack.length > 2) continue;
     if (m[2].includes("/")) out.push(m[2]);
     else if (parent) out.push(`${parent.token}/${m[2]}`);
   }

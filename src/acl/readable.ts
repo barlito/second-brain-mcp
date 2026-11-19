@@ -19,3 +19,10 @@ export function canReadUnderProject(scopes: Scope[], space: string, project: str
     (s) => (s.space === "*" || s.space === space) && (s.project === "*" || s.project === project),
   );
 }
+
+// A read-or-write scope covers every section of this project.
+export function canReadWholeProject(scopes: Scope[], space: string, project: string): boolean {
+  return readScopes(scopes).some(
+    (s) => (s.space === "*" || s.space === space) && (s.project === "*" || s.project === project) && s.section === "*",
+  );
+}

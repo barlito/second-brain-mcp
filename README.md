@@ -201,12 +201,12 @@ All note-addressed tools take `space`, `project`, `section`, `note` (strings, ma
 
 ### Links
 
-Notes link with Obsidian wikilinks: `[[target]]`, `[[target|alias]]`, `[[target#heading]]`, `![[embed]]`. Links inside frontmatter, fenced code blocks and inline code are ignored. A target (optional `.md` suffix, case-insensitive) resolves by its number of `/`-separated parts, from the note that contains it:
+Notes link with Obsidian wikilinks: `[[target]]`, `[[target|alias]]`, `[[target#heading]]`, `![[embed]]`. Links inside frontmatter, fenced code blocks (also indented or in a blockquote) and inline code are ignored; indented (4-space) code blocks are not detected. In a table, `[[note\\|alias]]` targets `note`. A target (optional `.md` suffix, case-insensitive) resolves by its number of `/`-separated parts, from the note that contains it:
 
 - `name`: a note with that name in the same project (any section); if none, in the same space; if none, anywhere. The first level with a match wins; several matches at that level are ambiguous.
 - `section/name`: same project. `project/section/name`: same space. `space/project/section/name`: full path.
 
-Archived notes never resolve, and only notes the token can read take part in resolution.
+Archived notes never resolve (a link to an archived note counts as broken), and only notes the token can read take part in resolution. A link naming a section the token cannot read (2+ parts) is reported by `kb_lint` as not checked rather than broken.
 
 ### `kb_backlinks`
 
@@ -219,7 +219,7 @@ Archived notes never resolve, and only notes the token can read take part in res
 - Args: `space`, `project`; optional `stale_days` (integer 1-3650, default 180).
 - Permission: `read` on at least one section of the project; only readable sections are reported (a note says when some were skipped); nothing readable gives `Permission denied.`
 - Groups, each with a count, then a final `<n> issue(s).` line (`No issues.` when clean): broken links; ambiguous links; Docs map entries pointing to missing notes; notes not listed in the Docs map of `overview/index`; orphans (no incoming link from a readable note, not in the Docs map; `overview` and `journal` excluded); stale notes (frontmatter `updated`, else the last git commit date, older than `stale_days`; `overview` and `journal` excluded).
-- The Docs map (`## Docs map` in `overview/index`) lists notes as wikilinks or as backticked names nested under a backticked section bullet:
+- The Docs map (`## Docs map` in `overview/index`) lists notes as backticked names nested one level under a backticked section bullet (deeper bullets are ignored); any wikilink anywhere in `overview/index` also counts as listed. Example:
 
 ```
 ## Docs map

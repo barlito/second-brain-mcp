@@ -1,5 +1,6 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { cleanup, makeTempDb, makeTempVault } from "./test-support/fixtures";
@@ -41,6 +42,11 @@ before(async () => {
   put("pro/a/notes/unlisted.md", fm(today, "links to [[linked]] ![[listed]]"));
   put("pro/a/notes/orphan.md", fm(today, "nobody links here"));
   put("pro/a/notes/old.md", fm("2020-01-01", "stale one"));
+  // No frontmatter: its date comes from a backdated commit.
+  put("pro/a/notes/nofm.md", "no frontmatter\n");
+  execFileSync("git", ["add", "pro/a/notes/nofm.md"], { cwd: vault });
+  execFileSync("git", ["commit", "-m", "old"], { cwd: vault, env: { ...process.env, GIT_COMMITTER_DATE: "2020-02-03T00:00:00Z", GIT_AUTHOR_DATE: "2020-02-03T00:00:00Z" } });
+  put("pro/part/notes/w.md", fm(today, "[[decisions/hidden-target]] and [[notes/nope]]"));
   put("pro/a/notes/ambig.md", fm(today, "[[twin]]"));
   put("pro/a/notes/twin.md", fm(today, "x"));
   put("pro/a/conventions/twin.md", fm(today, "x"));
@@ -146,7 +152,7 @@ test("kb_lint reports each category with a summary", async () => {
   assert.match(orphans, /pro\/a\/notes\/ambig/); // nobody links to it
   assert.doesNotMatch(orphans, /pro\/a\/notes\/orphan/); // linked from pro/b
   assert.doesNotMatch(orphans, /notes\/linked|notes\/listed|journal|overview/);
-  assert.match(res.text, /Stale notes \(1\)\n- pro\/a\/notes\/old \(updated 2020-01-01\)/);
+  assert.match(res.text, /Stale notes \(2\)\n- pro\/a\/notes\/nofm \(updated 2020-02-03\)\n- pro\/a\/notes\/old \(updated 2020-01-01\)/);
   assert.match(res.text, /\d+ issue\(s\)\.$/m);
   assert.doesNotMatch(res.text, /not readable/);
 });
@@ -166,8 +172,10 @@ test("kb_lint with partial ACL reports only readable sections and says so", asyn
   assert.equal(res.isError, false, res.text);
   assert.match(res.text, /not readable by this token and were skipped/);
   // The link to the unreadable section is broken for this token, and nothing names the hidden note.
-  assert.match(res.text, /Broken links \(1\)\n- pro\/part\/notes\/v: \[\[hidden-target\]\]/);
-  assert.doesNotMatch(res.text, /decisions/);
+  assert.match(res.text, /Broken links \(2\)\n- pro\/part\/notes\/v: \[\[hidden-target\]\]\n- pro\/part\/notes\/w: \[\[notes\/nope\]\]/);
+  // A link naming an unreadable section is not checked, not broken.
+  assert.match(res.text, /\(1 link\(s\) not checked: no read access to the target section\)/);
+  assert.doesNotMatch(res.text, /decisions\/hidden/);
 });
 
 test("kb_lint: orphans ignore incoming links from unreadable notes", async () => {
