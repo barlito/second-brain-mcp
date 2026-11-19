@@ -203,7 +203,7 @@ export function attachAccessPush(push: PushService): () => void {
   return onAccessRequestEvent(({ request }) => {
     try {
       const me = db.prepare("SELECT client_name FROM sessions WHERE id = ?").get(request.session_id) as { client_name: string } | undefined;
-      const who = request.agent ? `${request.agent} (${me?.client_name ?? "unknown client"})` : (me?.client_name ?? "unknown client");
+      const who = request.agent ? `${me?.client_name ?? "unknown client"} "${request.agent}"` : (me?.client_name ?? "unknown client");
       const ttl = (Date.parse(request.expires_at) - Date.now()) / 1000;
       void push.sendToAll(requestPayload(request, who), ttl, request.id.replace(/-/g, ""));
     } catch (err) {

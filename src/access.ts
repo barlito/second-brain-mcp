@@ -203,7 +203,7 @@ export function createAccessRequest(sessionId: string, input: NewRequest, allow:
       .prepare("SELECT * FROM access_requests WHERE session_id = ? AND status = 'pending' AND expires_at > ? ORDER BY created_at")
       .all(sessionId, nowIso) as unknown as RequestRow[];
     const scopesJson = explicit ? JSON.stringify(explicit) : null;
-    const same = mine.find((r) => r.space === (input.space ?? null) && r.project === (input.project ?? null) && r.access === (input.access ?? null) && r.scopes === scopesJson && r.agent === agent);
+    const same = mine.find((r) => r.space === (input.space ?? null) && r.project === (input.project ?? null) && r.access === (input.access ?? null) && r.scopes === scopesJson && (agent === null || r.agent === agent));
     if (same) return { request: same, created: false };
     // Per-client cap bucketed by (connector key, client address): a leaked key cannot starve other keys.
     const me = db.prepare("SELECT ip_key, connector_key_id FROM sessions WHERE id = ?").get(sessionId) as { ip_key: string | null; connector_key_id: string | null } | undefined;
@@ -244,7 +244,6 @@ export function createAccessRequest(sessionId: string, input: NewRequest, allow:
     db.prepare(
       "INSERT INTO access_requests (id, session_id, space, project, access, reason, status, created_at, expires_at, scopes, elevation, agent) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)",
     ).run(row.id, row.session_id, row.space, row.project, row.access, row.reason, row.created_at, row.expires_at, row.scopes, row.elevation, row.agent);
-    if (agent) db.prepare("UPDATE sessions SET agent = ? WHERE id = ?").run(agent, sessionId);
     if (row.elevation) audit(`session:${sessionId}`, "access_elevation_request", row, "ok", `${row.access ?? "scopes"}`);
     return { request: row, created: true };
   })();
@@ -414,7 +413,9 @@ export function approveRequest(ref: string, opts: { scopes?: Scope[]; allowWildc
   try {
     // Name from the scopes actually granted (after the admin's edits).
     const final = opts.scopes ?? defaults;
-    const name = `session-${r.agent ?? clientSlug(r.client_name)}-${grantLabel(Array.isArray(final) && final.length ? final : defaults)}`.slice(0, 64).replace(/-+$/, "");
+    // Cap the label so a long one cannot push the project out of the 64-char name.
+    const who = r.agent ? r.agent.slice(0, 32).replace(/-+$/, "") : clientSlug(r.client_name);
+    const name = `session-${who}-${grantLabel(Array.isArray(final) && final.length ? final : defaults)}`.slice(0, 64).replace(/-+$/, "");
     validated = validateTokenInput(name, final);
   } catch (err) {
     if (err instanceof TokenValidationError || (err instanceof Error && /^invalid scope/.test(err.message))) throw new AccessError(422, err.message);
@@ -429,6 +430,7 @@ export function approveRequest(ref: string, opts: { scopes?: Scope[]; allowWildc
     const cur = db.prepare("SELECT status FROM access_requests WHERE id = ?").get(r.id) as { status: string } | undefined;
     if (cur?.status !== "pending") throw new AccessError(409, `access request already ${cur?.status ?? "removed"}`);
     const g = insertGrant(r.session_id, validated.name, kept);
+    if (r.agent) db.prepare("UPDATE sessions SET agent = ? WHERE id = ?").run(r.agent, r.session_id);
     db.prepare("UPDATE access_requests SET status = 'approved', decided_at = ?, decided_by = ?, token_id = ? WHERE id = ?").run(new Date().toISOString(), opts.actor, g.id, r.id);
     return g;
   }).immediate();

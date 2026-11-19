@@ -121,11 +121,11 @@ test("agent label is shown first on the request card and in active sessions, cli
   const s = newSession();
   const r = ask(s.id, "pro", "labelled", "read", { agent: "claude-code-pro-labelled" });
   const card = (await get("/access")).body;
-  assert.match(card, new RegExp(`<strong class="mono">claude-code-pro-labelled</strong><span class="muted">Claude Code 1\\.2\\.3</span>[^]*?${r.id}`));
+  assert.match(card, new RegExp(`<strong class="mono" title="Self-declared by the agent, not verified">claude-code-pro-labelled</strong><span class="muted small" title="Self-declared by the agent, not verified">self-declared</span><span class="muted">Claude Code 1\\.2\\.3</span>[^]*?${r.id}`));
   access.approveRequest(r.id, { actor: "admin:test" });
   const page = (await get("/access")).body;
   assert.match(page, /<th>Agent \/ client<\/th>/);
-  assert.match(page, /<td><strong class="mono">claude-code-pro-labelled<\/strong><br><span class="muted small">Claude Code 1\.2\.3<\/span>/);
+  assert.match(page, /<td><strong class="mono" title="Self-declared by the agent, not verified">claude-code-pro-labelled<\/strong> <span class="muted small" title="Self-declared by the agent, not verified">self-declared<\/span><br><span class="muted small">Claude Code 1\.2\.3<\/span>/);
   assert.match(page, /session-claude-code-pro-labelled-pro-labelled/);
 });
 
@@ -239,6 +239,9 @@ test("CLI: access list / approve (scope override, wildcard without flag) / deny"
   const list = await run(["list"], base);
   assert.match(list, new RegExp(`${r1.id}  client=Claude Code 1.2.3  ip=203\\.0\\.113\\.7.*scopes=\\[meta:\\*:\\*:read, pro:cli-a:\\*:read, pro:cli-a:\\*:write\\]`));
   assert.match(list, /Active sessions:|No active sessions/);
+  const lab = ask(newSession("Claude Code").id, "pro", "cli-lab", "read", { agent: "claude-code-cli-lab" });
+  assert.match(await run(["list"], base), new RegExp(`${lab.id}  agent=claude-code-cli-lab  client=Claude Code`));
+  access.denyRequest(lab.id, "admin:test");
 
   const a = await run(["approve", r1.id], base);
   assert.match(a, /Approved pro\/cli-a as session-claude-code-pro-cli-a: meta:\*:\*:read, pro:cli-a:\*:read, pro:cli-a:\*:write/);

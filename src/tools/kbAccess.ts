@@ -2,7 +2,7 @@
 // granted anything. They touch the DB only (never the vault).
 import { z } from "zod";
 import { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import { accessLimits, AccessError, accessStatus, createAccessRequest, MAX_AGENT_CHARS, MAX_REASON_CHARS, parseScopeStrings, requestedOf, UUID_RE } from "../access";
+import { accessLimits, AGENT_RE, AccessError, accessStatus, createAccessRequest, MAX_AGENT_CHARS, MAX_REASON_CHARS, parseScopeStrings, requestedOf, UUID_RE } from "../access";
 import { MAX_WAIT_SECONDS, waitForDecision } from "../accessWait";
 import { mcpUrl } from "../mcpCommand";
 import { ipKey } from "../rateLimit";
@@ -54,6 +54,7 @@ export const register: RegisterTool = (server) => {
         agent: z
           .string()
           .max(MAX_AGENT_CHARS, `too long (max ${MAX_AGENT_CHARS} characters)`)
+          .regex(AGENT_RE, "lowercase a-z, 0-9, single hyphens")
           .optional()
           .describe(`Label identifying you to the user, lowercase slug (a-z, 0-9, hyphens, max ${MAX_AGENT_CHARS}): harness, project, task, e.g. claude-code-carapp-php-patch. Names your grants; keep it the same for the whole session`),
       },
