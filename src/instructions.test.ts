@@ -138,7 +138,7 @@ test("rules moved out of the instructions sit in the right tool description", as
       for (const r of re) assert.match(d[tool], r, `${tool}: ${r}`);
       assert.ok(d[tool].length < 2048, `${tool} description too long: ${d[tool].length}`);
     };
-    has("kb_write", /Docs map/, /sources/, /re-read/, /one topic per note/, /Reserved sections/, /3072 bytes/, /handover/, /auto-archive/, /kb_propose or kb_write/, /direct git commits/);
+    has("kb_write", /Docs map/, /sources/, /base_version/, /kb_edit/, /one topic per note/, /Reserved sections/, /3072 bytes/, /handover/, /auto-archive/, /kb_propose or kb_write/, /direct git commits/);
     has("kb_init_project", /Docs map/, /Reserved sections/, /3 KB/, /handover/, /auto-archive/);
     has("kb_append", /timestamped/);
     has("kb_archive", /instead of deleting/, /write \(which includes read\)/);

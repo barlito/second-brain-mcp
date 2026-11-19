@@ -7,6 +7,7 @@ import { SERVER_INSTRUCTIONS } from "./tools/conventions";
 import { register as registerKbAccess } from "./tools/kbAccess";
 import { register as registerKbAppend } from "./tools/kbAppend";
 import { register as registerKbArchive } from "./tools/kbArchive";
+import { register as registerKbEdit } from "./tools/kbEdit";
 import { register as registerKbHistory } from "./tools/kbHistory";
 import { register as registerKbInitProject } from "./tools/kbInitProject";
 import { register as registerKbPropose } from "./tools/kbPropose";
@@ -23,6 +24,7 @@ const pkg = require("../package.json") as { name: string; version: string };
 const TOOLS: RegisterTool[] = [
   registerKbRead,
   registerKbWrite,
+  registerKbEdit,
   registerKbAppend,
   registerKbArchive,
   registerKbList,

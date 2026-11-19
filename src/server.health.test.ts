@@ -251,6 +251,7 @@ test("write-path conflict: event has origin=write, only exact server subjects at
   const { vault, remote } = await conflictedVault([
     "kb_write: sp/p/s/note via alice",
     "kb_append: sp/p/s/note via bob.smith",
+    "kb_edit: sp/p/s/note via frank",
     "kb_write: sp/p/s/note via two words",
     "chore: sp/p/s/note via mallory",
     "kb_write: a b via eve",
@@ -274,8 +275,8 @@ test("write-path conflict: event has origin=write, only exact server subjects at
   assert.equal(events.length, 1);
   assert.equal(events[0].origin, "write");
   assert.equal(events[0].ok, true);
-  assert.equal(events[0].commits.length, 6);
-  assert.deepEqual(events[0].tokens.sort(), ["alice", "bob.smith"]);
+  assert.equal(events[0].commits.length, 7);
+  assert.deepEqual(events[0].tokens.sort(), ["alice", "bob.smith", "frank"]);
   assert.equal(remoteHadBackup, "", "event must precede the network push of the backup branch");
   assert.deepEqual(gitMod.getSyncStatus(vault).conflictBranches, [events[0].backupBranch]);
 });

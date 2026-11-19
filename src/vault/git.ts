@@ -198,7 +198,7 @@ function emitSyncEvent(e: SyncConflictEvent): void {
 
 // Only the exact subjects this server emits: "<tool>: <target> via <token name>".
 const TOKEN_SUBJECT_RE =
-  /^(?:kb_write|kb_append|kb_archive|kb_init_project|kb_propose|inbox accept): \S+ via ([A-Za-z0-9._-]{1,64})$/;
+  /^(?:kb_write|kb_edit|kb_append|kb_archive|kb_init_project|kb_propose|inbox accept): \S+ via ([A-Za-z0-9._-]{1,64})$/;
 
 // conflict/* branches that still exist locally; cached so status reads stay
 // cheap. Only the user deletes them.
