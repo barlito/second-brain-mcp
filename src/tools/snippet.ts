@@ -1,9 +1,15 @@
 // Pure helper for kb_search result lines (no I/O, easy to test).
 export const MAX_LINE_CHARS = 200;
 
+// Lowercase and accent-free, so "Décision" folds to "decision".
+export function fold(s: string): string {
+  return s.toLowerCase().normalize("NFD").replace(/\p{M}/gu, "");
+}
+
 // Window of at most MAX_LINE_CHARS code points around the first match, cut on
-// code-point boundaries, with "…" where text was dropped. `needle` is lowercase.
-export function snippet(line: string, needle: string): string {
+// code-point boundaries, with "…" where text was dropped. `rawNeedle` need not be folded.
+export function snippet(line: string, rawNeedle: string): string {
+  const needle = fold(rawNeedle);
   const t = line.trim();
   const cps = Array.from(t);
   if (cps.length <= MAX_LINE_CHARS) return t;
@@ -13,7 +19,7 @@ export function snippet(line: string, needle: string): string {
   let lowered = "";
   const owner: number[] = [];
   cps.forEach((cp, i) => {
-    const l = cp.toLowerCase();
+    const l = fold(cp);
     lowered += l;
     for (let k = 0; k < l.length; k++) owner.push(i);
   });

@@ -79,7 +79,7 @@ updated: 2026-11-12
 - `created` is kept from the existing note as written when it is a date or ISO datetime (`2026-11-12`, `2026-11-12T10:00:00Z`).
 - Rewriting a note whose body and client-controlled fields (type, sources, extra keys) are unchanged makes no commit and does not bump `updated`, unless the existing note lacks `author`, `created` or `updated` (then they are filled on that write).
 - `kb_propose` stores the proposal as sent; the frontmatter is normalized when the proposal is accepted.
-- `kb_search` accepts a `type` filter and matches the note body only (frontmatter is excluded from matching and snippets).
+- `kb_search` accepts a `type` filter and matches the note name and body only (frontmatter is excluded from matching and snippets).
 - Migration of existing notes: `make migrate-frontmatter` (see [Frontmatter migration](#frontmatter-migration)).
 
 ### Frontmatter migration
@@ -200,8 +200,9 @@ All note-addressed tools take `space`, `project`, `section`, `note` (strings, ma
 
 - Args: `query` (string, max 200 characters as sent, at least 2 after trimming; shorter gives `Query must be at least 2 characters.`), optional `space`, `project`, `section` (same hierarchy rule as `kb_list`), `include_archived` (default false), `type` (`decision | convention | note | guide | reference | gotcha`: only notes whose [frontmatter](#note-frontmatter) type matches).
 - Permission: `read`. Only sections the token can read are opened: the ACL is applied before any directory or file is read.
-- Case-insensitive plain substring match (not regex, no ranking) per line. Output lines are `<space>/<project>/<section>/<note>: <snippet>`; up to 50 notes and 3 lines per note, each snippet at most 200 characters around the match. No hits prints `No matches.`
-- Limits: files over 1 MB are skipped; stops after 3 s, 20 MB read or 5000 notes scanned. When it stops early the output ends with `(truncated: <reason>; results may be incomplete, narrow the search)`, where reason is `time limit reached`, `read limit reached`, `too many notes` or `more notes match` (more than 50 notes hit). Unreadable and oversized entries are counted in `(skipped <n> unreadable or oversized entries)`. Narrow with `space`/`project`/`section` when truncated.
+- Ranked full-text search (SQLite FTS5, bm25; a match in the note name ranks above one in the body), case and accent insensitive (`decision` finds `décision`). Terms are ANDed; `"quoted phrase"` matches the exact phrase; a trailing `*` is a prefix (`deci*`). Input is never interpreted as search syntax (`-`, `:`, `NEAR`, quotes are plain text); a query with no word gives `Query has no searchable word.` Output lines are `<space>/<project>/<section>/<note>: <snippet>` for up to 50 notes (best first) and 3 lines per note holding any term, each snippet at most 200 characters; a note matching only by name prints `(name match)`. No hits prints `No matches.`
+- Index: an in-memory FTS5 index (no persistence) of every note (not `_inbox`; files over 1 MB skipped) is built in the background at startup and updated from `git diff` after every commit and every pull that moves HEAD. While it is building, `kb_search` falls back to the plain case-insensitive substring scan below (no ranking, no phrase/prefix syntax). The index never changes who can see what: results are filtered by the sections the token can read.
+- Scan fallback limits (index not ready only): files over 1 MB are skipped; stops after 3 s, 20 MB read or 5000 notes scanned. When it stops early the output ends with `(truncated: <reason>; results may be incomplete, narrow the search)`, where reason is `time limit reached`, `read limit reached` or `too many notes`. With the index, `(truncated: more notes match)` appears when more than 50 readable notes match. Unreadable and oversized entries are counted in `(skipped <n> unreadable or oversized entries)`. Narrow with `space`/`project`/`section` when truncated.
 
 ### `kb_history`
 
