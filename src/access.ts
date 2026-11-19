@@ -12,6 +12,8 @@ import { safeAudit } from "./tools/common";
 import { isValidSlug } from "./vault/paths";
 
 export const MAX_REASON_CHARS = 500;
+export const MAX_AGENT_CHARS = 48;
+export const AGENT_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 export const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 export const ACCESS_KINDS = ["read", "write"] as const;
 export type AccessKind = (typeof ACCESS_KINDS)[number];
@@ -112,6 +114,7 @@ export interface RequestRow {
   token_id: string | null;
   scopes: string | null; // JSON Scope[] when the agent asked for an explicit list
   elevation: number; // 1 when the session already held a grant at request time
+  agent: string | null; // self-declared label (identification only, never trusted)
 }
 
 export const requestedScopes = (r: Pick<RequestRow, "scopes">): Scope[] | undefined => (r.scopes ? (JSON.parse(r.scopes) as Scope[]) : undefined);
@@ -155,6 +158,7 @@ export interface NewRequest {
   access?: string;
   reason: string;
   scopes?: unknown; // optional explicit "space:project:section:permission" list
+  agent?: string;
 }
 
 // Validates and records a pending request bound to `sessionId`. An identical pending request of the
@@ -174,6 +178,10 @@ export function createAccessRequest(sessionId: string, input: NewRequest, allow:
   const reason = typeof input.reason === "string" ? input.reason.trim() : "";
   if (reason.length < 1 || reason.length > MAX_REASON_CHARS) throw new AccessError(400, `reason must be 1-${MAX_REASON_CHARS} characters.`);
   if (/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(reason.replace(/\n/g, " "))) throw new AccessError(400, "reason must not contain control characters.");
+  const agent = input.agent === undefined ? null : typeof input.agent === "string" ? input.agent.trim() : "";
+  if (agent !== null && (agent.length < 1 || agent.length > MAX_AGENT_CHARS || !AGENT_RE.test(agent))) {
+    throw new AccessError(400, `agent must be 1-${MAX_AGENT_CHARS} characters: lowercase a-z, 0-9, single hyphens (e.g. claude-code-carapp-php-patch).`);
+  }
   let explicit: Scope[] | undefined;
   if (input.scopes !== undefined) {
     if (!Array.isArray(input.scopes) || input.scopes.length === 0 || input.scopes.length > 10 || input.scopes.some((x) => typeof x !== "string")) {
@@ -195,7 +203,7 @@ export function createAccessRequest(sessionId: string, input: NewRequest, allow:
       .prepare("SELECT * FROM access_requests WHERE session_id = ? AND status = 'pending' AND expires_at > ? ORDER BY created_at")
       .all(sessionId, nowIso) as unknown as RequestRow[];
     const scopesJson = explicit ? JSON.stringify(explicit) : null;
-    const same = mine.find((r) => r.space === (input.space ?? null) && r.project === (input.project ?? null) && r.access === (input.access ?? null) && r.scopes === scopesJson);
+    const same = mine.find((r) => r.space === (input.space ?? null) && r.project === (input.project ?? null) && r.access === (input.access ?? null) && r.scopes === scopesJson && r.agent === agent);
     if (same) return { request: same, created: false };
     // Per-client cap bucketed by (connector key, client address): a leaked key cannot starve other keys.
     const me = db.prepare("SELECT ip_key, connector_key_id FROM sessions WHERE id = ?").get(sessionId) as { ip_key: string | null; connector_key_id: string | null } | undefined;
@@ -231,10 +239,12 @@ export function createAccessRequest(sessionId: string, input: NewRequest, allow:
       token_id: null,
       scopes: scopesJson,
       elevation: listGrants(sessionId).length > 0 ? 1 : 0,
+      agent,
     };
     db.prepare(
-      "INSERT INTO access_requests (id, session_id, space, project, access, reason, status, created_at, expires_at, scopes, elevation) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)",
-    ).run(row.id, row.session_id, row.space, row.project, row.access, row.reason, row.created_at, row.expires_at, row.scopes, row.elevation);
+      "INSERT INTO access_requests (id, session_id, space, project, access, reason, status, created_at, expires_at, scopes, elevation, agent) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)",
+    ).run(row.id, row.session_id, row.space, row.project, row.access, row.reason, row.created_at, row.expires_at, row.scopes, row.elevation, row.agent);
+    if (agent) db.prepare("UPDATE sessions SET agent = ? WHERE id = ?").run(agent, sessionId);
     if (row.elevation) audit(`session:${sessionId}`, "access_elevation_request", row, "ok", `${row.access ?? "scopes"}`);
     return { request: row, created: true };
   })();
@@ -404,7 +414,7 @@ export function approveRequest(ref: string, opts: { scopes?: Scope[]; allowWildc
   try {
     // Name from the scopes actually granted (after the admin's edits).
     const final = opts.scopes ?? defaults;
-    const name = `session-${clientSlug(r.client_name)}-${grantLabel(Array.isArray(final) && final.length ? final : defaults)}`.slice(0, 64).replace(/-+$/, "");
+    const name = `session-${r.agent ?? clientSlug(r.client_name)}-${grantLabel(Array.isArray(final) && final.length ? final : defaults)}`.slice(0, 64).replace(/-+$/, "");
     validated = validateTokenInput(name, final);
   } catch (err) {
     if (err instanceof TokenValidationError || (err instanceof Error && /^invalid scope/.test(err.message))) throw new AccessError(422, err.message);

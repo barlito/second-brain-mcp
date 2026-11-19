@@ -346,7 +346,7 @@ ${
         ? html`<div class="card empty"><strong>No pending requests</strong></div>`
         : pending.map(
             (r) => html`<div class="card pad stack g12">
-<div class="row g12 anchor" id="req-${r.id}">${r.elevation ? html`<span class="badge err">elevation</span>` : ""}<strong>${r.client_name}</strong><span class="muted">${r.client_version}</span><span class="muted small">${relTime(r.created_at)}, expires ${r.expires_at}</span><span class="muted mono small">${r.id}</span></div>
+<div class="row g12 anchor" id="req-${r.id}">${r.elevation ? html`<span class="badge err">elevation</span>` : ""}${r.agent ? html`<strong class="mono">${r.agent}</strong><span class="muted">${r.client_name} ${r.client_version}</span>` : html`<strong>${r.client_name}</strong><span class="muted">${r.client_version}</span>`}<span class="muted small">${relTime(r.created_at)}, expires ${r.expires_at}</span><span class="muted mono small">${r.id}</span></div>
 <div class="stack"><span class="hint">Asks for</span>${r.requested_scopes.map((sc) => html`<div class="grant">${scopeChip(sc)}<span class="hint">${scopeDescription(sc)}</span></div>`)}</div>
 ${(() => {
               const k = wildcardRisk(r.requested_scopes);
@@ -375,14 +375,14 @@ ${csrfField(ctx)}
     }
 <h2>Active sessions</h2>
 <div class="card clip"><div class="scroll"><table class="tbl">
-<thead><tr><th>Client</th><th>Key</th><th>Grants</th><th>IP</th><th>Created</th><th>Last seen</th><th>Expires</th><th></th></tr></thead>
+<thead><tr><th>Agent / client</th><th>Key</th><th>Grants</th><th>IP</th><th>Created</th><th>Last seen</th><th>Expires</th><th></th></tr></thead>
 <tbody>
 ${
       sessions.length === 0
         ? html`<tr><td colspan="8"><div class="empty">No sessions with access.</div></td></tr>`
         : sessions.map(
             (s) => html`<tr>
-<td>${s.client_name} ${s.client_version}<br><span class="muted mono small">${s.id}</span></td>
+<td>${s.agent ? html`<strong class="mono">${s.agent}</strong><br><span class="muted small">${s.client_name} ${s.client_version}</span>` : html`${s.client_name} ${s.client_version}`}<br><span class="muted mono small">${s.id}</span></td>
 <td>${s.connector_key ?? ""}</td>
 <td>${s.grants.map((g) => html`<div class="stack g4"><strong>${g.name}</strong><div class="chips">${g.scopes.map((sc) => scopeChip(sc))}</div></div>`)}</td>
 <td class="mono small">${s.remote_ip ?? ""}</td>

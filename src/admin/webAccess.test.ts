@@ -117,6 +117,18 @@ test("access page: pending request with client, IP, project, reason (escaped), d
   assert.match(dash.body, /Pending access requests<\/span><span class="n">1<\/span>/);
 });
 
+test("agent label is shown first on the request card and in active sessions, client kept beside it", async () => {
+  const s = newSession();
+  const r = ask(s.id, "pro", "labelled", "read", { agent: "claude-code-pro-labelled" });
+  const card = (await get("/access")).body;
+  assert.match(card, new RegExp(`<strong class="mono">claude-code-pro-labelled</strong><span class="muted">Claude Code 1\\.2\\.3</span>[^]*?${r.id}`));
+  access.approveRequest(r.id, { actor: "admin:test" });
+  const page = (await get("/access")).body;
+  assert.match(page, /<th>Agent \/ client<\/th>/);
+  assert.match(page, /<td><strong class="mono">claude-code-pro-labelled<\/strong><br><span class="muted small">Claude Code 1\.2\.3<\/span>/);
+  assert.match(page, /session-claude-code-pro-labelled-pro-labelled/);
+});
+
 test("approve via the page with editable scopes, then active sessions + revoke; CSRF and nonce enforced", async () => {
   const s = newSession("Claude Desktop");
   const r = ask(s.id, "pro", "beta", "read");

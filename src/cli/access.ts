@@ -46,11 +46,11 @@ export async function run(argv: string[], base = adminUrl()): Promise<string> {
       const out: string[] = [];
       out.push(requests.length === 0 ? "No pending access requests." : "Pending access requests:");
       for (const r of requests) {
-        out.push(`${r.id}${r.elevation ? "  ELEVATION" : ""}  client=${r.client_name} ${r.client_version}  ip=${r.remote_ip ?? "?"}  created=${r.created_at}  scopes=[${r.requested_scopes.map(fmt).join(", ")}]${r.exceeds ? "  SCOPES EXCEED THE STATED REQUEST" : ""}  ${JSON.stringify(r.reason)}`);
+        out.push(`${r.id}${r.elevation ? "  ELEVATION" : ""}  ${r.agent ? `agent=${r.agent}  ` : ""}client=${r.client_name} ${r.client_version}  ip=${r.remote_ip ?? "?"}  created=${r.created_at}  scopes=[${r.requested_scopes.map(fmt).join(", ")}]${r.exceeds ? "  SCOPES EXCEED THE STATED REQUEST" : ""}  ${JSON.stringify(r.reason)}`);
       }
       out.push(sessions.length === 0 ? "No active sessions with access." : "Active sessions:");
       for (const s of sessions) {
-        out.push(`${s.id}  client=${s.client_name} ${s.client_version}  last_seen=${s.last_seen_at}  expires=${s.expires_at}  grants=[${s.grants.map((g: any) => `${g.name}: ${g.scopes.map(fmt).join(" ")}`).join("; ")}]`);
+        out.push(`${s.id}  ${s.agent ? `agent=${s.agent}  ` : ""}client=${s.client_name} ${s.client_version}  last_seen=${s.last_seen_at}  expires=${s.expires_at}  grants=[${s.grants.map((g: any) => `${g.name}: ${g.scopes.map(fmt).join(" ")}`).join("; ")}]`);
       }
       return out.join("\n");
     }

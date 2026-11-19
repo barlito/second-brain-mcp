@@ -344,6 +344,39 @@ test("access request validation", async () => {
   assert.equal((db.prepare("SELECT COUNT(*) c FROM access_requests r JOIN sessions s ON s.id = r.session_id WHERE s.sid_hash = ?").get(sessions.hashSid(sid)) as { c: number }).c, 0);
 });
 
+test("agent label: validated, stored on the request and its session, listed, and names the grant", async () => {
+  const sid = await connect();
+  const bad = async (agent: unknown): Promise<void> => {
+    const r = await call(sid, "kb_request_access", { space: "sp", project: "proj-a", access: "read", reason: "r", agent });
+    assert.equal(r.isError, true, JSON.stringify(agent));
+    assert.match(r.text, /agent/, JSON.stringify(agent));
+  };
+  await bad("");
+  await bad("Claude Code");
+  await bad("a--b");
+  await bad("-a");
+  await bad("x".repeat(49));
+
+  const r = await call(sid, "kb_request_access", { space: "sp", project: "proj-a", access: "read", reason: "r", agent: "claude-code-carapp-php-patch" });
+  assert.equal(r.isError, false, r.text);
+  const id = reqId(r.text);
+  const pending = access.listPendingRequests().find((p) => p.id === id);
+  assert.equal(pending?.agent, "claude-code-carapp-php-patch");
+  assert.equal((db.prepare("SELECT agent FROM sessions WHERE id = ?").get(sidRow(sid)!.id) as { agent: string }).agent, "claude-code-carapp-php-patch");
+
+  const d = approve(id, { actor: "admin:test" });
+  assert.equal(d.tokenName, "session-claude-code-carapp-php-patch-sp-proj-a");
+  const live = sessions.listActiveSessions().find((s) => s.id === sidRow(sid)!.id);
+  assert.equal(live?.agent, "claude-code-carapp-php-patch");
+  assert.equal(live?.client_name, "Claude Code");
+
+  // Without a label the grant keeps the client-derived name.
+  const other = await connect();
+  const d2 = approve(reqId((await request(other, "sp", "proj-b", "read")).text), { actor: "admin:test" });
+  assert.equal(d2.tokenName, "session-claude-code-sp-proj-b");
+  assert.equal(sessions.listActiveSessions().find((s) => s.id === sidRow(other)!.id)?.agent, null);
+});
+
 test("a token holder gets a clear refusal from the access tools", async () => {
   const r = await bearerCall("kb_request_access", { space: "sp", project: "p", access: "read", reason: "r" });
   assert.equal(r.isError, true);
