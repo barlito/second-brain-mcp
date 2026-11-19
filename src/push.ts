@@ -10,7 +10,6 @@ import { seal, unseal } from "./auth/sealed";
 export const DEFAULT_PUSH_SUBJECT = "https://github.com/barlito/second-brain-mcp";
 export const MAX_SUBSCRIPTIONS = 20;
 const SEND_TIMEOUT_MS = 10_000;
-const CLOSE_TTL_S = 300;
 const VAPID_LABEL = "vapid-v1";
 const VAPID_AAD = "vapid";
 
@@ -37,6 +36,8 @@ export interface Vapid {
 
 export interface SendOptions {
   ttl: number;
+  // Replaces a still-queued message with the same topic (web-push: url-safe, <= 32 chars).
+  topic?: string;
   vapid: Vapid;
   timeoutMs: number;
 }
@@ -46,6 +47,7 @@ export type Sender = (target: Pick<PushSubscriptionRow, "endpoint" | "p256dh" | 
 export const webPushSender: Sender = async (t, payload, o) => {
   await webpush.sendNotification({ endpoint: t.endpoint, keys: { p256dh: t.p256dh, auth: t.auth } }, payload, {
     TTL: o.ttl,
+    topic: o.topic,
     urgency: "high",
     timeout: o.timeoutMs,
     vapidDetails: { subject: o.vapid.subject, publicKey: o.vapid.publicKey, privateKey: o.vapid.privateKey },
@@ -65,7 +67,7 @@ export function parseSubscription(body: Record<string, unknown>): SubscriptionIn
   } catch {
     /* rejected below */
   }
-  if (!url || url.protocol !== "https:" || endpoint.length > 1024) throw new PushError("The push endpoint must be an https URL of at most 1024 characters.");
+  if (!url || url.protocol !== "https:" || url.username || url.password || endpoint.length > 1024) throw new PushError("The push endpoint must be an https URL (no credentials) of at most 1024 characters.");
   const p256dh = s(body.p256dh).trim();
   if (!B64URL_RE.test(p256dh) || byteLength(p256dh) !== 65) throw new PushError("Invalid p256dh key.");
   const auth = s(body.auth).trim();
@@ -82,7 +84,7 @@ export interface PushService {
   list(): PushSubscriptionRow[];
   remove(id: string): boolean;
   // Resolves with the number of devices reached; never rejects.
-  sendToAll(payload: object, ttlSeconds: number): Promise<number>;
+  sendToAll(payload: object, ttlSeconds: number, topic?: string): Promise<number>;
 }
 
 export interface PushOptions {
@@ -138,9 +140,9 @@ export function createPushService(o: PushOptions): PushService {
     return db.prepare("SELECT * FROM push_subscriptions WHERE id = ?").get(id) as unknown as PushSubscriptionRow;
   }
 
-  async function sendOne(sub: PushSubscriptionRow, body: string, ttl: number, v: Vapid): Promise<boolean> {
+  async function sendOne(sub: PushSubscriptionRow, body: string, ttl: number, topic: string | undefined, v: Vapid): Promise<boolean> {
     try {
-      await withTimeout(send(sub, body, { ttl, vapid: v, timeoutMs }), timeoutMs);
+      await withTimeout(send(sub, body, { ttl, topic, vapid: v, timeoutMs }), timeoutMs);
       db.prepare("UPDATE push_subscriptions SET last_ok_at = ? WHERE id = ?").run(new Date().toISOString(), sub.id);
       return true;
     } catch (err) {
@@ -164,14 +166,14 @@ export function createPushService(o: PushOptions): PushService {
     add,
     list,
     remove: (id) => db.prepare("DELETE FROM push_subscriptions WHERE id = ?").run(id).changes > 0,
-    async sendToAll(payload, ttlSeconds) {
+    async sendToAll(payload, ttlSeconds, topic) {
       try {
         if (list().length === 0) return 0;
         const v: Vapid = { subject, ...vapid() }; // may reset the subscriptions: read them afterwards
         const subs = list();
         const body = JSON.stringify(payload);
         const ttl = Math.max(1, Math.floor(ttlSeconds));
-        const ok = await Promise.all(subs.map((s) => sendOne(s, body, ttl, v)));
+        const ok = await Promise.all(subs.map((s) => sendOne(s, body, ttl, topic, v)));
         return ok.filter(Boolean).length;
       } catch (err) {
         console.warn(`push: sending failed (${err instanceof Error ? err.name : "error"})`);
@@ -185,10 +187,9 @@ export function createPushService(o: PushOptions): PushService {
 
 const clip = (s: string, n: number): string => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
 
-export function requestPayload(r: RequestRow, clientName: string): { type: "request"; tag: string; title: string; body: string; url: string } {
+export function requestPayload(r: RequestRow, clientName: string): { tag: string; title: string; body: string; url: string } {
   const what = r.space && r.project && r.access ? `${r.access} ${r.space}/${r.project}` : `${requestedOf(r).length} scopes`;
   return {
-    type: "request",
     tag: r.id,
     title: "Access request",
     body: clip(`${r.elevation ? "Elevation: " : ""}${clientName} · ${what}`, 140),
@@ -196,14 +197,16 @@ export function requestPayload(r: RequestRow, clientName: string): { type: "requ
   };
 }
 
-// Subscribes the push service to the request lifecycle; returns the unsubscribe function.
+// Notifies the devices of each new request; returns the unsubscribe function. Fully guarded: the
+// access flow never sees an error from here.
 export function attachAccessPush(push: PushService): () => void {
-  return onAccessRequestEvent((e) => {
-    if (e.type === "created") {
-      const ttl = (Date.parse(e.request.expires_at) - Date.now()) / 1000;
-      void push.sendToAll(requestPayload(e.request, e.clientName), ttl);
-    } else {
-      void push.sendToAll({ type: "close", tag: e.id }, CLOSE_TTL_S);
+  return onAccessRequestEvent(({ request }) => {
+    try {
+      const me = db.prepare("SELECT client_name FROM sessions WHERE id = ?").get(request.session_id) as { client_name: string } | undefined;
+      const ttl = (Date.parse(request.expires_at) - Date.now()) / 1000;
+      void push.sendToAll(requestPayload(request, me?.client_name ?? "unknown client"), ttl, request.id.replace(/-/g, ""));
+    } catch (err) {
+      console.warn(`push: notification failed (${err instanceof Error ? err.name : "error"})`);
     }
   });
 }

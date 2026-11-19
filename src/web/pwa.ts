@@ -23,32 +23,24 @@ self.addEventListener("activate", function (e) { e.waitUntil(self.clients.claim(
 self.addEventListener("push", function (e) {
   var d = {};
   try { d = e.data ? e.data.json() : {}; } catch (err) { d = {}; }
-  if (d.type === "close") {
-    e.waitUntil(self.registration.getNotifications({ tag: d.tag }).then(function (list) {
-      list.forEach(function (n) { n.close(); });
-    }));
-    return;
-  }
   e.waitUntil(self.registration.showNotification(d.title || "Access request", {
     body: d.body || "",
-    tag: d.tag,
+    tag: d.tag || "access",
     icon: "/static/icon-192.png",
     data: { url: typeof d.url === "string" && d.url.charAt(0) === "/" ? d.url : "/access" },
-    renotify: true,
-    requireInteraction: true
+    renotify: true
   }));
 });
 
+// Reuse an open Access page only: another admin page (vault editor) may hold unsaved edits.
 self.addEventListener("notificationclick", function (e) {
   e.notification.close();
   var url = new URL((e.notification.data && e.notification.data.url) || "/access", self.location.origin).href;
+  function open() { return self.clients.openWindow(url); }
   e.waitUntil(self.clients.matchAll({ type: "window", includeUncontrolled: true }).then(function (list) {
-    for (var i = 0; i < list.length; i++) {
-      if (list[i].url.indexOf(self.location.origin) === 0 && "focus" in list[i]) {
-        return list[i].focus().then(function (c) { return c && "navigate" in c ? c.navigate(url) : undefined; });
-      }
-    }
-    return self.clients.openWindow(url);
+    var page = list.filter(function (c) { return new URL(c.url).pathname === "/access"; })[0];
+    if (!page) return open();
+    return page.focus().then(function (c) { return c.navigate(url); }).catch(open);
   }));
 });
 `;

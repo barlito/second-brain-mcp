@@ -40,9 +40,8 @@ export function notifyAccessChange(): void {
   for (const id of [...watchers.keys()]) dispatch(id);
 }
 
-// Request lifecycle events (push notifications). `created` fires once a new request is committed;
-// `decided` when it leaves the pending state (approve, deny, session revoked, expired).
-export type AccessRequestEvent = { type: "created"; request: RequestRow; clientName: string } | { type: "decided"; id: string };
+// Request events (push notifications): `created` fires once a new request is committed.
+export type AccessRequestEvent = { type: "created"; request: RequestRow };
 const eventListeners = new Set<(e: AccessRequestEvent) => void>();
 
 export function onAccessRequestEvent(fn: (e: AccessRequestEvent) => void): () => void {
@@ -241,14 +240,9 @@ export function createAccessRequest(sessionId: string, input: NewRequest, allow:
   })();
   if (result.created) {
     notifyAccessChange();
-    const { request } = result;
-    const me = db.prepare("SELECT client_name FROM sessions WHERE id = ?").get(sessionId) as { client_name: string } | undefined;
-    emitRequestEvent({ type: "created", request, clientName: me?.client_name ?? "unknown client" });
+    emitRequestEvent({ type: "created", request: result.request });
     // Expiry is time-based (no write): tell the UI once the request has lapsed.
-    setTimeout(() => {
-      notifyAccessChange();
-      if (requestWord(request.id) === "expired") emitRequestEvent({ type: "decided", id: request.id });
-    }, clampTimer(Date.parse(request.expires_at) - Date.now() + 1000)).unref();
+    setTimeout(notifyAccessChange, clampTimer(Date.parse(result.request.expires_at) - Date.now() + 1000)).unref();
   }
   return result;
 }
@@ -430,7 +424,6 @@ export function approveRequest(ref: string, opts: { scopes?: Scope[]; allowWildc
   }).immediate();
   audit(opts.actor, r.elevation ? "access_elevation_approve" : "access_approve", r, "ok", `token ${grant.id} ${grant.name} [${kept.map(formatScope).join(",")}]`);
   notifyAccessChange();
-  emitRequestEvent({ type: "decided", id: r.id });
   return {
     id: r.id,
     space: r.space ?? undefined,
@@ -447,16 +440,11 @@ export function denyRequest(ref: string, actor: string): { id: string; space?: s
   if (res.changes === 0) throw new AccessError(409, "access request already decided");
   audit(actor, r.elevation ? "access_elevation_deny" : "access_deny", r, "ok", "denied");
   notifyAccessChange();
-  emitRequestEvent({ type: "decided", id: r.id });
   return { id: r.id, space: r.space ?? undefined, project: r.project ?? undefined };
 }
 
 // Revoking a session kills all its grants at once (see revokeSession); audited here.
 export function auditSessionRevoke(actor: string, sessionId: string, ok: boolean): void {
   safeAudit({ tokenId: actor, tokenName: actor, action: "access_revoke", result: ok ? "ok" : "error", detail: ok ? `session ${sessionId}` : `session ${sessionId} not found or already revoked` }, actor);
-  if (ok) {
-    notifyAccessChange();
-    const open = db.prepare("SELECT id FROM access_requests WHERE session_id = ? AND status = 'pending'").all(sessionId) as Array<{ id: string }>;
-    for (const r of open) emitRequestEvent({ type: "decided", id: r.id });
-  }
+  if (ok) notifyAccessChange();
 }

@@ -146,7 +146,7 @@ test("subscribe: CSRF and nonce required, then stored, audited, listed; invalid 
 
   const ok = await follow(await post("/push/subscribe", sub(1), {}, "/push/subscribe"));
   assert.match(ok.text, /Notifications enabled on Phone 1\./);
-  assert.match(ok.text, /<td>Phone 1<\/td>/);
+  assert.match(ok.text, /<strong>Phone 1<\/strong>/);
   assert.equal((db.prepare("SELECT user FROM push_subscriptions").get() as { user: string }).user, "alice");
   const audit = db.prepare("SELECT result FROM audit_log WHERE action = 'push_subscribe'").all() as Array<{ result: string }>;
   assert.deepEqual(audit.map((a) => a.result), ["ok"]);

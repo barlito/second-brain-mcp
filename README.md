@@ -339,7 +339,7 @@ Prerequisites: the traefik-base `authelia-auth@file` forwardAuth middleware (pas
 
 ### Push notifications and install as an app
 
-The admin is an installable PWA (`/manifest.webmanifest`, `/sw.js`, both behind the same Authelia auth as every page) and can push a notification to your devices when a token-less session raises an access request. Tapping it opens the request on the Access page, where you approve or deny; the notification is closed once the request is decided or expires.
+The admin is an installable PWA (`/manifest.webmanifest`, `/sw.js`, both behind the same Authelia auth as every page) and can push a notification to your devices when a token-less session raises an access request. Tapping it opens the request on the Access page, where you approve or deny; notifications of requests that are no longer pending are closed by the Access page itself the next time it is opened or refreshed (no silent "close" push: browsers penalise those). A new request with the same id replaces a still-queued one (Web Push `Topic`).
 
 - Enable on Android: open the admin in Chrome, go to Access, Notifications, "Enable on this device" (name the device, allow notifications). Optionally use the Chrome menu "Install app" for a standalone window. "Send a test notification" checks the chain; "Remove" forgets a device (up to 20).
 - The payload is encrypted end to end (Web Push, aes128gcm) and carries nothing secret: client name, access requested, project, and a link. It still travels through the browser vendor's push service (fcm.googleapis.com for Chrome).

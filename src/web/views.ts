@@ -426,11 +426,9 @@ ${csrfField(ctx)}
 ${
       push.devices.length === 0
         ? html`<p class="muted">No device registered.</p>`
-        : html`<div class="card clip"><div class="scroll"><table class="tbl">
-<thead><tr><th>Device</th><th>Added</th><th>Last delivered</th><th></th></tr></thead>
-<tbody>${push.devices.map(
-            (d) => html`<tr><td>${d.label}</td><td class="mono small" title="${d.created_at}">${relTime(d.created_at)}</td><td class="mono small" title="${d.last_ok_at ?? ""}">${d.last_ok_at ? relTime(d.last_ok_at) : "never"}</td><td><form method="post" action="/push/${d.id}/remove" class="inline" data-confirm="Stop notifications on this device?">${csrfField(ctx)}<button class="btn btn-danger btn-sm" type="submit">Remove</button></form></td></tr>`,
-          )}</tbody></table></div></div>`
+        : html`<div class="card clip">${push.devices.map(
+            (d) => html`<div class="dev"><div class="stack g4"><strong>${d.label}</strong><span class="hint">Added <span title="${d.created_at}">${relTime(d.created_at)}</span>, last delivered <span title="${d.last_ok_at ?? ""}">${d.last_ok_at ? relTime(d.last_ok_at) : "never"}</span></span></div><form method="post" action="/push/${d.id}/remove" class="inline" data-confirm="Stop notifications on this device?">${csrfField(ctx)}<button class="btn btn-danger btn-sm" type="submit">Remove</button></form></div>`,
+          )}</div>`
     }
 <form method="post" action="/push/subscribe" id="push-form" class="stack g12" hidden>
 ${csrfField(ctx)}

@@ -25,13 +25,14 @@ interface Sent {
   payload: Record<string, unknown>;
   ttl: number;
   vapidPublic: string;
+  topic?: string;
 }
 function recorder(fail?: (endpoint: string) => unknown) {
   const sent: Sent[] = [];
   const send: import("./push").Sender = async (t, payload, o) => {
     const err = fail?.(t.endpoint);
     if (err) throw err;
-    sent.push({ endpoint: t.endpoint, payload: JSON.parse(payload), ttl: o.ttl, vapidPublic: o.vapid.publicKey });
+    sent.push({ endpoint: t.endpoint, payload: JSON.parse(payload), ttl: o.ttl, topic: o.topic, vapidPublic: o.vapid.publicKey });
   };
   return { sent, send };
 }
@@ -96,6 +97,7 @@ test("subscription validation", () => {
   const bad = (over: Record<string, string>) => assert.throws(() => push.parseSubscription(sub(1, over)), push.PushError);
   bad({ endpoint: "http://push.example.test/x" });
   bad({ endpoint: "not a url" });
+  bad({ endpoint: "https://user:pass@push.example.test/x" });
   bad({ endpoint: `https://push.example.test/${"a".repeat(1100)}` });
   bad({ p256dh: "short" });
   bad({ p256dh: `${P256DH}!` });
@@ -148,7 +150,7 @@ test("a hanging sender times out and does not reject", async (t) => {
   db.prepare("DELETE FROM push_subscriptions").run();
 });
 
-test("access events: created -> request payload and TTL, approve/deny -> close", async () => {
+test("access events: a created request sends the payload with its TTL and topic; nothing else is pushed", async () => {
   db.prepare("DELETE FROM push_subscriptions").run();
   const r = recorder();
   const svc = push.createPushService({ secret: "secret-b", send: r.send });
@@ -159,7 +161,9 @@ test("access events: created -> request payload and TTL, approve/deny -> close",
     const a = access.createAccessRequest(s.id, { space: "pro", project: "alpha", access: "write", reason: "why" }).request;
     await tick();
     assert.equal(r.sent.length, 1);
-    assert.deepEqual(r.sent[0].payload, { type: "request", tag: a.id, title: "Access request", body: "Claude Code · write pro/alpha", url: `/access#req-${a.id}` });
+    assert.deepEqual(r.sent[0].payload, { tag: a.id, title: "Access request", body: "Claude Code · write pro/alpha", url: `/access#req-${a.id}` });
+    assert.equal(r.sent[0].topic, a.id.replace(/-/g, ""));
+    assert.ok(r.sent[0].topic && r.sent[0].topic.length <= 32);
     assert.ok(r.sent[0].ttl > 14 * 60 && r.sent[0].ttl <= 15 * 60, `ttl ${r.sent[0].ttl}`);
     assert.equal(r.sent[0].vapidPublic, svc.publicKey());
 
@@ -173,26 +177,40 @@ test("access events: created -> request payload and TTL, approve/deny -> close",
     assert.equal(r.sent[1].payload.body, "Claude Code · 2 scopes");
     assert.equal(r.sent[1].payload.tag, b.id);
 
+    // Deciding or revoking sends nothing (stale notifications are closed client side).
     access.approveRequest(a.id, { actor: "admin:alice" });
-    await tick();
-    assert.deepEqual(r.sent[2].payload, { type: "close", tag: a.id });
     access.denyRequest(b.id, "admin:alice");
     await tick();
-    assert.deepEqual(r.sent[3].payload, { type: "close", tag: b.id });
+    assert.equal(r.sent.length, 2);
 
     // An elevation request is marked as such.
-    const c = access.createAccessRequest(s.id, { space: "pro", project: "delta", access: "read", reason: "why" }).request;
+    access.createAccessRequest(s.id, { space: "pro", project: "delta", access: "read", reason: "why" });
     await tick();
-    assert.equal(r.sent[4].payload.body, "Elevation: Claude Code · read pro/delta");
-
-    // Revoking the session closes its pending request notifications.
+    assert.equal(r.sent[2].payload.body, "Elevation: Claude Code · read pro/delta");
     sessions.revokeSession(s.id);
     access.auditSessionRevoke("admin:alice", s.id, true);
     await tick();
-    assert.deepEqual(r.sent[5].payload, { type: "close", tag: c.id });
+    assert.equal(r.sent.length, 3);
   } finally {
     off();
     db.prepare("DELETE FROM push_subscriptions").run();
+  }
+});
+
+test("a push service that throws never reaches createAccessRequest", (t) => {
+  const warn = t.mock.method(console, "warn", () => {});
+  const broken = {
+    sendToAll: () => {
+      throw new Error("sync boom");
+    },
+  } as unknown as import("./push").PushService;
+  const off = push.attachAccessPush(broken);
+  try {
+    const s = sessions.createSession({ clientName: "Claude Code", clientVersion: "1", ip: "203.0.113.10" });
+    assert.equal(access.createAccessRequest(s.id, { space: "pro", project: "alpha", access: "read", reason: "why" }).created, true);
+    assert.equal(warn.mock.callCount(), 1);
+  } finally {
+    off();
   }
 });
 

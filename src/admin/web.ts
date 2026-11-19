@@ -641,7 +641,7 @@ export function createWebAdminApp(opts: WebAdminOptions): Express {
     }
   });
   pushRouter.post("/test", async (_req, res) => {
-    const n = await push.sendToAll({ type: "request", tag: "test", title: "Test notification", body: "Push notifications work on this device.", url: "/access" }, 120);
+    const n = await push.sendToAll({ tag: "test", title: "Test notification", body: "Push notifications work on this device.", url: "/access" }, 120);
     auditAdmin(res, "push_test", "ok", `${n} of ${push.list().length} delivered`);
     accessBanner(res, n > 0 ? { kind: "ok", title: `Test sent to ${n} device${n === 1 ? "" : "s"}.` } : { kind: "err", title: "No device could be reached.", lines: ["Check that the server can reach the push services (outbound HTTPS)."] });
   });
@@ -720,7 +720,6 @@ export async function startWebAdmin(
   try {
     // Without ADMIN_WEB_SECRET the VAPID key cannot be sealed durably: devices reset on restart.
     const push = createPushService({ secret: env.ADMIN_WEB_SECRET || randomBytes(32).toString("hex"), subject: env.WEB_PUSH_SUBJECT || undefined });
-    attachAccessPush(push);
     const app = createWebAdminApp({
       push,
       vaultRoot,
@@ -732,6 +731,7 @@ export async function startWebAdmin(
       sessionCookie: env.AUTHELIA_SESSION_COOKIE || undefined,
     });
     const s = await listen(app, port);
+    attachAccessPush(push);
     console.log(`web admin listening on port ${port} (behind Traefik + Authelia only)`);
     return s;
   } catch (err) {

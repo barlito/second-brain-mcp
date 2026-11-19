@@ -317,6 +317,18 @@ document.addEventListener("click", function (e) {
   var form = document.getElementById("push-form");
   var hint = document.getElementById("push-hint");
   if (!box || !form) return;
+  // Notifications of requests that are no longer pending (decided, expired, handled elsewhere) are
+  // removed here rather than by a silent push, which browsers penalise. The test one is left alone.
+  function closeStale() {
+    if (!("Notification" in window) || Notification.permission !== "granted") return;
+    var pending = {};
+    document.querySelectorAll('[id^="req-"]').forEach(function (n) { pending[n.id.slice(4)] = true; });
+    navigator.serviceWorker.getRegistration().then(function (reg) {
+      return reg ? reg.getNotifications() : [];
+    }).then(function (list) {
+      list.forEach(function (n) { if (/^[0-9a-f-]{36}$/.test(n.tag) && !pending[n.tag]) n.close(); });
+    }).catch(function () {});
+  }
   function say(t) { hint.textContent = t; hint.hidden = !t; }
   if (!("serviceWorker" in navigator) || !("PushManager" in window) || !("Notification" in window)) {
     say("This browser cannot receive push notifications (needs HTTPS, a service worker and the Push API).");
@@ -326,6 +338,7 @@ document.addEventListener("click", function (e) {
     say("Notifications are blocked for this site: allow them in the browser's site settings, then reload.");
     return;
   }
+  closeStale();
   var ua = navigator.userAgent;
   var os = /Android/.test(ua) ? "Android" : /iPhone|iPad/.test(ua) ? "iOS" : /Windows/.test(ua) ? "Windows" : /Mac OS/.test(ua) ? "macOS" : /Linux/.test(ua) ? "Linux" : "Device";
   var br = /Edg\//.test(ua) ? "Edge" : /Firefox\//.test(ua) ? "Firefox" : /Chrome\//.test(ua) ? "Chrome" : /Safari\//.test(ua) ? "Safari" : "browser";
@@ -352,6 +365,7 @@ document.addEventListener("click", function (e) {
     e.preventDefault();
     if (busy || !form.reportValidity()) return;
     busy = true;
+    document.documentElement.setAttribute("data-enabling", "1");
     say("");
     var key = b64urlToBytes(box.getAttribute("data-vapid-key"));
     navigator.serviceWorker.register("/sw.js").then(function () { return navigator.serviceWorker.ready; })
@@ -375,6 +389,7 @@ document.addEventListener("click", function (e) {
       })
       .catch(function (err) {
         busy = false;
+        document.documentElement.removeAttribute("data-enabling");
         say("Could not enable notifications: " + (err && err.message ? err.message : "unknown error"));
       });
   });
@@ -436,7 +451,7 @@ document.addEventListener("click", function (e) {
       try { d = JSON.parse(e.data); } catch (err) { return; }
       badge(d.pending);
       if (!onAccess || leaving || String(d.rev) === rendered) return;
-      if (dirty) showNotice(); else location.reload();
+      if (dirty || document.documentElement.hasAttribute("data-enabling")) showNotice(); else location.reload();
     });
     // A non-200 answer (redeploy, expired SSO session) closes the stream for good: retry with backoff.
     es.addEventListener("error", function () {
