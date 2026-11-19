@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import { baseVersionArg, kbArgsShape, RegisterTool, registerKbTool, withAclAndAudit } from "./common";
+import { baseVersionArg, kbArgsShape, MAX_CONTENT_CHARS, RegisterTool, registerKbTool, ToolRunResult, withAclAndAudit } from "./common";
 import { ENTRY_NOTE_MAX_BYTES, NoteRuleError } from "./conventions";
 import { hasFrontmatter, parseNote } from "./frontmatter";
 import { rejectReservedSection } from "./reserved";
@@ -19,11 +19,13 @@ const editError = (message: string): NoteRuleError => new NoteRuleError(message,
 export function applyEdits(text: string, edits: Edit[]): string {
   let out = text;
   edits.forEach((e, i) => {
-    const n = out.split(e.old_str).length - 1;
-    if (n === 0) throw editError(`Edit ${i + 1}: old_str not found.`);
+    const at = out.indexOf(e.old_str);
+    if (at < 0) throw editError(`Edit ${i + 1}: old_str not found.`);
+    // Overlapping matches count too ("aa" in "aaa" is ambiguous).
+    let n = 1;
+    for (let next = out.indexOf(e.old_str, at + 1); next >= 0; next = out.indexOf(e.old_str, next + 1)) n++;
     if (n > 1) throw editError(`Edit ${i + 1}: old_str matches ${n} times; add surrounding text to make it unique.`);
-    // Function replacer: `$` in new_str is literal.
-    out = out.replace(e.old_str, () => e.new_str);
+    out = out.slice(0, at) + e.new_str + out.slice(at + e.old_str.length);
   });
   return out;
 }
@@ -32,8 +34,21 @@ export function applyEdits(text: string, edits: Edit[]): string {
 function editNote(section: string, existing: string | null, edits: Edit[]): string {
   if (existing === null) throw new NoteRuleError("Note not found.", "note not found");
   if (!hasFrontmatter(section)) return applyEdits(existing, edits);
-  const { body } = parseNote(existing);
+  let body: string;
+  try {
+    ({ body } = parseNote(existing));
+  } catch (err) {
+    if (err instanceof NoteRuleError) throw new NoteRuleError(`${err.message} Fix the frontmatter with kb_write.`, err.detail);
+    throw err;
+  }
   return existing.slice(0, existing.length - body.length) + applyEdits(body, edits);
+}
+
+// The frontmatter itself is refused (e.g. a type the section forbids): kb_edit cannot repair it.
+function withKbWriteHint(r: ToolRunResult): ToolRunResult {
+  const block = r.toolResult.content[0];
+  if (!r.audit?.detail?.startsWith("invalid frontmatter") || block.type !== "text" || block.text.includes("kb_write")) return r;
+  return { ...r, toolResult: { ...r.toolResult, content: [{ type: "text", text: `${block.text} Fix the frontmatter with kb_write.` }] } };
 }
 
 export const register: RegisterTool = (server, { vaultRoot }) => {
@@ -53,8 +68,8 @@ export const register: RegisterTool = (server, { vaultRoot }) => {
         edits: z
           .array(
             z.object({
-              old_str: z.string().min(1, "old_str must not be empty").describe("Exact text to replace; must occur once"),
-              new_str: z.string().describe("Replacement text (may be empty)"),
+              old_str: z.string().min(1, "old_str must not be empty").max(MAX_CONTENT_CHARS, "too large (max 512 KB)").describe("Exact text to replace; must occur once"),
+              new_str: z.string().max(MAX_CONTENT_CHARS, "too large (max 512 KB)").describe("Replacement text (may be empty)"),
             }),
           )
           .min(1)
@@ -66,13 +81,14 @@ export const register: RegisterTool = (server, { vaultRoot }) => {
       withAclAndAudit("kb_edit", { space, project, section, note }, "write", async (ctx) => {
         const reserved = rejectReservedSection(section);
         if (reserved) return reserved;
-        return writeNote(
+        const r = await writeNote(
           vaultRoot,
           { space, project, section, note },
           (existing) => editNote(section, existing, edits),
           `kb_edit: ${space}/${project}/${section}/${note} via ${ctx.name}`,
           { author: ctx.name, baseVersion: base_version },
         );
+        return withKbWriteHint(r);
       }),
   );
 };

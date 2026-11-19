@@ -19,7 +19,7 @@ export const register: RegisterTool = (server, { vaultRoot }) => {
     {
       description:
         "Read a note from the shared knowledge base vault. Pass `tail` (1-500) to get only the last N lines, e.g. recent journal history. " +
-        "A second block `version: <sha>` identifies the note as read: pass it as `base_version` to kb_write/kb_edit.",
+        "A second block `version: <sha>` identifies the note as read: pass it as `base_version` to kb_write/kb_edit (it proves you saw the latest version, not the whole note: tail reads return it too).",
       inputSchema: {
         ...kbArgsShape,
         tail: z.number().int().min(1).max(500).optional().describe("Return only the last N lines of the note"),

@@ -221,3 +221,55 @@ test("kb_write and kb_edit descriptions stay well below the 4096 cut", async () 
     await transport.close();
   }
 });
+
+test("kb_edit counts overlapping matches as ambiguous", async () => {
+  await write("ov", "aaa\n");
+  const r = await edit("ov", [{ old_str: "aa", new_str: "b" }]);
+  assert.equal(r.blocks[0], "Edit 1: old_str matches 2 times; add surrounding text to make it unique.");
+});
+
+test("kb_edit refuses a result over the note size limit and oversized strings", async () => {
+  await write("huge", "x\n");
+  const n = commits();
+  const r = await edit("huge", [{ old_str: "x", new_str: "y".repeat(512 * 1024) }]);
+  assert.equal(r.isError, true);
+  assert.match(r.blocks[0], /^The note would exceed the size limit/);
+  assert.equal(commits(), n);
+  const tooBig = await edit("huge", [{ old_str: "x", new_str: "y".repeat(512 * 1024 + 1) }]);
+  assert.match(tooBig.blocks[0], /Invalid argument `edits`/);
+});
+
+test("kb_edit on a broken or section-refused frontmatter points to kb_write", async () => {
+  mkdirSync(abs("sp/pj/decisions"), { recursive: true });
+  writeFileSync(abs("sp/pj/decisions/wrongtype.md"), "---\ntype: guide\n---\nbody text\n");
+  writeFileSync(abs("sp/pj/notes/broken.md"), "---\na: [\n---\nbody text\n");
+  git(["add", "-A"], vault);
+  git(["commit", "-qm", "hand-made notes"], vault);
+  const n = commits();
+  const wrong = await edit("wrongtype", [{ old_str: "body", new_str: "BODY" }], {}, "decisions");
+  assert.match(wrong.blocks[0], /^Invalid frontmatter: .*Fix the frontmatter with kb_write\.$/);
+  const broken = await edit("broken", [{ old_str: "body", new_str: "BODY" }]);
+  assert.match(broken.blocks[0], /^Invalid frontmatter: .*Fix the frontmatter with kb_write\.$/);
+  assert.equal(commits(), n);
+});
+
+const crlfFm = (extra: string): string => `---\r\ntype: note\r\nauthor: old\r\ncreated: 2026-01-01\r\nupdated: 2026-01-01\r\n---\r\n${extra}`;
+
+test("kb_edit and the shrink guard handle CRLF and BOM notes", async () => {
+  const long = `${"z".repeat(98)}\r\n`.repeat(20); // 2000 bytes
+  for (const [name, raw] of [
+    ["crlf", crlfFm(`line one\r\nline two\r\n${long}`)],
+    ["bom", `﻿${crlfFm(`line one\r\nline two\r\n${long}`)}`],
+  ] as const) {
+    writeFileSync(abs(`sp/pj/notes/${name}.md`), raw);
+    git(["add", "-A"], vault);
+    git(["commit", "-qm", `hand-made ${name}`], vault);
+    const r = await edit(name, [{ old_str: "line one", new_str: "line 1" }]);
+    assert.equal(r.isError, false, `${name}: ${r.blocks[0]}`);
+    const now = read(`sp/pj/notes/${name}.md`);
+    assert.ok(now.includes("line 1\r\nline two\r\n"), name);
+    assert.ok(now.includes("author: tok-wg"), name);
+    const refused = await write(name, "tiny\r\n");
+    assert.match(refused.blocks[0], /^This write would shrink the note body from \d{4} to 6 bytes/, name);
+  }
+});

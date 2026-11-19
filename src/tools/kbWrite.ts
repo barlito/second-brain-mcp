@@ -18,7 +18,7 @@ export const register: RegisterTool = (server, { vaultRoot }) => {
         "(decisions, conventions, notes) and keeps `sources` (optional list of up to 20 strings, e.g. URLs) and other keys. " +
         "Content without frontmatter keeps the existing note's type, sources and other keys (only the body changes); content with frontmatter replaces them. " +
         "Recommended: set `sources` to where the knowledge comes from. " +
-        "Writes are direct git commits: pass `base_version` (from kb_read) when overwriting a note so a concurrent change is not lost; prefer kb_edit for partial changes. " +
+        "Writes are direct git commits: pass `base_version` (from kb_read; it proves you saw the latest version, not that you read it all) when overwriting a note so a concurrent change is not lost; prefer kb_edit for partial changes. " +
         "Keep notes short and focused (one topic per note, link related notes). " +
         `${DOCS_MAP_RULE} ${RESERVED_SECTIONS_SUMMARY} overview/index is capped at ${ENTRY_NOTE_MAX_BYTES} bytes. ` +
         AGENTS_SPACE_RULE,

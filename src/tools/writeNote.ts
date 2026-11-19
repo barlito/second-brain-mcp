@@ -1,7 +1,7 @@
 import { resolveNotePath } from "../vault/paths";
 import { NoteExistsError, syncWriteBuilt } from "../vault/git";
 import { noteVersion } from "../vault/noteVersion";
-import { NO_CHANGES_MESSAGE, NOTE_NOT_UTF8_MESSAGE, toolError, toolText, ToolRunResult } from "./common";
+import { MAX_CONTENT_CHARS, NO_CHANGES_MESSAGE, NOTE_NOT_UTF8_MESSAGE, toolError, toolText, ToolRunResult } from "./common";
 import { NoteRuleError, validateNoteContent } from "./conventions";
 import { assertSpaceLimits, SpaceLimitError } from "../limits";
 import { normalizeNote, searchView, utcToday } from "./frontmatter";
@@ -72,6 +72,9 @@ export async function writeNote(
       {
         ...writeOpts,
         check: (next) => {
+          if (next.length > MAX_CONTENT_CHARS) {
+            throw new NoteRuleError("The note would exceed the size limit (max 512 KB). Split it into several notes.", "note too large");
+          }
           validateNoteContent(target, next);
           assertSpaceLimits(vaultRoot, target, Buffer.byteLength(next, "utf8"));
         },
