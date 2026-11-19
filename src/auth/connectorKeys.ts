@@ -1,10 +1,11 @@
 // Connector keys: a fixed secret header (x-api-key, one of the names claude.ai connectors accept) that a claude.ai custom connector or a
 // Claude Code `--header` sends, so the token-less surface is closed to the open internet. Lookup is by
 // SHA-256 hash; the plaintext is also kept encrypted at rest (AES-256-GCM, key from ADMIN_WEB_SECRET
-// via HKDF) so the admin can reveal it again. Not an identity: it grants nothing by itself, it only
+// via HKDF, see sealed.ts) so the admin can reveal it again. Not an identity: it grants nothing by itself, it only
 // lets a client open a token-less session.
-import { createCipheriv, createDecipheriv, createHash, hkdfSync, randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { db } from "../db";
+import { seal as sealWith, unseal as unsealWith } from "./sealed";
 import { endSession } from "./sessions";
 
 export const CONNECTOR_HEADER = "x-api-key";
@@ -23,32 +24,8 @@ export interface ConnectorKeyEntry {
 export class ConnectorKeyError extends Error {}
 
 const KEY_INFO = "connector-keys-v1";
-
-// Encryption key derived from the admin secret with its own label (never the secret itself).
-const encKey = (secret: string): Buffer => Buffer.from(hkdfSync("sha256", secret, "", KEY_INFO, 32));
-
-// nonce(12) | tag(16) | ciphertext, base64; the row id is bound as additional data.
-function seal(plain: string, id: string, secret: string): string {
-  const nonce = randomBytes(12);
-  const c = createCipheriv("aes-256-gcm", encKey(secret), nonce, { authTagLength: 16 });
-  c.setAAD(Buffer.from(id));
-  const ct = Buffer.concat([c.update(plain, "utf8"), c.final()]);
-  return Buffer.concat([nonce, c.getAuthTag(), ct]).toString("base64");
-}
-
-function unseal(blob: string, id: string, secret: string): string | null {
-  try {
-    const b = Buffer.from(blob, "base64");
-    if (b.length < 28) return null; // nonce + tag; an empty plaintext still has both
-    // Explicit tag length: never accept a truncated tag.
-    const d = createDecipheriv("aes-256-gcm", encKey(secret), b.subarray(0, 12), { authTagLength: 16 });
-    d.setAAD(Buffer.from(id));
-    d.setAuthTag(b.subarray(12, 28));
-    return Buffer.concat([d.update(b.subarray(28)), d.final()]).toString("utf8");
-  } catch {
-    return null; // wrong secret or tampered
-  }
-}
+const seal = (plain: string, id: string, secret: string): string => sealWith(plain, id, secret, KEY_INFO);
+const unseal = (blob: string, id: string, secret: string): string | null => unsealWith(blob, id, secret, KEY_INFO);
 
 // `secret` = ADMIN_WEB_SECRET; without it the key still works but cannot be revealed later.
 export function createConnectorKey(name: unknown, secret?: string): { id: string; name: string; key: string } {

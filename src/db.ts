@@ -194,6 +194,27 @@ export const MIGRATIONS: ReadonlyArray<Migration> = [
   { tables: ["access_requests"], up: (d) => {
     d.exec("ALTER TABLE access_requests DROP COLUMN code");
   } },
+  // Web Push: one row per subscribed device, and the single VAPID keypair (private key sealed).
+  { tables: [], up: (d) => {
+    d.exec(`
+      CREATE TABLE push_subscriptions (
+        id TEXT PRIMARY KEY,
+        endpoint TEXT NOT NULL UNIQUE,
+        p256dh TEXT NOT NULL,
+        auth TEXT NOT NULL,
+        user TEXT NOT NULL,
+        label TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        last_ok_at TEXT
+      );
+      CREATE TABLE push_vapid (
+        id INTEGER PRIMARY KEY CHECK(id = 1),
+        public_key TEXT NOT NULL,
+        private_key_sealed TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+    `);
+  } },
 ];
 
 // Applies migration index `v` under BEGIN IMMEDIATE. user_version is re-read inside the
