@@ -48,6 +48,13 @@ export const kbArgsShape = {
   note: slugArg("Note slug (without .md extension)"),
 };
 
+// Optional note version (kb_read's `version` block) a write must still match.
+export const baseVersionArg = z
+  .string()
+  .regex(/^[0-9a-f]{40}$/, "must be 40 lowercase hex characters")
+  .optional()
+  .describe("Version from kb_read; the write is refused if the note changed since");
+
 // Extra audit fields a tool handler wants recorded alongside its result
 // (e.g. kb_write's commit sha, kb_read's "note not found" detail).
 export interface AuditExtra {

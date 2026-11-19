@@ -3,7 +3,7 @@
 An MCP server that exposes a git-backed, Obsidian-compatible knowledge-base vault to Claude and other agents. Access is gated by Bearer tokens with hierarchical space/project/section `read`, `write` and `propose` scopes (stored in SQLite), and every call is audit-logged.
 
 - Transport: stateless Streamable HTTP at `POST /mcp` (TypeScript, Express 5, MCP SDK).
-- Twelve tools: nine vault tools (`kb_read`, `kb_write`, `kb_append`, `kb_archive`, `kb_list`, `kb_search`, `kb_history`, `kb_init_project`, `kb_propose`) and three access tools for token-less sessions (`kb_request_access`, `kb_access_status`, `kb_release_access`).
+- Thirteen tools: ten vault tools (`kb_read`, `kb_write`, `kb_edit`, `kb_append`, `kb_archive`, `kb_list`, `kb_search`, `kb_history`, `kb_init_project`, `kb_propose`) and three access tools for token-less sessions (`kb_request_access`, `kb_access_status`, `kb_release_access`).
 - Admin: a [web admin UI](#web-admin-ui) behind Traefik + Authelia (tokens, access requests, proposals inbox, vault browser, audit log) and `make` targets for tokens, access requests and the inbox.
 - Clients can also connect [without a token](#connecting-without-a-token) and ask the user for access, which the user approves in the admin.
 - Deployed with Docker Swarm (`docker stack deploy`, driven by the Makefile) behind the [traefik-base](https://github.com/barlito/traefik-base) stack (network `traefik_traefik_proxy`).
@@ -92,7 +92,7 @@ Adds frontmatter to existing notes that have none, and fills only the missing se
 
 ### Server instructions
 
-On connection the server sends MCP `instructions`: a compact core (about 600 characters) with the layout, the session-start routine (read `overview/index`, then the tail of the latest `journal/YYYY-MM`), how to use the `meta` space and a line on token-less access. Every other rule lives in the description of the tool it concerns: reserved sections, the 3 KB `overview/index` cap, frontmatter and `sources`, Docs map, short notes, re-read before overwriting, direct git commits (`kb_write`, `kb_init_project`); the `agents` space (handover note, caps, auto-archive) in the same two; the journal line (`kb_append`); archive instead of delete (`kb_archive`); `kb_history`, search hints and the `type` filter (`kb_search`); `kb_propose` when unsure; the whole access flow (`kb_request_access`, `kb_access_status`). Clients cut instructions at a size cap (Claude Code: 4096 characters), so the whole string (core + User context) has ONE budget, `INSTRUCTIONS_MAX_CHARS` = 4090 characters (Claude Code cuts only above 4096), overridable with the env var `MCP_INSTRUCTIONS_MAX_CHARS` (integer >= 1000; invalid values fall back to 4090 with one warning). The final string is always within it.
+On connection the server sends MCP `instructions`: a compact core (about 600 characters) with the layout, the session-start routine (read `overview/index`, then the tail of the latest `journal/YYYY-MM`), how to use the `meta` space and a line on token-less access. Every other rule lives in the description of the tool it concerns: reserved sections, the 3 KB `overview/index` cap, frontmatter and `sources`, Docs map, short notes, `base_version`/`kb_edit` instead of blind overwrites, direct git commits (`kb_write`, `kb_init_project`); the `agents` space (handover note, caps, auto-archive) in the same two; the journal line (`kb_append`); archive instead of delete (`kb_archive`); `kb_history`, search hints and the `type` filter (`kb_search`); `kb_propose` when unsure; the whole access flow (`kb_request_access`, `kb_access_status`). Clients cut instructions at a size cap (Claude Code: 4096 characters), so the whole string (core + User context) has ONE budget, `INSTRUCTIONS_MAX_CHARS` = 4090 characters (Claude Code cuts only above 4096), overridable with the env var `MCP_INSTRUCTIONS_MAX_CHARS` (integer >= 1000; invalid values fall back to 4090 with one warning). The final string is always within it.
 
 ### Agents space and space limits
 
@@ -120,16 +120,24 @@ All note-addressed tools take `space`, `project`, `section`, `note` (strings, ma
 
 - Args: `space`, `project`, `section`, `note`; optional `tail` (integer 1-500).
 - Permission: `read` on the section.
-- Returns the note as text. With `tail`, only the last N lines (a trailing newline is not counted as a line). Use it for recent journal history.
+- Returns the note as text. With `tail`, only the last N lines (a trailing newline is not counted as a line). Use it for recent journal history. A second text block `version: <sha>` is the note's version, the git blob SHA-1 of the file bytes (as `git hash-object`), also for `tail` reads; pass it as `base_version` to `kb_write`/`kb_edit`.
 - Errors: `Note not found.`; `Note is too large to read (<n> bytes, max 2097152).` (only for files that did not come through `kb_write`, e.g. pushed by a human).
 
 ### `kb_write`
 
-- Args: the four names plus `content` (string, max 512 x 1024 = 524288 characters, not bytes; more is rejected with ``Invalid argument `content`: too large (max 512 KB).`` (every argument that fails validation gets an ``Invalid argument `<name>`: ...`` message and an audit row)). Written with a normalized [frontmatter](#note-frontmatter) (outside `overview`, `journal`, `archive`), body unchanged.
+- Args: the four names plus `content` (string, max 512 x 1024 = 524288 characters, not bytes; more is rejected with ``Invalid argument `content`: too large (max 512 KB).`` (every argument that fails validation gets an ``Invalid argument `<name>`: ...`` message and an audit row)). Written with a normalized [frontmatter](#note-frontmatter) (outside `overview`, `journal`, `archive`), body unchanged. Optional `base_version` (40 lowercase hex, from `kb_read`) and `allow_shrink` (boolean).
 - Permission: `write` on the section.
-- Creates or overwrites the note and returns the git commit SHA. Rewriting identical content makes no commit and returns `No changes (content identical).` Commit message: `kb_write: <space>/<project>/<section>/<note> via <token name>`.
-- Errors: `Invalid frontmatter: ...` (bad YAML, bad `type` for the section, bad `sources`); ``Section `archive` is managed by kb_archive and cannot be written directly.``; for `overview/index` over 3 KB: `overview/index is too large (<n> bytes, max 3072). The entry note must stay small: move detail into other sections (decisions, conventions, notes) and link to those notes from the Docs map.`
-- Writes are direct and overwrite without merging: re-read before overwriting a note you did not just read.
+- Creates or overwrites the note and returns the git commit SHA. Rewriting identical content makes no commit and returns `No changes (content identical).` Commit message: `kb_write: <space>/<project>/<section>/<note> via <token name>`. A second text block `version: <new version>` follows the SHA (or `No changes ...`).
+- Errors: `Conflict: the note changed since you read it (current version <v>). Re-read it, merge your changes and retry.` (`base_version` does not match the bytes on disk, checked inside the write lock; `Conflict: the note no longer exists.` when the note is missing); `This write would shrink the note body from <a> to <b> bytes. To change part of a note use kb_edit; if condensing is intended, retry with allow_shrink: true.` (shrink guard: the existing body, frontmatter excluded, is at least 1024 bytes and the new one is under 50% of it; `kb_write` only); `Invalid frontmatter: ...` (bad YAML, bad `type` for the section, bad `sources`); ``Section `archive` is managed by kb_archive and cannot be written directly.``; for `overview/index` over 3 KB: `overview/index is too large (<n> bytes, max 3072). The entry note must stay small: move detail into other sections (decisions, conventions, notes) and link to those notes from the Docs map.`
+- Writes are direct and overwrite without merging: pass `base_version` from `kb_read` when overwriting, and prefer `kb_edit` for partial changes.
+
+### `kb_edit`
+
+- Args: the four names, `edits` (array of 1-20 `{old_str, new_str}`, `old_str` at least 1 character) and optional `base_version`.
+- Permission: `write` on the section.
+- Replaces text in an existing note without resending it. Edits apply in order, each on the text left by the previous one; each `old_str` must occur exactly once at its step. All or nothing. In notes with a frontmatter only the body is edited (the frontmatter is server-managed: use `kb_write` to change `type` or `sources`); notes without one (`overview`, `journal`) are edited as a whole. The result goes through the `kb_write` path inside the write lock: frontmatter normalization (`author` = token name, `updated` bumped), `overview/index` 3 KB cap, space limits; a result identical to the note makes no commit.
+- Returns the commit SHA and a second block `version: <new version>`. Commit message: `kb_edit: <space>/<project>/<section>/<note> via <token name>`.
+- Errors: `Note not found.`; `Edit <i>: old_str not found.`; `Edit <i>: old_str matches <n> times; add surrounding text to make it unique.` (`i` is 1-based); the `base_version` conflicts, the `archive` refusal and the `overview/index` error of `kb_write`.
 
 ### `kb_append`
 
@@ -206,6 +214,7 @@ Returned with `isError: true`:
 |---------|-------|
 | `Permission denied.` | Token has no scope covering that space/project/section/permission. Deliberately does not reveal whether the project exists. |
 | `Note not found.` | `kb_read`, `kb_archive` or `kb_history` on a missing note. |
+| `Conflict: the note changed since you read it (current version <v>). Re-read it, merge your changes and retry.` | `kb_write`/`kb_edit` with a `base_version` that no longer matches (`Conflict: the note no longer exists.` if the note is gone). |
 | `Invalid space/project/section/note name.` | A name does not match the slug rules. |
 | `Path not allowed.` | Path-safety check failed (escape from the vault root, symlink, not a regular file). |
 | `Vault is busy, retry in a moment.` | A human (or other git process) is using the vault repo: a rebase in progress or a recent `index.lock`. Retry. |
@@ -518,7 +527,7 @@ Hardened:
 
 Deliberate limits:
 
-- Wildcards are trailing-only (`*:*:*`, `space:*:*`, `space:project:*`) and `write` does not imply `read`; `propose` grants only `kb_propose`.
+- Wildcards are trailing-only (`*:*:*`, `space:*:*`, `space:project:*`) and `write` includes `read`; `propose` grants only `kb_propose`.
 - Names are strict slugs (no uppercase, dots, spaces or nested folders).
 - Single replica: one git working tree and one SQLite file, so tasks must never overlap (`stop-first` updates).
 - The auth-failure limiter state is in memory (reset on restart).

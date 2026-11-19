@@ -3,7 +3,8 @@ import { z } from "zod";
 import { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { readFileNoFollow } from "../vault/enumerate";
 import { resolveNotePath, UnsafePathError } from "../vault/paths";
-import { kbArgsShape, MAX_CONTENT_CHARS, RegisterTool, registerKbTool, toolError, toolText, withAclAndAudit } from "./common";
+import { noteVersion } from "../vault/noteVersion";
+import { kbArgsShape, MAX_CONTENT_CHARS, RegisterTool, registerKbTool, toolError, withAclAndAudit } from "./common";
 
 // Any note kb_write can produce fits (at most 4 UTF-8 bytes per char); anything
 // bigger was put there out of band and is refused rather than loaded whole.
@@ -17,7 +18,8 @@ export const register: RegisterTool = (server, { vaultRoot }) => {
     "kb_read",
     {
       description:
-        "Read a note from the shared knowledge base vault. Pass `tail` (1-500) to get only the last N lines, e.g. recent journal history.",
+        "Read a note from the shared knowledge base vault. Pass `tail` (1-500) to get only the last N lines, e.g. recent journal history. " +
+        "A second block `version: <sha>` identifies the note as read: pass it as `base_version` to kb_write/kb_edit.",
       inputSchema: {
         ...kbArgsShape,
         tail: z.number().int().min(1).max(500).optional().describe("Return only the last N lines of the note"),
@@ -49,10 +51,12 @@ export const register: RegisterTool = (server, { vaultRoot }) => {
         }
 
         const text = r.content;
-        if (tail === undefined) return { toolResult: toolText(text) };
+        const version = { type: "text" as const, text: `version: ${noteVersion(r.raw)}` };
+        if (tail === undefined) return { toolResult: { content: [{ type: "text", text }, version] } };
         const lines = text.split("\n");
         if (lines[lines.length - 1] === "") lines.pop();
-        return { toolResult: toolText(lines.slice(-tail).join("\n") + (lines.length ? "\n" : "")) };
+        const last = lines.slice(-tail).join("\n") + (lines.length ? "\n" : "");
+        return { toolResult: { content: [{ type: "text", text: last }, version] } };
       }),
   );
 };
