@@ -18,6 +18,8 @@ import { register as registerKbReadMany } from "./tools/kbReadMany";
 import { register as registerKbWrite } from "./tools/kbWrite";
 import { register as registerKbList } from "./tools/kbList";
 import { register as registerKbSearch } from "./tools/kbSearch";
+import { register as registerKbBacklinks } from "./tools/kbBacklinks";
+import { register as registerKbLint } from "./tools/kbLint";
 
 // Read at runtime (not imported) so tsc rootDir stays src/; resolves to the
 // repo-root package.json from both src/ and dist/.
@@ -35,6 +37,8 @@ const TOOLS: RegisterTool[] = [
   registerKbUnarchive,
   registerKbList,
   registerKbSearch,
+  registerKbBacklinks,
+  registerKbLint,
   registerKbHistory,
   registerKbInitProject,
   registerKbPropose,

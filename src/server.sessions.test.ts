@@ -197,6 +197,8 @@ test("without a grant every other kb_* tool is refused with the access hint, and
     ["kb_list", { space: "sp" }],
     ["kb_search", { query: "secret" }],
     ["kb_history", args],
+    ["kb_backlinks", args],
+    ["kb_lint", { space: "sp", project: "proj-a" }],
     ["kb_init_project", { space: "sp", project: "proj-z", summary: "s" }],
     ["kb_propose", { ...args, content: "c", reason: "r" }],
   ];

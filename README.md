@@ -3,7 +3,7 @@
 An MCP server that exposes a git-backed, Obsidian-compatible knowledge-base vault to Claude and other agents. Access is gated by Bearer tokens with hierarchical space/project/section `read`, `write` and `propose` scopes (stored in SQLite), and every call is audit-logged.
 
 - Transport: stateless Streamable HTTP at `POST /mcp` (TypeScript, Express 5, MCP SDK).
-- Sixteen tools: thirteen vault tools (`kb_read`, `kb_read_many`, `kb_context`, `kb_write`, `kb_edit`, `kb_append`, `kb_archive`, `kb_unarchive`, `kb_list`, `kb_search`, `kb_history`, `kb_init_project`, `kb_propose`) and three access tools for token-less sessions (`kb_request_access`, `kb_access_status`, `kb_release_access`).
+- Eighteen tools: fifteen vault tools (`kb_read`, `kb_read_many`, `kb_context`, `kb_write`, `kb_edit`, `kb_append`, `kb_archive`, `kb_unarchive`, `kb_list`, `kb_search`, `kb_history`, `kb_backlinks`, `kb_lint`, `kb_init_project`, `kb_propose`) and three access tools for token-less sessions (`kb_request_access`, `kb_access_status`, `kb_release_access`).
 - Admin: a [web admin UI](#web-admin-ui) behind Traefik + Authelia (tokens, access requests, proposals inbox, vault browser, audit log) and `make` targets for tokens, access requests and the inbox.
 - Clients can also connect [without a token](#connecting-without-a-token) and ask the user for access, which the user approves in the admin.
 - Deployed with Docker Swarm (`docker stack deploy`, driven by the Makefile) behind the [traefik-base](https://github.com/barlito/traefik-base) stack (network `traefik_traefik_proxy`).
@@ -199,6 +199,35 @@ All note-addressed tools take `space`, `project`, `section`, `note` (strings, ma
 - `(no commits yet)` when there is no history. History stops at the first older path the token cannot read and then ends with `(earlier history not accessible with this token)`.
 - Errors: `Note not found.` (no file and no history).
 
+### Links
+
+Notes link with Obsidian wikilinks: `[[target]]`, `[[target|alias]]`, `[[target#heading]]`, `![[embed]]`. Links inside frontmatter, fenced code blocks (also indented or in a blockquote) and inline code are ignored; indented (4-space) code blocks are not detected. In a table, `[[note\\|alias]]` targets `note`. A target (optional `.md` suffix, case-insensitive) resolves by its number of `/`-separated parts, from the note that contains it:
+
+- `name`: a note with that name in the same project (any section); if none, in the same space; if none, anywhere. The first level with a match wins; several matches at that level are ambiguous.
+- `section/name`: same project. `project/section/name`: same space. `space/project/section/name`: full path.
+
+Archived notes never resolve (a link to an archived note counts as broken), and only notes the token can read take part in resolution. A link naming a section the token cannot read (2+ parts) is reported by `kb_lint` as not checked rather than broken.
+
+### `kb_backlinks`
+
+- Args: `space`, `project`, `section`, `note`; optional `include_archived` (default false).
+- Permission: `read` on the note's section. Only sections the token can read are scanned (ACL before any directory or file is read).
+- Output lines `<space>/<project>/<section>/<note>: <line>` (one per linking note, up to 50); `No backlinks.` if none. Same caps as `kb_search` (3 s, 20 MB, 5000 notes) with a `(truncated: ...; results may be incomplete)` line.
+
+### `kb_lint`
+
+- Args: `space`, `project`; optional `stale_days` (integer 1-3650, default 180).
+- Permission: `read` on at least one section of the project; only readable sections are reported (a note says when some were skipped); nothing readable gives `Permission denied.`
+- Groups, each with a count, then a final `<n> issue(s).` line (`No issues.` when clean): broken links; ambiguous links; Docs map entries pointing to missing notes; notes not listed in the Docs map of `overview/index`; orphans (no incoming link from a readable note, not in the Docs map; `overview` and `journal` excluded); stale notes (frontmatter `updated`, else the last git commit date, older than `stale_days`; `overview` and `journal` excluded).
+- The Docs map (`## Docs map` in `overview/index`) lists notes as backticked names nested one level under a backticked section bullet (deeper bullets are ignored); any wikilink anywhere in `overview/index` also counts as listed. Example:
+
+```
+## Docs map
+- `decisions`
+  - `git-source-de-verite` : le vault git est la seule source de vérité
+- `journal` : notes mensuelles
+```
+
 ### `kb_init_project`
 
 - Args: `space`, `project`, `summary` (string, trimmed, 1-500 characters).
@@ -288,7 +317,7 @@ claude mcp add --scope user --transport http second-brain https://second-brain.b
 
 Without a valid, non-revoked key every token-less request gets a generic `401` before anything else happens (no session, no rate-limit bucket, only the coalesced auth-failure audit row), and with no key at all token-less access is disabled. The key is checked first and these failures never block anyone: a request with a valid key (or a valid Bearer token) is not refused because others fail from the same, possibly shared, address (e.g. a cloud egress IP). A session is bound to the key that opened it (another key gets `404`); revoking a key ends its sessions and their grants immediately. Requests with an `Authorization` header ignore the connector key entirely.
 
-With the key, a client can initialize, read the server instructions, list the tools and call the access tools `kb_request_access`, `kb_access_status` and `kb_release_access`, plus the read-only tools (`kb_read`, `kb_read_many`, `kb_context`, `kb_list`, `kb_search`, `kb_history`) on `meta` (baseline, see below). Every other tool is refused until a grant exists. The user stays the only one managing access and the agent never sees a token.
+With the key, a client can initialize, read the server instructions, list the tools and call the access tools `kb_request_access`, `kb_access_status` and `kb_release_access`, plus the read-only tools (`kb_read`, `kb_read_many`, `kb_context`, `kb_list`, `kb_search`, `kb_history`, `kb_backlinks`, `kb_lint`) on `meta` (baseline, see below). Every other tool is refused until a grant exists. The user stays the only one managing access and the agent never sees a token.
 
 Baseline: every session can read `meta` from its first request, with no access request. It holds the user's short notes on how they work, so an agent that does not need any project still has them. `SESSION_BASELINE_SCOPES` overrides it (comma-separated, e.g. `meta:*:*:read,idees:x:*:read`; `none` turns it off). Only `read` scopes are accepted and the space must be named (no `*:*:*:read`); an invalid value stops the server at startup. This is what a leaked connector key exposes, so keep secrets out of those spaces. Calls the baseline alone allows are signed `session-<client>` (also after a grant exists, when no grant covers them). A session with only the baseline follows the grantless expiry (1 h idle, `ANON_SESSION_MAX_HOURS`); the client re-initializes on `404` and keeps reading `meta`.
 
