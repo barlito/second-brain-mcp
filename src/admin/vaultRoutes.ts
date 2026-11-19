@@ -9,7 +9,7 @@ import type { SafeHtml } from "../web/html";
 import { Banner, Ctx, errorView } from "../web/views";
 import { atView, browseView, diffView, editView, historyView, newView, noteView } from "../web/vaultViews";
 import { AdminError } from "./service";
-import { archiveWebNote, browse, createNote, editNote, HASH_RE, NOT_UTF8_MESSAGE, noteAt, noteDiff, noteLog, NoteRef, restoreNote, showNote } from "./vault";
+import { archiveWebNote, browse, createNote, editNote, HASH_RE, NOT_UTF8_MESSAGE, currentBase, noteAt, noteDiff, noteLog, NoteRef, restoreNote, showNote } from "./vault";
 
 export interface VaultDeps {
   vaultRoot: string;
@@ -171,23 +171,25 @@ export function vaultRouter(d: VaultDeps): express.Router {
     const t = refOf(req);
     send(res, historyView(ctxOf(res), t, await noteLog(vaultRoot, t)));
   }));
+  // Base hash for the restore form; undefined = restore not offered (archived or unreadable note).
+  const restoreBase = async (t: NoteRef): Promise<string | undefined> => (t.section === ARCHIVE_SECTION ? undefined : currentBase(vaultRoot, t));
   r.get("/:space/:project/:section/:note/at/:hash", h(async (req, res) => {
     const t = refOf(req);
     const hash = req.params.hash as string;
-    send(res, atView(ctxOf(res), t, hash, t.section !== ARCHIVE_SECTION, await noteAt(vaultRoot, t, hash, typeof req.query.path === "string" ? req.query.path : undefined)));
+    send(res, atView(ctxOf(res), t, hash, await restoreBase(t), await noteAt(vaultRoot, t, hash, typeof req.query.path === "string" ? req.query.path : undefined)));
   }));
 
   r.get("/:space/:project/:section/:note/at/:hash/diff", h(async (req, res) => {
     const t = refOf(req);
     const hash = req.params.hash as string;
-    send(res, diffView(ctxOf(res), t, hash, t.section !== ARCHIVE_SECTION, await noteDiff(vaultRoot, t, hash), d.takeBanner(req, res)));
+    send(res, diffView(ctxOf(res), t, hash, await restoreBase(t), await noteDiff(vaultRoot, t, hash), d.takeBanner(req, res)));
   }));
   r.post("/:space/:project/:section/:note/at/:hash/restore", h(async (req, res) => {
     const t = refOf(req);
     const hash = req.params.hash as string;
     const short = hash.slice(0, 7);
     try {
-      const sha = await restoreNote(vaultRoot, t, hash, userOf(res));
+      const sha = await restoreNote(vaultRoot, t, hash, str((req.body as Record<string, unknown>).base), userOf(res));
       if (sha === null) {
         auditWrite(res, "web_note_restore", t, "ok", `restore to ${short}: no changes (content identical)`);
         d.redirectBanner(res, noteUrl(t), { kind: "ok", title: `No changes to ${t.note} (content identical to ${short}).` });
@@ -197,7 +199,7 @@ export function vaultRouter(d: VaultDeps): express.Router {
       }
     } catch (err) {
       auditWrite(res, "web_note_restore", t, "error", reasonOf(err));
-      if (err instanceof AdminError) {
+      if (err instanceof AdminError && err.status !== 409) {
         return d.redirectBanner(res, err.status === 404 ? dirOf(t) : noteUrl(t), { kind: "err", title: err.message });
       }
       throw err;

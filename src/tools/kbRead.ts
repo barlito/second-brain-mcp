@@ -5,7 +5,7 @@ import { readFileNoFollow } from "../vault/enumerate";
 import { resolveNotePath, UnsafePathError } from "../vault/paths";
 import { noteVersion } from "../vault/noteVersion";
 import { readNoteAtRevision } from "../vault/git";
-import { kbArgsShape, MAX_CONTENT_CHARS, RegisterTool, registerKbTool, toolError, withAclAndAudit } from "./common";
+import { canReadNotePath, kbArgsShape, MAX_CONTENT_CHARS, RegisterTool, registerKbTool, toolError, withAclAndAudit } from "./common";
 
 // Any note kb_write can produce fits (at most 4 UTF-8 bytes per char); anything
 // bigger was put there out of band and is refused rather than loaded whole.
@@ -35,11 +35,11 @@ export const register: RegisterTool = (server, { vaultRoot }) => {
       },
     },
     async ({ space, project, section, note, tail, rev }): Promise<CallToolResult> =>
-      withAclAndAudit("kb_read", { space, project, section, note }, "read", async () => {
+      withAclAndAudit("kb_read", { space, project, section, note }, "read", async (ctx) => {
         const absolutePath = resolveNotePath(vaultRoot, space, project, section, note);
 
         if (rev !== undefined) {
-          const r = await readNoteAtRevision(vaultRoot, absolutePath, rev, MAX_READ_BYTES);
+          const r = await readNoteAtRevision(vaultRoot, absolutePath, rev, MAX_READ_BYTES, (p) => canReadNotePath(ctx.scopes, p));
           if (!r.ok && r.reason === "unknown-rev") return { toolResult: toolError("Unknown revision."), audit: { detail: "unknown revision" } };
           if (!r.ok && r.reason === "missing") return { toolResult: toolError("Note not found at this revision."), audit: { detail: "note not found at revision" } };
           if (!r.ok) {

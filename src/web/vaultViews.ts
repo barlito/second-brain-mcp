@@ -139,21 +139,21 @@ export function historyView(ctx: Ctx, t: NoteRef, entries: NoteHistoryEntry[]): 
   );
 }
 
-const versionActions = (ctx: Ctx, p: string, hash: string, canRestore: boolean, other: SafeHtml): SafeHtml =>
+const versionActions = (ctx: Ctx, p: string, hash: string, restoreBase: string | undefined, other: SafeHtml): SafeHtml =>
   html`<div class="row">${other}${
-    canRestore
-      ? html`<form method="post" action="${p}/at/${hash}/restore" class="inline" data-confirm="Restore this version? It becomes the current content (a new commit; history is kept).">${csrfField(ctx)}<button class="btn" type="submit">${ICON.history}Restore this version</button></form>`
+    restoreBase
+      ? html`<form method="post" action="${p}/at/${hash}/restore" class="inline" data-confirm="Restore this version? It becomes the current content (a new commit; history is kept).">${csrfField(ctx)}<input type="hidden" name="base" value="${restoreBase}"><button class="btn" type="submit">${ICON.history}Restore this version</button></form>`
       : ""
   }</div>`;
 
-export function atView(ctx: Ctx, t: NoteRef, hash: string, canRestore: boolean, a: { content: string; truncated: boolean }): SafeHtml {
+export function atView(ctx: Ctx, t: NoteRef, hash: string, restoreBase: string | undefined, a: { content: string; truncated: boolean }): SafeHtml {
   const p = notePath(t);
   return layout(
     ctx,
     "/vault",
     TITLE,
     html`<div class="stack g12">${crumbs([t.space, t.project, t.section, t.note], true)}<h1>${t.note} at <code>${hash.slice(0, 7)}</code></h1><a class="back" href="${p}/history">${ICON.back}Back to history</a>
-${versionActions(ctx, p, hash, canRestore, html`<a class="btn" href="${p}/at/${hash}/diff">Diff with current</a>`)}</div>
+${versionActions(ctx, p, hash, restoreBase, html`<a class="btn" href="${p}/at/${hash}/diff">Diff with current</a>`)}</div>
 ${a.truncated ? html`<div class="banner warn">Output truncated.</div>` : ""}
 <div class="card pad"><pre>${a.content}</pre></div>`,
   );
@@ -161,7 +161,7 @@ ${a.truncated ? html`<div class="banner warn">Output truncated.</div>` : ""}
 
 const diffClass = (l: string): string => (l.startsWith("@@") ? "d-hunk" : l.startsWith("+") ? "d-add" : l.startsWith("-") ? "d-del" : "d-ctx");
 
-export function diffView(ctx: Ctx, t: NoteRef, hash: string, canRestore: boolean, d: { diff: string; truncated: boolean }, banner?: Banner): SafeHtml {
+export function diffView(ctx: Ctx, t: NoteRef, hash: string, restoreBase: string | undefined, d: { diff: string; truncated: boolean; binary: boolean }, banner?: Banner): SafeHtml {
   const p = notePath(t);
   const lines = d.diff.split("\n");
   if (lines[lines.length - 1] === "") lines.pop();
@@ -170,9 +170,9 @@ export function diffView(ctx: Ctx, t: NoteRef, hash: string, canRestore: boolean
     "/vault",
     TITLE,
     html`<div class="stack g12">${crumbs([t.space, t.project, t.section, t.note], true)}<h1>${t.note}: <code>${hash.slice(0, 7)}</code> vs current</h1><a class="back" href="${p}/history">${ICON.back}Back to history</a>
-${versionActions(ctx, p, hash, canRestore, html`<a class="btn" href="${p}/at/${hash}">View this version</a>`)}</div>
+${versionActions(ctx, p, hash, restoreBase, html`<a class="btn" href="${p}/at/${hash}">View this version</a>`)}</div>
 ${bannerView(banner)}
 ${d.truncated ? html`<div class="banner warn">Output truncated.</div>` : ""}
-<div class="card pad">${lines.length === 0 ? html`<p class="muted">No differences: the current version is identical.</p>` : html`<pre class="diff">${lines.map((l) => html`<span class="${diffClass(l)}">${l}</span>`)}</pre>`}</div>`,
+<div class="card pad">${d.binary ? html`<p class="muted">Binary or non-text change: no diff to show.</p>` : lines.length === 0 ? html`<p class="muted">No differences: the current version is identical.</p>` : html`<pre class="diff">${lines.map((l) => html`<span class="${diffClass(l)}">${l}</span>`)}</pre>`}</div>`,
   );
 }

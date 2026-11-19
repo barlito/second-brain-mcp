@@ -256,6 +256,7 @@ test("write-path conflict: event has origin=write, only exact server subjects at
     "chore: sp/p/s/note via mallory",
     "kb_write: a b via eve",
     "kb_write: sp/p/s/note via carol; kb_write: x via dave",
+    "kb_unarchive: sp/p/s/note via zed",
   ]);
   const events: import("./vault/git").SyncConflictEvent[] = [];
   let remoteHadBackup: string | null = null;

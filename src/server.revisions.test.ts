@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { cleanup, git, makeTempDb, makeTempVault } from "./test-support/fixtures";
 import { callTool, lastAudit, listen } from "./test-support/server";
 
+process.env.SPACE_LIMITS = "agents:maxNotes=3";
 makeTempDb();
 const { vault } = makeTempVault();
 process.env.VAULT_PATH = vault;
@@ -15,6 +16,8 @@ let rw: string;
 let ro: string;
 let noArchive: string;
 let noDest: string;
+let onlyArchive: string;
+let agentRw: string;
 const base = { space: "pro", project: "proj" };
 
 before(async () => {
@@ -29,6 +32,8 @@ before(async () => {
   const sc = (section: string) => ({ space: "pro", project: "proj", section, permission: "write" as const });
   noArchive = createToken("agent-noarch", [sc("notes")]).token;
   noDest = createToken("agent-nodest", [sc("archive")]).token;
+  onlyArchive = createToken("agent-oa", [{ space: "pro", project: "proj", section: "archive", permission: "read" }]).token;
+  agentRw = createToken("agent-ag", [{ space: "agents", project: "*", section: "*", permission: "write" }]).token;
   app = await listen(createApp({ vaultRoot: vault }));
 });
 
@@ -84,7 +89,7 @@ test("kb_unarchive: moves back, one commit, audited; refusals", async () => {
   await call(rw, "kb_write", { ...base, section: "notes", note: "old-idea", content: "idea\n" });
   const arch = await call(rw, "kb_archive", { ...base, section: "notes", note: "old-idea" });
   assert.equal(arch.text, "pro/proj/archive/notes-old-idea");
-  const args = { ...base, archived: "notes-old-idea", section: "decisions", note: "back" };
+  const args = { ...base, archived: "notes-old-idea", section: "notes", note: "back" };
 
   assert.deepEqual(await call(noArchive, "kb_unarchive", args), { isError: true, text: "Permission denied." });
   assert.deepEqual(await call(noDest, "kb_unarchive", args), { isError: true, text: "Permission denied." });
@@ -93,13 +98,23 @@ test("kb_unarchive: moves back, one commit, audited; refusals", async () => {
   assert.equal((await call(rw, "kb_unarchive", { ...args, section: "Bad" })).text, "Invalid space/project/section/note name.");
   assert.deepEqual(await call(rw, "kb_unarchive", { ...args, archived: "nope" }), { isError: true, text: "Note not found." });
 
+  // frontmatter type must fit the destination: a `note` is not a decision, and journal has none
+  for (const section of ["decisions", "conventions", "journal"]) {
+    const bad = await call(rw, "kb_unarchive", { ...args, section });
+    assert.equal(bad.isError, true, section);
+    assert.match(bad.text, /Cannot unarchive there: .*Try section `notes`\./, section);
+  }
+  assert.match((await call(rw, "kb_unarchive", { ...args, section: "decisions" })).text, /note type `note` is not allowed in section `decisions`/);
+  assert.equal(existsSync(join(vault, "pro/proj/archive/notes-old-idea.md")), true);
+
   const r = await call(rw, "kb_unarchive", args);
   assert.equal(r.isError, false, r.text);
-  assert.equal(r.text, "pro/proj/decisions/back");
+  assert.equal(r.text, "pro/proj/notes/back");
   assert.equal(existsSync(join(vault, "pro/proj/archive/notes-old-idea.md")), false);
-  assert.match(readFileSync(join(vault, "pro/proj/decisions/back.md"), "utf8"), /idea/);
-  assert.match(git(["log", "-1", "--format=%s"], vault), /^kb_unarchive: pro\/proj\/archive\/notes-old-idea -> decisions\/back via agent-rw/);
+  assert.match(readFileSync(join(vault, "pro/proj/notes/back.md"), "utf8"), /idea/);
+  assert.match(git(["log", "-1", "--format=%s"], vault), /^kb_unarchive: pro\/proj\/notes\/back via agent-rw\n?$/);
   const a = lastAudit(db, "action = 'kb_unarchive' AND result = 'ok'");
+  assert.equal(a.detail, "archive/notes-old-idea -> notes/back");
   assert.equal(a.git_commit, git(["rev-parse", "HEAD"], vault).trim());
 });
 
@@ -121,4 +136,47 @@ test("kb_unarchive: destination exists, entry note cap, uncommitted changes", as
   writeFileSync(join(vault, "pro/proj/archive/notes-a.md"), "dirty\n");
   const dirty = await call(rw, "kb_unarchive", { ...base, archived: "notes-a", section: "notes", note: "a2" });
   assert.match(dirty.text, /uncommitted changes/);
+});
+
+test("kb_unarchive: a decision goes back to decisions, not to notes", async () => {
+  await call(rw, "kb_write", { ...base, section: "decisions", note: "pick-db", content: "use sqlite\n" });
+  const arch = await call(rw, "kb_archive", { ...base, section: "decisions", note: "pick-db" });
+  assert.equal(arch.text, "pro/proj/archive/decisions-pick-db");
+  const bad = await call(rw, "kb_unarchive", { ...base, archived: "decisions-pick-db", section: "notes", note: "pick-db" });
+  assert.equal(bad.isError, true);
+  assert.match(bad.text, /type `decision` is not allowed in section `notes`.*Try section `decisions`/);
+  const ok = await call(rw, "kb_unarchive", { ...base, archived: "decisions-pick-db", section: "decisions", note: "pick-db" });
+  assert.equal(ok.text, "pro/proj/decisions/pick-db");
+});
+
+test("kb_unarchive: space limits apply to the destination", async () => {
+  const b = { space: "agents", project: "bot" };
+  for (const n of ["a", "b", "c"]) assert.equal((await call(agentRw, "kb_write", { ...b, section: "notes", note: n, content: `${n}\n` })).isError, false);
+  assert.equal((await call(agentRw, "kb_archive", { ...b, section: "notes", note: "a" })).isError, false);
+  assert.equal((await call(agentRw, "kb_write", { ...b, section: "notes", note: "d", content: "d\n" })).isError, false);
+  const r = await call(agentRw, "kb_unarchive", { ...b, archived: "notes-a", section: "notes", note: "a" });
+  assert.equal(r.isError, true);
+  assert.match(r.text, /Note limit reached for agents\/bot/);
+  assert.equal(existsSync(join(vault, "agents/bot/archive/notes-a.md")), true);
+});
+
+test("kb_read rev: only commits on the main history, renames followed with ACL", async () => {
+  const t = { ...base, section: "notes", note: "mover" };
+  await call(rw, "kb_write", { ...t, content: "moving\n" });
+  const v1 = git(["rev-parse", "HEAD"], vault).trim();
+  // unrelated later commit: still resolves to the note's state at that commit
+  await call(rw, "kb_write", { ...base, section: "notes", note: "unrelated", content: "u\n" });
+  const later = git(["rev-parse", "HEAD"], vault).trim();
+  assert.match((await call(ro, "kb_read", { ...t, rev: later })).text, /moving/);
+
+  // dangling commit (not an ancestor of HEAD)
+  const dangling = git(["commit-tree", "HEAD^{tree}", "-m", "dangling"], vault).trim();
+  assert.deepEqual(await call(ro, "kb_read", { ...t, rev: dangling }), { isError: true, text: "Unknown revision." });
+
+  const arch = await call(rw, "kb_archive", t);
+  const archived = { ...base, section: "archive", note: arch.text.split("/").pop()! };
+  // pre-archive sha read through the archived path (history followed)
+  assert.match((await call(ro, "kb_read", { ...archived, rev: v1 })).text, /moving/);
+  // a token that can read archive but not notes cannot see the pre-archive version
+  assert.deepEqual(await call(onlyArchive, "kb_read", { ...archived, rev: v1 }), { isError: true, text: "Note not found at this revision." });
 });

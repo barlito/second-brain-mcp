@@ -6,6 +6,7 @@ import { MoveSourceDirtyError, MoveSourceMissingError, MoveTargetExistsError, sy
 import { isValidSlug, resolveNotePath } from "../vault/paths";
 import { INVALID_NAME, kbArgsShape, noteGate, Gate, auditedCall, RegisterTool, registerKbTool, toolError, toolText } from "./common";
 import { NoteRuleError, validateNoteContent } from "./conventions";
+import { frontmatterMoveIssue } from "./frontmatter";
 import { ARCHIVE_SECTION } from "./reserved";
 import { MAX_READ_BYTES } from "./kbRead";
 
@@ -52,10 +53,15 @@ export const register: RegisterTool = (server, { vaultRoot }) => {
             vaultRoot,
             from,
             to,
-            `kb_unarchive: ${space}/${project}/archive/${archived} -> ${section}/${note} via ${ctx.name}`,
+            `kb_unarchive: ${space}/${project}/${section}/${note} via ${ctx.name}`,
             async () => {
               const r = await readFileNoFollow(from, MAX_READ_BYTES);
               if (!r) throw new NoteRuleError("Note is too large to move.", "note too large");
+              const issue = frontmatterMoveIssue(section, r.content);
+              if (issue) {
+                const origin = archived.split("-")[0]; // archive names start with the original section
+                throw new NoteRuleError(`Cannot unarchive there: ${issue}. Try section \`${origin}\`.`, "frontmatter mismatch");
+              }
               validateNoteContent({ section, note }, r.content);
               assertSpaceLimits(vaultRoot, { space, project, section, note }, r.bytes);
             },

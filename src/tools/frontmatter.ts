@@ -232,3 +232,19 @@ export function fillMissingFrontmatter(content: string, o: FillOptions): string 
 }
 
 export const utcToday = (now = new Date()): string => now.toISOString().slice(0, 10);
+
+// Can this note move into `section`? Returns a reason or undefined. A note with frontmatter keeps
+// it as is, so its type must be one the section allows; sections without frontmatter take none.
+export function frontmatterMoveIssue(section: string, content: string): string | undefined {
+  const p = parseLenient(content);
+  if (!p?.present) return undefined;
+  if (!hasFrontmatter(section)) return `section \`${section}\` does not use frontmatter, but the note has some`;
+  const type = p.data.type;
+  if (type === undefined || type === null) return undefined;
+  try {
+    validateType(section, type);
+  } catch {
+    return `note type \`${String(type)}\` is not allowed in section \`${section}\``;
+  }
+  return undefined;
+}
