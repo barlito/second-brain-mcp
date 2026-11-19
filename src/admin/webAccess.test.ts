@@ -98,12 +98,12 @@ after(async () => {
   cleanup();
 });
 
-test("access page: pending request with client, IP, project, reason (escaped), code, default scopes; dashboard badge", async () => {
+test("access page: pending request with client, IP, project, reason (escaped), default scopes; dashboard badge", async () => {
   const s = newSession();
   const r = ask(s.id, "pro", "alpha", "write");
   const page = await get("/access");
   assert.equal(page.status, 200);
-  assert.doesNotMatch(page.body, new RegExp(r.code), "the code is never displayed on the card");
+  assert.doesNotMatch(page.body, /name="code"|Request code/);
   assert.match(page.body, new RegExp(r.id));
   assert.match(page.body, /Claude Code/);
   assert.match(page.body, /203\.0\.113\.7/);
@@ -122,29 +122,23 @@ test("approve via the page with editable scopes, then active sessions + revoke; 
   const r = ask(s.id, "pro", "beta", "read");
   const path = `/access/${r.id}/approve`;
   const scopes = "meta:*:*:read\npro:beta:notes:read";
-  const code = r.code;
-  assert.equal((await post(path, { scopes, code }, { csrf: null })).status, 403);
-  assert.equal((await post(path, { scopes, code }, { csrf: "0".repeat(64) })).status, 403);
-  assert.equal((await post(path, { scopes, code }, { origin: "http://evil.example" })).status, 403);
-  assert.equal((await post(path, { scopes, code }, { nonce: null })).status, 409);
+  assert.equal((await post(path, { scopes }, { csrf: null })).status, 403);
+  assert.equal((await post(path, { scopes }, { csrf: "0".repeat(64) })).status, 403);
+  assert.equal((await post(path, { scopes }, { origin: "http://evil.example" })).status, 403);
+  assert.equal((await post(path, { scopes }, { nonce: null })).status, 409);
   assert.equal(sessions.listGrants(s.id).length, 0, "nothing granted by refused posts");
-
-  // The typed code is mandatory and compared server-side.
-  assert.match((await follow(await post(path, { scopes }))).body, /Type the request code/);
-  assert.match((await follow(await post(path, { scopes, code: "AAAAAA" }))).body, /Type the request code/);
-  assert.equal(sessions.listGrants(s.id).length, 0);
 
   // The page shows no wildcard checkbox.
   assert.doesNotMatch((await get("/access")).body, /allow_wildcard|Allow wildcard/);
 
-  const ok = await follow(await post(path, { scopes, code }));
+  const ok = await follow(await post(path, { scopes }));
   assert.match(ok.body, /Approved pro\/beta as session-claude-desktop-pro-beta/);
   assert.deepEqual(sessions.listGrants(s.id).flatMap((g) => g.scopes.map((x) => `${x.section}:${x.permission}`)), ["*:read", "notes:read"]);
   const row = db.prepare("SELECT action, token_name FROM audit_log WHERE action = 'access_approve' ORDER BY id DESC").get() as any;
   assert.equal(row.token_name, "admin:alice");
 
   // Replay with a spent nonce is refused.
-  assert.equal((await post(path, { scopes, code }, { nonce: "a".repeat(32) })).status, 409);
+  assert.equal((await post(path, { scopes }, { nonce: "a".repeat(32) })).status, 409);
 
   const page = await get("/access");
   assert.match(page.body, /session-claude-desktop-pro-beta/);
@@ -182,7 +176,7 @@ test("page shows the session's CURRENT grants next to the requested ones and lab
   assert.equal(first.elevation, 0);
   let page = await get("/access");
   assert.doesNotMatch(cardOf(page.body, first.id), /elevation/);
-  access.approveRequest(first.id, { actor: "admin:alice", code: first.code });
+  access.approveRequest(first.id, { actor: "admin:alice" });
   const up = ask(s.id, "pro", "delta", "write");
   assert.equal(up.elevation, 1);
   page = await get("/access");
@@ -197,7 +191,7 @@ test("page shows the session's CURRENT grants next to the requested ones and lab
 
 test("tokens page marks session grants; revoking one there cuts the session", async () => {
   const s = newSession();
-  { const q = ask(s.id, "pro", "epsilon"); access.approveRequest(q.id, { actor: "t", code: q.code }); }
+  { const q = ask(s.id, "pro", "epsilon"); access.approveRequest(q.id, { actor: "t" }); }
   const hidden = await get("/tokens");
   assert.doesNotMatch(hidden.body, /session-claude-code-pro-epsilon/, "session grants are hidden by default");
   assert.match(hidden.body, /href="\/tokens\?sessions=1"/);
@@ -217,12 +211,12 @@ test("approving a *:*:*:write request needs no flag; the page showed a Whole vau
   const page = (await get("/access")).body;
   assert.match(page, /Whole vault/);
   assert.doesNotMatch(page, /allow_wildcard|Allow wildcard/);
-  const res = await follow(await post(`/access/${r.id}/approve`, { scopes: "*:*:*:write", code: r.code }));
+  const res = await follow(await post(`/access/${r.id}/approve`, { scopes: "*:*:*:write" }));
   assert.match(res.body, /Approved pro\/wild/);
   assert.equal(sessions.listGrants(s.id).length, 1);
 });
 
-test("CLI: access list / approve (code or id, scope override, wildcard without flag) / deny", async () => {
+test("CLI: access list / approve (scope override, wildcard without flag) / deny", async () => {
   const { run } = await import("../cli/access");
   const base = `http://127.0.0.1:${(adminSrv.address() as AddressInfo).port}`;
   const s = newSession("Claude Code");
@@ -230,24 +224,19 @@ test("CLI: access list / approve (code or id, scope override, wildcard without f
   const r2 = ask(s.id, "pro", "cli-b", "read");
   const r3 = ask(s.id, "pro", "cli-c", "read");
 
-  const hidden = await run(["list"], base);
-  assert.ok(!hidden.includes(r1.code) && !hidden.includes("code="), "codes hidden by default");
-  const list = await run(["list", "--codes"], base);
-  assert.match(list, new RegExp(`${r1.id}  code=${r1.code}  client=Claude Code 1.2.3  ip=203\\.0\\.113\\.7.*scopes=\\[meta:\\*:\\*:read, pro:cli-a:\\*:read, pro:cli-a:\\*:write\\]`));
+  const list = await run(["list"], base);
+  assert.match(list, new RegExp(`${r1.id}  client=Claude Code 1.2.3  ip=203\\.0\\.113\\.7.*scopes=\\[meta:\\*:\\*:read, pro:cli-a:\\*:read, pro:cli-a:\\*:write\\]`));
   assert.match(list, /Active sessions:|No active sessions/);
 
-  // by code, default scopes
-  const a = await run(["approve", r1.code.toLowerCase()], base);
+  const a = await run(["approve", r1.id], base);
   assert.match(a, /Approved pro\/cli-a as session-claude-code-pro-cli-a: meta:\*:\*:read, pro:cli-a:\*:read, pro:cli-a:\*:write/);
   // by id, explicit scope; wildcard needs no flag
-  await assert.rejects(run(["approve", r2.id, "--scope", "pro:*:*:read"], base), /Type the request code/);
-  assert.equal(sessions.listGrants(s.id).length, 1);
-  assert.match(await run(["approve", r2.id, "--code", r2.code, "--scope", "pro:*:*:read", "--allow-wildcard"], base), /Approved pro\/cli-b/);
+  assert.match(await run(["approve", r2.id, "--scope", "pro:*:*:read", "--allow-wildcard"], base), /Approved pro\/cli-b/);
   await assert.rejects(run(["approve", r2.id], base), /already approved/);
-  await assert.rejects(run(["approve", r3.id, "--code", r3.code, "--scope", "garbage"], base), /invalid scope/);
-  assert.match(await run(["deny", r3.code], base), /Denied access request for pro\/cli-c/);
-  await assert.rejects(run(["deny", r3.code], base), /not found/);
-  await assert.rejects(run(["approve", "bad ref!"], base), /invalid request id or code|usage/i);
+  await assert.rejects(run(["approve", r3.id, "--scope", "garbage"], base), /invalid scope/);
+  assert.match(await run(["deny", r3.id], base), /Denied access request for pro\/cli-c/);
+  await assert.rejects(run(["deny", r3.id], base), /already denied/);
+  await assert.rejects(run(["approve", "bad ref!"], base), /invalid request id|usage/i);
   await assert.rejects(run(["frobnicate"], base), /usage/);
   assert.ok(db.prepare("SELECT 1 FROM audit_log WHERE action = 'access_approve' AND token_name = 'admin-cli'").get());
   assert.ok(db.prepare("SELECT 1 FROM audit_log WHERE action = 'access_deny' AND token_name = 'admin-cli'").get());
@@ -264,12 +253,10 @@ test("card lists each requested scope with writes highlighted, warns when scopes
   assert.match(card, /<span class="scope-path">pro:zeta:notes<\/span><span class="scope-perm p-read">read<\/span>/);
   assert.match(card, /<span class="scope-path">pro:other:notes<\/span><span class="scope-perm p-write">read &amp; write<\/span>/);
   assert.match(card, /scopes exceed the stated request/);
-  assert.ok(!card.slice(0, 1500).includes(r.code), "code not shown");
-  assert.match(card, /Request code/);
   const t = ask(s.id, "pro", "eta", "read", { scopes: ["pro:eta:notes:read"] });
   const page2 = await get("/access");
   assert.doesNotMatch(cardOf(page2.body, t.id), /exceed/);
-  access.approveRequest(t.id, { actor: "t", code: t.code });
+  access.approveRequest(t.id, { actor: "t" });
   const sessionsPage = (await get("/access")).body;
   assert.match(sessionsPage, /<th>Created<\/th><th>Last seen<\/th><th>Expires<\/th>/);
 });
@@ -319,7 +306,7 @@ test("connector keys: create (one-time page with header + Copy), list, reveal (a
 
   // Revoke: its sessions and their grants end now.
   const s = sessions.createSession({ clientName: "Claude Code", clientVersion: "1", ip: "203.0.113.9", connectorKeyId: id.id });
-  access.approveRequest(ask(s.id, "pro", "kappa").id, { actor: "t", code: (db.prepare("SELECT code FROM access_requests WHERE session_id = ?").get(s.id) as any).code });
+  access.approveRequest(ask(s.id, "pro", "kappa").id, { actor: "t" });
   assert.match((await get("/access")).body, /<th>Key<\/th>/);
   const done = await follow(await post(`/access/keys/${id.id}/revoke`, {}));
   assert.match(done.body, /Key revoked, 1 session\(s\) ended/);
@@ -363,7 +350,7 @@ test("connector key CLI: create, show (audited), list, revoke", async () => {
 test("a grant released by the agent disappears from the active sessions list and the token shows revoked", async () => {
   const s = newSession("Releasing Agent");
   const r = ask(s.id, "pro", "gamma", "write");
-  access.approveRequest(r.id, { actor: "admin:test", code: r.code });
+  access.approveRequest(r.id, { actor: "admin:test" });
   let page = await get("/access");
   assert.match(page.body, /Releasing Agent/);
   assert.match(page.body, /pro:gamma:\*/);
@@ -458,7 +445,7 @@ test("SSE: first event carries the current rev and pending count; ask, approve a
     const e3 = await st.next(3);
     assert.deepEqual(e3, { rev: e2.rev + 1, pending: e2.pending + 1 });
 
-    await follow(await post(`/access/${a.id}/approve`, { scopes: "pro:sse-a:*:read", code: a.code }));
+    await follow(await post(`/access/${a.id}/approve`, { scopes: "pro:sse-a:*:read" }));
     const e4 = await st.next(4);
     assert.equal(e4.rev, e3.rev + 1);
     assert.equal(e4.pending, e3.pending - 1);

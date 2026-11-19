@@ -173,15 +173,15 @@ inbox-reject: ## Reject a proposal (make inbox-reject id=<id>)
 	@test -n "$(id)" || { echo "id is required (make inbox-reject id=<id>)" >&2; exit 1; }
 	@$(call exec_in_service,node dist/cli/inbox.js reject "$(id)")
 
-access-list: ## List pending access requests (token-less sessions) and active sessions (codes hidden; codes=1 shows them)
-	@$(call exec_in_service,node dist/cli/access.js list $(if $(codes),--codes))
+access-list: ## List pending access requests (token-less sessions) and active sessions
+	@$(call exec_in_service,node dist/cli/access.js list)
 
-access-approve: ## Approve an access request (make access-approve id=<code> | id=<uuid> code=<code> [scope=s:p:sec:perm,...]); default scopes: meta read + the project
-	@test -n "$(id)" || { echo "id is required (make access-approve id=<id|code>)" >&2; exit 1; }
-	@$(call exec_in_service,node dist/cli/access.js approve "$(id)" $(if $(code),--code "$(code)") $(if $(scope),--scope "$(scope)"))
+access-approve: ## Approve an access request (make access-approve id=<uuid> [scope=s:p:sec:perm,...]); default scopes: meta read + the project
+	@test -n "$(id)" || { echo "id is required (make access-approve id=<uuid>)" >&2; exit 1; }
+	@$(call exec_in_service,node dist/cli/access.js approve "$(id)" $(if $(scope),--scope "$(scope)"))
 
-access-deny: ## Deny an access request (make access-deny id=<id|code>)
-	@test -n "$(id)" || { echo "id is required (make access-deny id=<id|code>)" >&2; exit 1; }
+access-deny: ## Deny an access request (make access-deny id=<uuid>)
+	@test -n "$(id)" || { echo "id is required (make access-deny id=<uuid>)" >&2; exit 1; }
 	@$(call exec_in_service,node dist/cli/access.js deny "$(id)")
 
 connector-key-create: ## Create a connector key for token-less clients (make connector-key-create name=claude-ai); shown once

@@ -3,7 +3,7 @@
 import { parseArgs as nodeParseArgs } from "node:util";
 import { adminUrl } from "./inbox";
 
-export const USAGE = "usage: access.js <list [--codes] | approve <code> | approve <id> --code <code>  [--scope s:p:sec:perm,...] [--allow-wildcard (ignored)] | deny <id|code>>";
+export const USAGE = "usage: access.js <list | approve <id> [--scope s:p:sec:perm,...] [--allow-wildcard (ignored)] | deny <id>>";
 
 async function call(base: string, method: string, path: string, body?: unknown): Promise<{ status: number; json: any }> {
   let res: Response;
@@ -33,7 +33,7 @@ export async function run(argv: string[], base = adminUrl()): Promise<string> {
   const { values, positionals } = nodeParseArgs({
     args: argv,
     allowPositionals: true,
-    options: { scope: { type: "string" }, code: { type: "string" }, codes: { type: "boolean" }, "allow-wildcard": { type: "boolean" } },
+    options: { scope: { type: "string" }, "allow-wildcard": { type: "boolean" } },
   });
   const ref = (): string => {
     const r = positionals[1];
@@ -42,11 +42,11 @@ export async function run(argv: string[], base = adminUrl()): Promise<string> {
   };
   switch (positionals[0]) {
     case "list": {
-      const { requests, sessions } = need(await call(base, "GET", values.codes ? "/admin/access?codes=1" : "/admin/access"));
+      const { requests, sessions } = need(await call(base, "GET", "/admin/access"));
       const out: string[] = [];
       out.push(requests.length === 0 ? "No pending access requests." : "Pending access requests:");
       for (const r of requests) {
-        out.push(`${r.id}${r.code ? `  code=${r.code}` : ""}${r.elevation ? "  ELEVATION" : ""}  client=${r.client_name} ${r.client_version}  ip=${r.remote_ip ?? "?"}  created=${r.created_at}  scopes=[${r.requested_scopes.map(fmt).join(", ")}]${r.exceeds ? "  SCOPES EXCEED THE STATED REQUEST" : ""}  ${JSON.stringify(r.reason)}`);
+        out.push(`${r.id}${r.elevation ? "  ELEVATION" : ""}  client=${r.client_name} ${r.client_version}  ip=${r.remote_ip ?? "?"}  created=${r.created_at}  scopes=[${r.requested_scopes.map(fmt).join(", ")}]${r.exceeds ? "  SCOPES EXCEED THE STATED REQUEST" : ""}  ${JSON.stringify(r.reason)}`);
       }
       out.push(sessions.length === 0 ? "No active sessions with access." : "Active sessions:");
       for (const s of sessions) {
@@ -57,7 +57,6 @@ export async function run(argv: string[], base = adminUrl()): Promise<string> {
     case "approve": {
       const body: Record<string, unknown> = {};
       if (values.scope) body.scope = values.scope;
-      if (values.code) body.code = values.code;
       const r = need(await call(base, "POST", `/admin/access/${ref()}/approve`, body));
       return `Approved ${r.space}/${r.project} as ${r.tokenName}: ${r.scopes.map(fmt).join(", ")}${(r.notes as string[]).map((n) => `\nnote: ${n}`).join("")}`;
     }

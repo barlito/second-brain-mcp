@@ -547,7 +547,6 @@ export function createWebAdminApp(opts: WebAdminOptions): Express {
       const text = str(body.scopes);
       const d = approveRequest(req.params.id as string, {
         scopes: text.trim() ? scopesFromText(text) : undefined,
-        code: str(body.code),
         actor: res.locals.actor as string,
       });
       accessBanner(res, { kind: "ok", title: `Approved ${d.space}/${d.project} as ${d.tokenName}.`, lines: [d.scopes.map(formatScope).join(", "), ...d.notes] });
