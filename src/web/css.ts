@@ -57,6 +57,7 @@ code { background: var(--code-bg); padding: 1px 5px; border-radius: 4px; overflo
 pre { background: var(--code-bg); padding: 12px 14px; border-radius: 8px; overflow-x: auto; white-space: pre-wrap; overflow-wrap: anywhere; margin: 0; line-height: 1.6; }
 .muted, .hint { color: var(--muted); }
 .hint { font-size: 13px; }
+.anchor { scroll-margin-top: 16px; }
 .small { font-size: 12px; }
 .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 [hidden] { display: none !important; }
