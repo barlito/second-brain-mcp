@@ -3,7 +3,7 @@
 An MCP server that exposes a git-backed, Obsidian-compatible knowledge-base vault to Claude and other agents. Access is gated by Bearer tokens with hierarchical space/project/section `read`, `write` and `propose` scopes (stored in SQLite), and every call is audit-logged.
 
 - Transport: stateless Streamable HTTP at `POST /mcp` (TypeScript, Express 5, MCP SDK).
-- Eighteen tools: fifteen vault tools (`kb_read`, `kb_read_many`, `kb_context`, `kb_write`, `kb_edit`, `kb_append`, `kb_archive`, `kb_unarchive`, `kb_list`, `kb_search`, `kb_history`, `kb_backlinks`, `kb_lint`, `kb_init_project`, `kb_propose`) and three access tools for token-less sessions (`kb_request_access`, `kb_access_status`, `kb_release_access`).
+- Nineteen tools: sixteen vault tools (`kb_read`, `kb_read_many`, `kb_context`, `kb_write`, `kb_edit`, `kb_append`, `kb_archive`, `kb_unarchive`, `kb_move`, `kb_list`, `kb_search`, `kb_history`, `kb_backlinks`, `kb_lint`, `kb_init_project`, `kb_propose`) and three access tools for token-less sessions (`kb_request_access`, `kb_access_status`, `kb_release_access`).
 - Admin: a [web admin UI](#web-admin-ui) behind Traefik + Authelia (tokens, access requests, proposals inbox, vault browser, audit log) and `make` targets for tokens, access requests and the inbox.
 - Clients can also connect [without a token](#connecting-without-a-token) and ask the user for access, which the user approves in the admin.
 - Deployed with Docker Swarm (`docker stack deploy`, driven by the Makefile) behind the [traefik-base](https://github.com/barlito/traefik-base) stack (network `traefik_traefik_proxy`).
@@ -176,6 +176,18 @@ All note-addressed tools take `space`, `project`, `section`, `note` (strings, ma
 - Permission: `write` on `<space>:<project>:archive` AND `write` on the destination section (`Permission denied.` otherwise).
 - Moves `<space>/<project>/archive/<archived>` to `<space>/<project>/<section>/<note>` in one git commit (`kb_unarchive: <space>/<project>/<section>/<note> via <token>`; the archive name is in the audit detail) and returns the new location, e.g. `pro/myproj/decisions/old-idea`. The note keeps its content; the destination rules apply (3 KB cap for `overview/index`, space limits), and the note's frontmatter `type` must be one the destination section allows (a `decision` goes back to `decisions`, not `notes`; `overview` and `journal` take notes without frontmatter only). The archived name starts with the original section.
 - Errors: `Note not found.`; `A note already exists at the destination.`; ``Section `archive` is managed by kb_archive and cannot be written directly.`` (destination `archive`); `Note has uncommitted changes in the vault; commit or discard them first.`; `Note is too large to move.`; `Cannot unarchive there: note type ... is not allowed in section ... Try section ...` (frontmatter mismatch); the `overview/index` and space-limit errors of `kb_write`.
+
+### `kb_move`
+
+- Args: `space`, `project`, `section`, `note` (the source), `to_section`, `to_note`; optional `to_space`, `to_project` (default: the source's), `rewrite_links` (boolean, default true).
+- Permission: `write` on the source section AND `write` on the destination section (else `Permission denied.`).
+- Moves or renames the note, rewrites the links pointing to it and updates the Docs map, all in ONE commit `kb_move: <from> -> <to> via <token name>`.
+- Frontmatter: a `type` the destination section refuses (e.g. `decision` moved to `notes`) becomes that section's default, with `author`/`updated` set as for a `kb_write`; everything else is kept. Moving into `overview` or `journal` keeps the note as is.
+- [Links](#links): every note the token can read is scanned (same caps as `kb_backlinks`); each link that resolved to the moved note gets only its target rewritten (`#heading`, `|alias`, `!` kept) to a form that resolves to the new path from that note: the same number of parts if that is unique, else the shortest unique form. Links of the moved note itself are fixed the same way when the move changes how they resolve. Notes the token can read but not write, and notes with uncommitted changes, are listed as not updated. `rewrite_links: false` only moves.
+- Docs map: in the source project's `overview/index` (when readable), a backticked entry is renamed, or moved under the destination section bullet; without that bullet, or for a move to another project, it is reported to fix by hand. Not writable: reported.
+- Output: `Moved to <path> (commit <sha>).`, `Links rewritten: <n> in <m> note(s).`, the not-updated lists, the Docs map change, and the scan `(truncated: ...)` line if any.
+- Space limits apply to the moved note and every rewritten note; the 3 KB cap applies to a rewritten `overview/index`; any refusal leaves the vault untouched.
+- Errors: ``Section `archive` is managed by kb_archive; kb_move cannot move notes into or out of it.``; `The project entry note (overview/index) cannot be moved or replaced.`; `Source and destination are the same note.`; `Note not found.`; `Destination note already exists.`; `Note has uncommitted changes in the vault; commit or discard them first.`
 
 ### `kb_list`
 
