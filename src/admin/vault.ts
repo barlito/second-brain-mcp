@@ -217,17 +217,91 @@ export async function noteLog(vaultRoot: string, t: NoteRef): Promise<NoteHistor
 // `hash` must already match HASH_RE (40 hex, so it can never be read as an option). The path is
 // never taken from the client: it must be the one noteHistory reports for that exact commit
 // (it differs from the current path for notes renamed/archived since).
-export async function noteAt(vaultRoot: string, t: NoteRef, hash: string, atPath?: string): Promise<{ content: string; truncated: boolean }> {
+export async function noteAt(vaultRoot: string, t: NoteRef, hash: string, atPath?: string): Promise<{ content: string; truncated: boolean; utf8: boolean }> {
   if (!HASH_RE.test(hash)) throw new AdminError(404, "not found");
   const abs = resolve(vaultRoot, t);
   const { entries } = await noteHistory(vaultRoot, abs, MAX_HISTORY_SCAN);
   const e = entries.find((x) => x.hash === hash);
   if (!e || (atPath !== undefined && atPath !== e.path)) throw new AdminError(404, "note not found at this commit");
   let out: string;
+  let utf8 = true;
   try {
     out = await runGit(["show", `${hash}:./${e.path}`], vaultRoot);
+    // Decoding invalid bytes yields U+FFFD (3 bytes): a size mismatch with the blob means it was lossy.
+    if (out.includes("\uFFFD")) {
+      const size = Number((await runGit(["cat-file", "-s", `${hash}:./${e.path}`], vaultRoot)).trim());
+      utf8 = Buffer.byteLength(out, "utf8") === size;
+    }
   } catch {
     throw new AdminError(404, "note not found at this commit");
   }
-  return out.length > MAX_SHOW_CHARS ? { content: out.slice(0, MAX_SHOW_CHARS), truncated: true } : { content: out, truncated: false };
+  return out.length > MAX_SHOW_CHARS ? { content: out.slice(0, MAX_SHOW_CHARS), truncated: true, utf8 } : { content: out, truncated: false, utf8 };
+}
+
+// Unified diff from the version at commit `hash` to the current one (hunks only, git's own output).
+export async function noteDiff(vaultRoot: string, t: NoteRef, hash: string): Promise<{ diff: string; truncated: boolean; binary: boolean }> {
+  if (!HASH_RE.test(hash)) throw new AdminError(404, "not found");
+  const abs = resolve(vaultRoot, t);
+  const { entries } = await noteHistory(vaultRoot, abs, MAX_HISTORY_SCAN);
+  const e = entries.find((x) => x.hash === hash);
+  if (!e) throw new AdminError(404, "note not found at this commit");
+  let out: string;
+  try {
+    // Both operands start with a sha or HEAD, so neither can be read as an option.
+    out = await runGit(["diff", "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames", `${hash}:./${e.path}`, `HEAD:./${t.space}/${t.project}/${t.section}/${t.note}.md`, "--"], vaultRoot);
+  } catch {
+    throw new AdminError(404, "note not found at this commit");
+  }
+  const at = out.indexOf("\n@@");
+  const hunks = at < 0 ? "" : out.slice(at + 1);
+  // Output without any hunk: git reports a binary/non-text change.
+  const binary = at < 0 && out.trim() !== "";
+  return hunks.length > MAX_SHOW_CHARS ? { diff: hunks.slice(0, MAX_SHOW_CHARS), truncated: true, binary } : { diff: hunks, truncated: false, binary };
+}
+
+// Hash (as the edit form's `base`) of the note as it is now, or undefined when it cannot be read.
+export async function currentBase(vaultRoot: string, t: NoteRef): Promise<string | undefined> {
+  try {
+    const cur = await readFileNoFollow(resolve(vaultRoot, t), MAX_READ_BYTES);
+    return cur ? sha256Hex(formView(cur.content).text) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+// Writes the version at commit `hash` as the new current content, through the same rules as a
+// web edit. `base` = hash of the current note when the page was rendered (409 if it changed).
+// Returns null when it is identical to the current note (nothing committed).
+export async function restoreNote(vaultRoot: string, t: NoteRef, hash: string, base: string, user: string): Promise<string | null> {
+  if (!SHA256_RE.test(base)) throw new AdminError(422, "missing or invalid form state; reload the page");
+  const old = await noteAt(vaultRoot, t, hash);
+  if (old.truncated) throw new AdminError(422, "that version is too large to restore");
+  if (!old.utf8) throw new AdminError(422, "that version is not valid UTF-8 and cannot be restored here");
+  const content = old.content.replace(/\r\n?/g, "\n");
+  checkContent(t, content);
+  const abs = resolve(vaultRoot, t);
+  let previous: Buffer | null = null;
+  try {
+    const { commitSha } = await syncWriteBuilt(vaultRoot, abs, (prev) => ((previous = prev), withFrontmatter(t, user, content, prev)), `web restore: ${t.space}/${t.project}/${t.section}/${t.note} to ${hash.slice(0, 7)} by ${user}`, {
+      precheck: async () => {
+        let cur;
+        try {
+          cur = await readFileNoFollow(abs, MAX_READ_BYTES);
+        } catch {
+          throw new AdminError(404, "note not found");
+        }
+        if (!cur) throw new AdminError(404, "note not found");
+        if (sha256Hex(formView(cur.content).text) !== base) throw new AdminError(409, STALE_MESSAGE);
+        if (!Buffer.from(cur.content, "utf8").equals(cur.raw)) throw new AdminError(422, NOT_UTF8_MESSAGE);
+      },
+      check: (next) => {
+        if (previous?.equals(Buffer.from(next, "utf8"))) return;
+        assertSpaceLimits(vaultRoot, t, Buffer.byteLength(next, "utf8"));
+      },
+    });
+    return commitSha;
+  } catch (err) {
+    if (err instanceof NoteRuleError) throw new AdminError(422, err.message);
+    throw err;
+  }
 }

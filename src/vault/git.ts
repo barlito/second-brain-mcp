@@ -198,7 +198,7 @@ function emitSyncEvent(e: SyncConflictEvent): void {
 
 // Only the exact subjects this server emits: "<tool>: <target> via <token name>".
 const TOKEN_SUBJECT_RE =
-  /^(?:kb_write|kb_edit|kb_append|kb_archive|kb_init_project|kb_propose|inbox accept): \S+ via ([A-Za-z0-9._-]{1,64})$/;
+  /^(?:kb_write|kb_edit|kb_append|kb_archive|kb_unarchive|kb_init_project|kb_propose|inbox accept): \S+ via ([A-Za-z0-9._-]{1,64})$/;
 
 // conflict/* branches that still exist locally; cached so status reads stay
 // cheap. Only the user deletes them.
@@ -1131,6 +1131,8 @@ export function syncMove(
   fromAbs: string,
   toAbs: string,
   commitMessage: string,
+  // Runs inside the lock once source and target are checked; throwing refuses the move.
+  precheck?: () => void | Promise<void>,
 ): Promise<{ commitSha: string; to: string }> {
   return withLock(vaultRoot, async () => {
     assertSafePath(vaultRoot, fromAbs);
@@ -1139,6 +1141,7 @@ export function syncMove(
 
     if (!existsSync(fromAbs)) throw new MoveSourceMissingError(`source not found: ${fromAbs}`);
     if (lstatOrNull(toAbs)) throw new MoveTargetExistsError(`target exists: ${toAbs}`);
+    await precheck?.();
 
     const fromRel = path.relative(vaultRoot, fromAbs);
     const toRel = path.relative(vaultRoot, toAbs);
@@ -1594,4 +1597,65 @@ export async function noteHistory(
     if (created || entries.length >= limit) break;
   }
   return { path: rel, entries, restricted };
+}
+
+export type RevisionRead = { ok: true; content: string; version: string } | { ok: false; reason: "unknown-rev" | "missing" | "too-large"; size?: number };
+
+const MAX_REV_SCAN = 500;
+
+async function isAncestor(vaultRoot: string, commit: string, of: string): Promise<boolean> {
+  try {
+    await runGit(["merge-base", "--is-ancestor", commit, of], vaultRoot);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Read-only (no vault lock): the note's bytes at commit `rev` (7-40 lowercase hex, checked by the
+// caller). `rev` must be on the main history (an ancestor of HEAD). The note's path at that commit
+// comes from its history (renames followed) and must pass `canRead`; size is checked before the
+// content is fetched.
+export async function readNoteAtRevision(
+  vaultRoot: string,
+  absolutePath: string,
+  rev: string,
+  maxBytes: number,
+  canRead: (relPath: string) => boolean,
+): Promise<RevisionRead> {
+  assertSafePath(vaultRoot, absolutePath);
+  if (!/^[0-9a-f]{7,40}$/.test(rev)) return { ok: false, reason: "unknown-rev" };
+  let commit: string;
+  try {
+    commit = (await runGit(["rev-parse", "--verify", "--end-of-options", `${rev}^{commit}`], vaultRoot)).trim();
+  } catch {
+    return { ok: false, reason: "unknown-rev" };
+  }
+  if (!(await isAncestor(vaultRoot, commit, "HEAD"))) return { ok: false, reason: "unknown-rev" };
+  // The newest history entry at or before `commit` fixes the note's path (and state) there.
+  const { entries } = await noteHistory(vaultRoot, absolutePath, MAX_REV_SCAN, canRead);
+  let rel: string | undefined;
+  for (const e of entries) {
+    if (e.hash === commit || (await isAncestor(vaultRoot, e.hash, commit))) {
+      rel = e.path;
+      break;
+    }
+  }
+  if (rel === undefined) return { ok: false, reason: "missing" };
+  const obj = `${commit}:./${rel}`; // starts with a hex sha: never an option
+  let size: number;
+  try {
+    size = Number((await runGit(["cat-file", "-s", obj], vaultRoot)).trim());
+  } catch {
+    return { ok: false, reason: "missing" };
+  }
+  if (!Number.isFinite(size)) return { ok: false, reason: "missing" };
+  if (size > maxBytes) return { ok: false, reason: "too-large", size };
+  try {
+    // The blob id is the note version (same as noteVersion of these bytes); read by id so both match.
+    const version = (await runGit(["rev-parse", "--verify", obj], vaultRoot)).trim();
+    return { ok: true, content: await runGit(["cat-file", "blob", version], vaultRoot), version };
+  } catch {
+    return { ok: false, reason: "missing" };
+  }
 }

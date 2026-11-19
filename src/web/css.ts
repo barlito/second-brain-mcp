@@ -55,6 +55,10 @@ p { margin: 0; }
 code, pre, .mono { font-family: var(--mono); font-size: 13px; }
 code { background: var(--code-bg); padding: 1px 5px; border-radius: 4px; overflow-wrap: anywhere; }
 pre { background: var(--code-bg); padding: 12px 14px; border-radius: 8px; overflow-x: auto; white-space: pre-wrap; overflow-wrap: anywhere; margin: 0; line-height: 1.6; }
+.diff span { display: block; }
+.diff .d-add { background: var(--ok-bg); color: var(--ok); }
+.diff .d-del { background: var(--err-bg); color: var(--err); }
+.diff .d-hunk { color: var(--muted); }
 .muted, .hint { color: var(--muted); }
 .hint { font-size: 13px; }
 .dev { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 16px; padding: 12px 16px; }

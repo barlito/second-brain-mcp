@@ -454,3 +454,114 @@ test("failed web writes are audited (create into a missing section)", async () =
   assert.equal((await post("/vault/pro/x/nosection/_new", { note: "a", content: "c" }, { nonce: f.nonce })).status, 404);
   assert.equal(n("web_note_create"), c0 + 1);
 });
+
+test("diff + restore: escaped diff, restore commits as web restore, audit, CSRF/nonce, identical = no commit", async () => {
+  const P = "/vault/pro/x/notes/revnote";
+  seed("pro/x/notes/revnote.md", "line one\nold <script>alert(1)</script>\n");
+  const v1 = git(["rev-parse", "HEAD"], vault).trim();
+  seed("pro/x/notes/revnote.md", "line one\nnew text\n");
+  const v2 = git(["rev-parse", "HEAD"], vault).trim();
+
+  const h = await get(`${P}/history`);
+  assert.match(h.body, new RegExp(`href="${P}/at/${v1}/diff"`));
+
+  const d = await get(`${P}/at/${v1}/diff`);
+  assert.equal(d.status, 200);
+  // removing the version-1 line from the old side: escaped removed line
+  assert.match(d.body, /<span class="d-del">-old &lt;script&gt;alert\(1\)&lt;\/script&gt;<\/span>/);
+  assert.match(d.body, /<span class="d-add">\+new text<\/span>/);
+  assert.doesNotMatch(d.body, /<script>alert/);
+  assert.match((await get(`${P}/at/${v2}/diff`)).body, /No differences/);
+  assert.equal((await get(`${P}/at/${"0".repeat(40)}/diff`)).status, 404);
+  assert.equal((await get(`${P}/at/--help/diff`)).status, 400);
+  assert.match((await get(`${P}/at/${v1}`)).body, /Restore this version/);
+
+  // CSRF / Origin / nonce
+  const f = await form(`${P}/at/${v1}`, `${P}/at/${v1}/restore`);
+  assert.ok(f.base);
+  const fields = { base: f.base! };
+  assert.equal((await post(`${P}/at/${v1}/restore`, fields, { nonce: f.nonce, csrf: "0".repeat(64) })).status, 403);
+  assert.equal((await post(`${P}/at/${v1}/restore`, fields, { nonce: f.nonce, origin: null })).status, 403);
+  assert.equal((await post(`${P}/at/${v1}/restore`, fields, { nonce: "f".repeat(32) })).status, 409);
+  assert.equal(read("pro/x/notes/revnote.md"), "line one\nnew text\n");
+
+  const f2 = await form(`${P}/at/${v1}`, `${P}/at/${v1}/restore`);
+  const page = await follow(await post(`${P}/at/${v1}/restore`, { base: f2.base! }, { nonce: f2.nonce }));
+  assert.match(page.body, /Restored revnote to /);
+  assert.equal(stripFm(read("pro/x/notes/revnote.md")), "line one\nold <script>alert(1)</script>\n");
+  assert.equal(lastSubject(), `web restore: pro/x/notes/revnote to ${v1.slice(0, 7)} by barlito`);
+  const row = db.prepare("SELECT * FROM audit_log WHERE action = 'web_note_restore' ORDER BY id DESC LIMIT 1").get() as Record<string, string>;
+  assert.equal(row.token_name, "web:barlito");
+  assert.equal(row.result, "ok");
+  assert.equal(row.git_commit, git(["rev-parse", "HEAD"], vault).trim());
+
+  // identical: no commit
+  const head = git(["rev-parse", "HEAD"], vault).trim();
+  const f3 = await form(`${P}/at/${v1}`, `${P}/at/${v1}/restore`);
+  const again = await follow(await post(`${P}/at/${v1}/restore`, { base: f3.base! }, { nonce: f3.nonce }));
+  assert.match(again.body, /No changes to revnote/);
+  assert.equal(git(["rev-parse", "HEAD"], vault).trim(), head);
+  const row2 = db.prepare("SELECT * FROM audit_log WHERE action = 'web_note_restore' ORDER BY id DESC LIMIT 1").get() as Record<string, string | null>;
+  assert.equal(row2.git_commit, null);
+});
+
+test("restore: stale base -> 409; note absent at that commit and non-UTF-8 blob refused", async () => {
+  const P = "/vault/pro/x/notes/revstale";
+  seed("pro/x/notes/revstale.md", "v1\n");
+  const v1 = git(["rev-parse", "HEAD"], vault).trim();
+  seed("pro/x/notes/revstale.md", "v2\n");
+  const f = await form(`${P}/at/${v1}`, `${P}/at/${v1}/restore`);
+  seed("pro/x/notes/revstale.md", "v3 changed meanwhile\n");
+  const head = git(["rev-parse", "HEAD"], vault).trim();
+  const r = await post(`${P}/at/${v1}/restore`, { base: f.base! }, { nonce: f.nonce });
+  assert.equal(r.status, 409);
+  assert.match(r.body, /note changed since you opened it/);
+  assert.equal(git(["rev-parse", "HEAD"], vault).trim(), head);
+
+  // a commit where the note did not exist (the seed.md commit)
+  const before = git(["log", "--format=%H", "--", "seed.md"], vault).trim().split("\n")[0];
+  const g = await form(`${P}`, `${P}/archive`);
+  const cur = await form(`${P}/at/${v1}`, `${P}/at/${v1}/restore`);
+  const miss = await post(`${P}/at/${before}/restore`, { base: cur.base! }, { nonce: g.nonce });
+  assert.equal(miss.status, 303);
+  assert.match((await follow(miss)).body, /not found at this commit/);
+  assert.equal(git(["rev-parse", "HEAD"], vault).trim(), head);
+  const row = db.prepare("SELECT result FROM audit_log WHERE action = 'web_note_restore' ORDER BY id DESC LIMIT 1").get() as { result: string };
+  assert.equal(row.result, "error");
+
+  // blob that is not valid UTF-8
+  writeFileSync(join(vault, "pro/x/notes/revbin.md"), Buffer.from([0x61, 0xff, 0xfe, 0x0a]));
+  git(["add", "."], vault);
+  git(["commit", "-m", "binary-ish"], vault);
+  const b1 = git(["rev-parse", "HEAD"], vault).trim();
+  seed("pro/x/notes/revbin.md", "clean\n");
+  const B = "/vault/pro/x/notes/revbin";
+  const fb = await form(`${B}/at/${b1}`, `${B}/at/${b1}/restore`);
+  const rb = await post(`${B}/at/${b1}/restore`, { base: fb.base! }, { nonce: fb.nonce });
+  assert.match((await follow(rb)).body, /not valid UTF-8/);
+  assert.equal(read("pro/x/notes/revbin.md"), "clean\n");
+});
+
+test("diff page says so for a binary change", async () => {
+  writeFileSync(join(vault, "pro/x/notes/revnul.md"), Buffer.from([0x61, 0x00, 0x62, 0x0a]));
+  git(["add", "."], vault);
+  git(["commit", "-m", "nul"], vault);
+  const n1 = git(["rev-parse", "HEAD"], vault).trim();
+  seed("pro/x/notes/revnul.md", "text now\n");
+  const d = await get(`/vault/pro/x/notes/revnul/at/${n1}/diff`);
+  assert.equal(d.status, 200);
+  assert.match(d.body, /Binary or non-text change/);
+  assert.doesNotMatch(d.body, /No differences/);
+});
+
+test("restore is not offered for archived notes and refused if posted", async () => {
+  seed("pro/x/archive/old-one.md", "a\n");
+  const h = git(["rev-parse", "HEAD"], vault).trim();
+  const P = "/vault/pro/x/archive/old-one";
+  assert.doesNotMatch((await get(`${P}/at/${h}`)).body, /Restore this version/);
+  const head = git(["rev-parse", "HEAD"], vault).trim();
+  const f = await form(`${NOTE}/edit`, `${NOTE}/edit`);
+  const r = await post(`${P}/at/${h}/restore`, { base: "0".repeat(64) }, { nonce: f.nonce });
+  await follow(r);
+  assert.equal(git(["rev-parse", "HEAD"], vault).trim(), head);
+});

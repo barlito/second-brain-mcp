@@ -118,6 +118,7 @@ function conflictMessage(err: SyncConflictError, notePath: string | undefined, c
 export function canReadNotePath(scopes: TokenContext["scopes"], relPath: string): boolean {
   const parts = relPath.split("/");
   if (parts.length !== 4 || !parts[3].endsWith(".md")) return false;
+  if (![parts[0], parts[1], parts[2], parts[3].slice(0, -3)].every(isValidSlug)) return false;
   return checkScope(scopes, parts[0], parts[1], parts[2], "read");
 }
 

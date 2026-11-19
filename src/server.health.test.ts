@@ -256,6 +256,7 @@ test("write-path conflict: event has origin=write, only exact server subjects at
     "chore: sp/p/s/note via mallory",
     "kb_write: a b via eve",
     "kb_write: sp/p/s/note via carol; kb_write: x via dave",
+    "kb_unarchive: sp/p/s/note via zed",
   ]);
   const events: import("./vault/git").SyncConflictEvent[] = [];
   let remoteHadBackup: string | null = null;
@@ -275,8 +276,8 @@ test("write-path conflict: event has origin=write, only exact server subjects at
   assert.equal(events.length, 1);
   assert.equal(events[0].origin, "write");
   assert.equal(events[0].ok, true);
-  assert.equal(events[0].commits.length, 7);
-  assert.deepEqual(events[0].tokens.sort(), ["alice", "bob.smith", "frank"]);
+  assert.equal(events[0].commits.length, 8);
+  assert.deepEqual(events[0].tokens.sort(), ["alice", "bob.smith", "frank", "zed"]);
   assert.equal(remoteHadBackup, "", "event must precede the network push of the backup branch");
   assert.deepEqual(gitMod.getSyncStatus(vault).conflictBranches, [events[0].backupBranch]);
 });

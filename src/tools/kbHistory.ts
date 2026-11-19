@@ -2,9 +2,8 @@ import { existsSync } from "node:fs";
 import { z } from "zod";
 import { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { noteHistory } from "../vault/git";
-import { checkScope } from "../acl/check";
-import { isValidSlug, resolveNotePath } from "../vault/paths";
-import { kbArgsShape, RegisterTool, registerKbTool, toolError, toolText, withAclAndAudit } from "./common";
+import { resolveNotePath } from "../vault/paths";
+import { canReadNotePath, kbArgsShape, RegisterTool, registerKbTool, toolError, toolText, withAclAndAudit } from "./common";
 
 const DEFAULT_LIMIT = 20;
 
@@ -14,7 +13,7 @@ export const register: RegisterTool = (server, { vaultRoot }) => {
     "kb_history",
     {
       description:
-        "Show the git history of a note: who changed what and when (newest first, follows renames such as archiving): the current path, then `<short sha> <ISO date> <subject>` per line.",
+        "Show the git history of a note: who changed what and when (newest first, follows renames such as archiving): the current path, then `<short sha> <ISO date> <subject>` per line. Pass a sha as `rev` to kb_read to read that version.",
       inputSchema: {
         ...kbArgsShape,
         limit: z.number().int().min(1).max(100).optional().describe(`Max entries (default ${DEFAULT_LIMIT}, max 100)`),
@@ -23,14 +22,8 @@ export const register: RegisterTool = (server, { vaultRoot }) => {
     async ({ space, project, section, note, limit }): Promise<CallToolResult> =>
       withAclAndAudit("kb_history", { space, project, section, note }, "read", async (ctx) => {
         const absolutePath = resolveNotePath(vaultRoot, space, project, section, note);
-        // Only paths that are valid <space>/<project>/<section>/<note>.md and readable by this
-        // token count; anything else (e.g. _inbox/<id>.md) is unreadable.
-        const canRead = (p: string): boolean => {
-          const parts = p.split("/");
-          if (parts.length !== 4 || !parts[3].endsWith(".md")) return false;
-          const [sp, pj, sec] = parts;
-          return [sp, pj, sec, parts[3].slice(0, -3)].every(isValidSlug) && checkScope(ctx.scopes, sp, pj, sec, "read");
-        };
+        // Only valid note paths readable by this token count (e.g. _inbox/<id>.md is not).
+        const canRead = (p: string): boolean => canReadNotePath(ctx.scopes, p);
         const { path, entries, restricted } = await noteHistory(vaultRoot, absolutePath, limit ?? DEFAULT_LIMIT, canRead);
         const exists = existsSync(absolutePath);
 

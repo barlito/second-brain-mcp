@@ -3,12 +3,13 @@
 import express, { Request, Response } from "express";
 import { clientMessage, safeAudit } from "../tools/common";
 import { isValidSlug } from "../vault/paths";
+import { ARCHIVE_SECTION } from "../tools/reserved";
 import { SyncConflictError, VaultBusyError } from "../vault/git";
 import type { SafeHtml } from "../web/html";
 import { Banner, Ctx, errorView } from "../web/views";
-import { atView, browseView, editView, historyView, newView, noteView } from "../web/vaultViews";
+import { atView, browseView, diffView, editView, historyView, newView, noteView } from "../web/vaultViews";
 import { AdminError } from "./service";
-import { archiveWebNote, browse, createNote, editNote, HASH_RE, NOT_UTF8_MESSAGE, noteAt, noteLog, NoteRef, showNote } from "./vault";
+import { archiveWebNote, browse, createNote, editNote, HASH_RE, NOT_UTF8_MESSAGE, currentBase, noteAt, noteDiff, noteLog, NoteRef, restoreNote, showNote } from "./vault";
 
 export interface VaultDeps {
   vaultRoot: string;
@@ -170,10 +171,39 @@ export function vaultRouter(d: VaultDeps): express.Router {
     const t = refOf(req);
     send(res, historyView(ctxOf(res), t, await noteLog(vaultRoot, t)));
   }));
+  // Base hash for the restore form; undefined = restore not offered (archived or unreadable note).
+  const restoreBase = async (t: NoteRef): Promise<string | undefined> => (t.section === ARCHIVE_SECTION ? undefined : currentBase(vaultRoot, t));
   r.get("/:space/:project/:section/:note/at/:hash", h(async (req, res) => {
     const t = refOf(req);
     const hash = req.params.hash as string;
-    send(res, atView(ctxOf(res), t, hash, await noteAt(vaultRoot, t, hash, typeof req.query.path === "string" ? req.query.path : undefined)));
+    send(res, atView(ctxOf(res), t, hash, await restoreBase(t), await noteAt(vaultRoot, t, hash, typeof req.query.path === "string" ? req.query.path : undefined)));
+  }));
+
+  r.get("/:space/:project/:section/:note/at/:hash/diff", h(async (req, res) => {
+    const t = refOf(req);
+    const hash = req.params.hash as string;
+    send(res, diffView(ctxOf(res), t, hash, await restoreBase(t), await noteDiff(vaultRoot, t, hash), d.takeBanner(req, res)));
+  }));
+  r.post("/:space/:project/:section/:note/at/:hash/restore", h(async (req, res) => {
+    const t = refOf(req);
+    const hash = req.params.hash as string;
+    const short = hash.slice(0, 7);
+    try {
+      const sha = await restoreNote(vaultRoot, t, hash, str((req.body as Record<string, unknown>).base), userOf(res));
+      if (sha === null) {
+        auditWrite(res, "web_note_restore", t, "ok", `restore to ${short}: no changes (content identical)`);
+        d.redirectBanner(res, noteUrl(t), { kind: "ok", title: `No changes to ${t.note} (content identical to ${short}).` });
+      } else {
+        auditWrite(res, "web_note_restore", t, "ok", `restored to ${short}`, sha || undefined);
+        d.redirectBanner(res, noteUrl(t), { kind: "ok", title: `Restored ${t.note} to ${short}.`, lines: sha ? [`Commit ${sha.slice(0, 7)}`] : [] });
+      }
+    } catch (err) {
+      auditWrite(res, "web_note_restore", t, "error", reasonOf(err));
+      if (err instanceof AdminError && err.status !== 409) {
+        return d.redirectBanner(res, err.status === 404 ? dirOf(t) : noteUrl(t), { kind: "err", title: err.message });
+      }
+      throw err;
+    }
   }));
 
   return r;
