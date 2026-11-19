@@ -20,6 +20,9 @@ import { listen } from "../listen";
 import type { Lifecycle, TrustedProxy } from "../server";
 import type { SafeHtml } from "../web/html";
 import { CSS, JS, THEME_JS } from "../web/assets";
+import { ICON_192_B64, ICON_512_B64 } from "../web/icons";
+import { MANIFEST, SW_JS } from "../web/pwa";
+import { attachAccessPush, createPushService, parseSubscription, PushError, type PushService } from "../push";
 import {
   Banner,
   Ctx,
@@ -62,6 +65,8 @@ export interface WebAdminOptions {
   sessionCookie?: string;
   // Public MCP endpoint shown in the post-creation `claude mcp add` command (default: PUBLIC_MCP_URL).
   mcpUrl?: string;
+  // Web Push (devices + sending); default: a service sealed with the admin secret.
+  push?: PushService;
 }
 
 export const MIN_PROXY_SECRET = 32;
@@ -206,6 +211,7 @@ export function createWebAdminApp(opts: WebAdminOptions): Express {
   const claudeCommand = (token: string, dir: string): string => claudeAddCommand({ url: publicMcpUrl, token, dir });
   // Without ADMIN_WEB_SECRET the tokens reset on restart (forms must be reloaded).
   const secret = opts.secret || randomBytes(32).toString("hex");
+  const push = opts.push ?? createPushService({ secret });
   const flash = new OneTimeStore<Flash>(FLASH_TTL_MS, 200);
   const nonces = new OneTimeStore<true>(NONCE_TTL_MS, 5000);
 
@@ -229,7 +235,7 @@ export function createWebAdminApp(opts: WebAdminOptions): Express {
   app.use((_req, res, next) => {
     res.setHeader(
       "Content-Security-Policy",
-      "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; frame-ancestors 'none'; form-action 'self'; base-uri 'none'",
+      "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; manifest-src 'self'; worker-src 'self'; frame-ancestors 'none'; form-action 'self'; base-uri 'none'",
     );
     res.setHeader("X-Frame-Options", "DENY");
     res.setHeader("X-Content-Type-Options", "nosniff");
@@ -289,6 +295,10 @@ export function createWebAdminApp(opts: WebAdminOptions): Express {
   app.get("/static/style.css", (_req, res) => void res.type("text/css").send(CSS));
   app.get("/static/app.js", (_req, res) => void res.type("application/javascript").send(JS));
   app.get("/static/theme.js", (_req, res) => void res.type("application/javascript").send(THEME_JS));
+  app.get("/static/icon-192.png", (_req, res) => void res.type("image/png").send(Buffer.from(ICON_192_B64, "base64")));
+  app.get("/static/icon-512.png", (_req, res) => void res.type("image/png").send(Buffer.from(ICON_512_B64, "base64")));
+  app.get("/manifest.webmanifest", (_req, res) => void res.type("application/manifest+json").send(JSON.stringify(MANIFEST)));
+  app.get("/sw.js", (_req, res) => void res.setHeader("Cache-Control", "no-cache").type("application/javascript").send(SW_JS));
 
   // Sidebar badges (pending proposals / access requests), computed once per request. A failing
   // source just shows no badge.
@@ -538,7 +548,7 @@ export function createWebAdminApp(opts: WebAdminOptions): Express {
     off = onAccessChange(push);
   });
   accessRouter.get("/", (req, res) => {
-    send(res, accessView(ctxOf(res), listPendingRequests(), listActiveSessions(), listConnectorKeys(), takeBanner(req, res)));
+    send(res, accessView(ctxOf(res), listPendingRequests(), listActiveSessions(), listConnectorKeys(), { publicKey: push.publicKey(), devices: push.list() }, takeBanner(req, res)));
   });
   const accessBanner = (res: Response, banner: Banner): void => redirectWithFlash(res, "/access", { kind: "banner", banner });
   accessRouter.post("/:id/approve", (req, res) => {
@@ -612,6 +622,37 @@ export function createWebAdminApp(opts: WebAdminOptions): Express {
   });
   app.use("/access", accessRouter);
 
+  // ---- push notifications ----
+
+  const pushRouter = express.Router();
+  pushRouter.param("id", (_req, res, next, id: string) => {
+    if (!UUID_RE.test(id)) return void send(res, errorView(ctxOf(res), 400, "invalid id"), 400);
+    next();
+  });
+  pushRouter.post("/subscribe", (req, res) => {
+    try {
+      const sub = push.add(parseSubscription(req.body as Record<string, unknown>), userOf(res));
+      auditAdmin(res, "push_subscribe", "ok", `${sub.id} ${sub.label}`);
+      accessBanner(res, { kind: "ok", title: `Notifications enabled on ${sub.label}.` });
+    } catch (err) {
+      if (!(err instanceof PushError)) throw err;
+      auditAdmin(res, "push_subscribe", "error", err.message);
+      accessBanner(res, { kind: "err", title: err.message });
+    }
+  });
+  pushRouter.post("/test", async (_req, res) => {
+    const n = await push.sendToAll({ tag: "test", title: "Test notification", body: "Push notifications work on this device.", url: "/access" }, 120);
+    auditAdmin(res, "push_test", "ok", `${n} of ${push.list().length} delivered`);
+    accessBanner(res, n > 0 ? { kind: "ok", title: `Test sent to ${n} device${n === 1 ? "" : "s"}.` } : { kind: "err", title: "No device could be reached.", lines: ["Check that the server can reach the push services (outbound HTTPS)."] });
+  });
+  pushRouter.post("/:id/remove", (req, res) => {
+    const id = req.params.id as string;
+    const ok = push.remove(id);
+    auditAdmin(res, "push_remove", ok ? "ok" : "error", ok ? id : `${id} not found`);
+    accessBanner(res, ok ? { kind: "ok", title: "Device removed." } : { kind: "err", title: "Device not found." });
+  });
+  app.use("/push", pushRouter);
+
   // ---- vault browser / editor ----
 
   app.use(
@@ -677,7 +718,10 @@ export async function startWebAdmin(
     return undefined;
   }
   try {
+    // Without ADMIN_WEB_SECRET the VAPID key cannot be sealed durably: devices reset on restart.
+    const push = createPushService({ secret: env.ADMIN_WEB_SECRET || randomBytes(32).toString("hex"), subject: env.WEB_PUSH_SUBJECT || undefined });
     const app = createWebAdminApp({
+      push,
       vaultRoot,
       trustedProxy,
       lifecycle,
@@ -687,6 +731,7 @@ export async function startWebAdmin(
       sessionCookie: env.AUTHELIA_SESSION_COOKIE || undefined,
     });
     const s = await listen(app, port);
+    attachAccessPush(push);
     console.log(`web admin listening on port ${port} (behind Traefik + Authelia only)`);
     return s;
   } catch (err) {

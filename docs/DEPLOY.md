@@ -149,7 +149,7 @@ Tokens created or revoked after the restored backup are lost. This includes toke
 ### Secret rotation
 
 - `vault_deploy_key`: Swarm secrets are immutable and in use by the service, so rotate with a new, versioned name; the mount path stays `/run/secrets/vault_deploy_key` (fixed `target` in `docker-compose-prod.yml`). Add the new public key to the vault repo's deploy keys, set the GitHub secret `VAULT_DEPLOY_KEY` to the new private key and the variable `VAULT_DEPLOY_KEY_SECRET` to e.g. `vault_deploy_key_v2`, then run the Deploy workflow with `re-deploy=true` (it creates the new secret and rolls the service onto it). Manually: `docker secret create vault_deploy_key_v2 <file>` then `VAULT_DEPLOY_KEY_SECRET=vault_deploy_key_v2 TAG=<tag> make deploy.prod`. Afterwards remove the old deploy key from the repo and `docker secret rm vault_deploy_key`.
-- `ADMIN_PROXY_SECRET` / `ADMIN_WEB_SECRET`: update the GitHub secrets and redeploy with `re-deploy=true` (an image-only update keeps the old values). Rotating `ADMIN_WEB_SECRET` invalidates open admin forms.
+- `ADMIN_PROXY_SECRET` / `ADMIN_WEB_SECRET`: update the GitHub secrets and redeploy with `re-deploy=true` (an image-only update keeps the old values). Rotating `ADMIN_WEB_SECRET` invalidates open admin forms and resets the push notification devices (VAPID key sealed with it): enable notifications again on each device. The container needs outbound HTTPS to the push services (e.g. fcm.googleapis.com).
 - Docker Hub read-only token: update `DOCKER_HUB_READ_ONLY_ACCESS_TOKEN`; the next deploy/rollback (`--with-registry-auth`) replaces the stored credentials. Revoke the old token on Docker Hub afterwards.
 
 The SQLite database and the vault live on named volumes and survive redeploys.

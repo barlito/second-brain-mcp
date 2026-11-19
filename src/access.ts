@@ -40,6 +40,25 @@ export function notifyAccessChange(): void {
   for (const id of [...watchers.keys()]) dispatch(id);
 }
 
+// Request events (push notifications): `created` fires once a new request is committed.
+export type AccessRequestEvent = { type: "created"; request: RequestRow };
+const eventListeners = new Set<(e: AccessRequestEvent) => void>();
+
+export function onAccessRequestEvent(fn: (e: AccessRequestEvent) => void): () => void {
+  eventListeners.add(fn);
+  return () => void eventListeners.delete(fn);
+}
+
+function emitRequestEvent(e: AccessRequestEvent): void {
+  for (const fn of [...eventListeners]) {
+    try {
+      fn(e);
+    } catch {
+      /* a broken listener must not break the caller */
+    }
+  }
+}
+
 // setTimeout caps at 2^31-1 ms; a longer TTL would fire at once.
 const MAX_TIMER_MS = 2 ** 31 - 1;
 export const clampTimer = (ms: number): number => Math.min(Math.max(ms, 0), MAX_TIMER_MS);
@@ -221,6 +240,7 @@ export function createAccessRequest(sessionId: string, input: NewRequest, allow:
   })();
   if (result.created) {
     notifyAccessChange();
+    emitRequestEvent({ type: "created", request: result.request });
     // Expiry is time-based (no write): tell the UI once the request has lapsed.
     setTimeout(notifyAccessChange, clampTimer(Date.parse(result.request.expires_at) - Date.now() + 1000)).unref();
   }

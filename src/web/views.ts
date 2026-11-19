@@ -8,7 +8,9 @@ import { CONNECTOR_HEADER, type ConnectorKeyEntry } from "../auth/connectorKeys"
 import type { Scope, TokenListEntry } from "../auth/tokens";
 import { formatScope } from "../cli/token";
 import { APP_VERSION } from "../version";
+import type { PushSubscriptionRow } from "../push";
 import { html, raw, SafeHtml } from "./html";
+import { THEME_COLOR } from "./pwa";
 
 // html:false drops raw HTML in notes; markdown-it's default link validation blocks
 // javascript:/vbscript:/data: URLs.
@@ -136,6 +138,10 @@ export function layout(ctx: Ctx, active: string, title: string, body: SafeHtml):
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex">
+<meta name="theme-color" content="${THEME_COLOR}">
+<link rel="manifest" href="/manifest.webmanifest" crossorigin="use-credentials">
+<link rel="icon" type="image/png" sizes="192x192" href="/static/icon-192.png">
+<link rel="apple-touch-icon" href="/static/icon-192.png">
 <title>${title} - second-brain admin</title>
 <link rel="stylesheet" href="/static/style.css">
 <script src="/static/theme.js"></script>
@@ -322,7 +328,12 @@ ${bannerView(banner)}
 
 type ConnectorKey = ConnectorKeyEntry;
 
-export function accessView(ctx: Ctx, pending: PendingRequest[], sessions: ActiveSession[], keys: ConnectorKey[], banner?: Banner): SafeHtml {
+export interface PushPanel {
+  publicKey: string;
+  devices: PushSubscriptionRow[];
+}
+
+export function accessView(ctx: Ctx, pending: PendingRequest[], sessions: ActiveSession[], keys: ConnectorKey[], push: PushPanel, banner?: Banner): SafeHtml {
   return layout(
     ctx,
     "/access",
@@ -335,7 +346,7 @@ ${
         ? html`<div class="card empty"><strong>No pending requests</strong></div>`
         : pending.map(
             (r) => html`<div class="card pad stack g12">
-<div class="row g12">${r.elevation ? html`<span class="badge err">elevation</span>` : ""}<strong>${r.client_name}</strong><span class="muted">${r.client_version}</span><span class="muted small">${relTime(r.created_at)}, expires ${r.expires_at}</span><span class="muted mono small">${r.id}</span></div>
+<div class="row g12 anchor" id="req-${r.id}">${r.elevation ? html`<span class="badge err">elevation</span>` : ""}<strong>${r.client_name}</strong><span class="muted">${r.client_version}</span><span class="muted small">${relTime(r.created_at)}, expires ${r.expires_at}</span><span class="muted mono small">${r.id}</span></div>
 <div class="stack"><span class="hint">Asks for</span>${r.requested_scopes.map((sc) => html`<div class="grant">${scopeChip(sc)}<span class="hint">${scopeDescription(sc)}</span></div>`)}</div>
 ${(() => {
               const k = wildcardRisk(r.requested_scopes);
@@ -407,7 +418,27 @@ ${csrfField(ctx)}
 <div class="stack"><label class="lbl" for="key-name">New key name <span class="hint">(1-64 characters, e.g. claude-ai)</span></label>
 <input class="field w420" type="text" id="key-name" name="name" maxlength="64" required></div>
 <div class="actions"><button class="btn btn-primary" type="submit">Create key</button></div>
-</form>`,
+</form>
+<h2>Notifications</h2>
+<div class="card pad stack g12" id="push" data-vapid-key="${push.publicKey}">
+<p class="muted">Get a notification on this device when an agent asks for access, tap it to open the request. Payloads are encrypted end to end and carry no secret.</p>
+<p class="hint" id="push-hint" role="status" hidden></p>
+${
+      push.devices.length === 0
+        ? html`<p class="muted">No device registered.</p>`
+        : html`<div class="card clip">${push.devices.map(
+            (d) => html`<div class="dev"><div class="stack g4"><strong>${d.label}</strong><span class="hint">Added <span title="${d.created_at}">${relTime(d.created_at)}</span>, last delivered <span title="${d.last_ok_at ?? ""}">${d.last_ok_at ? relTime(d.last_ok_at) : "never"}</span></span></div><form method="post" action="/push/${d.id}/remove" class="inline" data-confirm="Stop notifications on this device?">${csrfField(ctx)}<button class="btn btn-danger btn-sm" type="submit">Remove</button></form></div>`,
+          )}</div>`
+    }
+<form method="post" action="/push/subscribe" id="push-form" class="stack g12" hidden>
+${csrfField(ctx)}
+<input type="hidden" name="endpoint" value=""><input type="hidden" name="p256dh" value=""><input type="hidden" name="auth" value="">
+<div class="stack"><label class="lbl" for="push-label">Device name <span class="hint">(1-64 characters)</span></label>
+<input class="field w420" type="text" id="push-label" name="label" maxlength="64" required></div>
+<div class="actions"><button class="btn btn-primary" type="submit" id="push-enable">Enable on this device</button></div>
+</form>
+${push.devices.length === 0 ? "" : html`<form method="post" action="/push/test" class="actions">${csrfField(ctx)}<button class="btn" type="submit">Send a test notification</button></form>`}
+</div>`,
   );
 }
 

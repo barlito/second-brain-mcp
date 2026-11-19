@@ -309,6 +309,92 @@ document.addEventListener("click", function (e) {
   summary();
 })();
 
+// Push notifications: the service worker is registered on every page (keeps the subscription alive);
+// the Access page section subscribes this device. Without support the form stays hidden with a hint.
+(function () {
+  if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(function () {});
+  var box = document.getElementById("push");
+  var form = document.getElementById("push-form");
+  var hint = document.getElementById("push-hint");
+  if (!box || !form) return;
+  // Notifications of requests that are no longer pending (decided, expired, handled elsewhere) are
+  // removed here rather than by a silent push, which browsers penalise. The test one is left alone.
+  function closeStale() {
+    if (!("Notification" in window) || Notification.permission !== "granted") return;
+    var pending = {};
+    document.querySelectorAll('[id^="req-"]').forEach(function (n) { pending[n.id.slice(4)] = true; });
+    navigator.serviceWorker.getRegistration().then(function (reg) {
+      return reg ? reg.getNotifications() : [];
+    }).then(function (list) {
+      list.forEach(function (n) { if (/^[0-9a-f-]{36}$/.test(n.tag) && !pending[n.tag]) n.close(); });
+    }).catch(function () {});
+  }
+  function say(t) { hint.textContent = t; hint.hidden = !t; }
+  if (!("serviceWorker" in navigator) || !("PushManager" in window) || !("Notification" in window)) {
+    say("This browser cannot receive push notifications (needs HTTPS, a service worker and the Push API).");
+    return;
+  }
+  if (Notification.permission === "denied") {
+    say("Notifications are blocked for this site: allow them in the browser's site settings, then reload.");
+    return;
+  }
+  closeStale();
+  var ua = navigator.userAgent;
+  var os = /Android/.test(ua) ? "Android" : /iPhone|iPad/.test(ua) ? "iOS" : /Windows/.test(ua) ? "Windows" : /Mac OS/.test(ua) ? "macOS" : /Linux/.test(ua) ? "Linux" : "Device";
+  var br = /Edg\//.test(ua) ? "Edge" : /Firefox\//.test(ua) ? "Firefox" : /Chrome\//.test(ua) ? "Chrome" : /Safari\//.test(ua) ? "Safari" : "browser";
+  var label = document.getElementById("push-label");
+  if (!label.value) label.value = os + " " + br;
+  form.hidden = false;
+
+  function b64urlToBytes(s) {
+    var b = atob(s.replace(/-/g, "+").replace(/_/g, "/"));
+    var out = new Uint8Array(b.length);
+    for (var i = 0; i < b.length; i++) out[i] = b.charCodeAt(i);
+    return out;
+  }
+  function sameKey(sub, bytes) {
+    var k = sub.options && sub.options.applicationServerKey;
+    if (!k) return false;
+    var a = new Uint8Array(k);
+    if (a.length !== bytes.length) return false;
+    for (var i = 0; i < a.length; i++) if (a[i] !== bytes[i]) return false;
+    return true;
+  }
+  var busy = false;
+  form.addEventListener("submit", function (e) {
+    e.preventDefault();
+    if (busy || !form.reportValidity()) return;
+    busy = true;
+    document.documentElement.setAttribute("data-enabling", "1");
+    say("");
+    var key = b64urlToBytes(box.getAttribute("data-vapid-key"));
+    navigator.serviceWorker.register("/sw.js").then(function () { return navigator.serviceWorker.ready; })
+      .then(function (reg) {
+        return Notification.requestPermission().then(function (perm) {
+          if (perm !== "granted") throw new Error("Permission was not granted.");
+          return reg.pushManager.getSubscription();
+        }).then(function (old) {
+          // A subscription made under another server key cannot be reused.
+          return old && !sameKey(old, key) ? old.unsubscribe().then(function () { return null; }) : old;
+        }).then(function (old) {
+          return old || reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key });
+        });
+      })
+      .then(function (sub) {
+        var j = sub.toJSON();
+        form.elements.endpoint.value = j.endpoint;
+        form.elements.p256dh.value = (j.keys && j.keys.p256dh) || "";
+        form.elements.auth.value = (j.keys && j.keys.auth) || "";
+        form.submit();
+      })
+      .catch(function (err) {
+        busy = false;
+        document.documentElement.removeAttribute("data-enabling");
+        say("Could not enable notifications: " + (err && err.message ? err.message : "unknown error"));
+      });
+  });
+})();
+
 // Live access feed (SSE): keeps the Access badge current on every page and refreshes /access when
 // requests change, unless a form there holds unsent input (then a reload banner is shown instead).
 (function () {
@@ -365,7 +451,7 @@ document.addEventListener("click", function (e) {
       try { d = JSON.parse(e.data); } catch (err) { return; }
       badge(d.pending);
       if (!onAccess || leaving || String(d.rev) === rendered) return;
-      if (dirty) showNotice(); else location.reload();
+      if (dirty || document.documentElement.hasAttribute("data-enabling")) showNotice(); else location.reload();
     });
     // A non-200 answer (redeploy, expired SSO session) closes the stream for good: retry with backoff.
     es.addEventListener("error", function () {
