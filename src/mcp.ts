@@ -12,7 +12,9 @@ import { register as registerKbUnarchive } from "./tools/kbUnarchive";
 import { register as registerKbHistory } from "./tools/kbHistory";
 import { register as registerKbInitProject } from "./tools/kbInitProject";
 import { register as registerKbPropose } from "./tools/kbPropose";
+import { register as registerKbContext } from "./tools/kbContext";
 import { register as registerKbRead } from "./tools/kbRead";
+import { register as registerKbReadMany } from "./tools/kbReadMany";
 import { register as registerKbWrite } from "./tools/kbWrite";
 import { register as registerKbList } from "./tools/kbList";
 import { register as registerKbSearch } from "./tools/kbSearch";
@@ -24,6 +26,8 @@ const pkg = require("../package.json") as { name: string; version: string };
 // Add new tools here (one line each).
 const TOOLS: RegisterTool[] = [
   registerKbRead,
+  registerKbReadMany,
+  registerKbContext,
   registerKbWrite,
   registerKbEdit,
   registerKbAppend,

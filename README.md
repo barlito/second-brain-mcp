@@ -3,7 +3,7 @@
 An MCP server that exposes a git-backed, Obsidian-compatible knowledge-base vault to Claude and other agents. Access is gated by Bearer tokens with hierarchical space/project/section `read`, `write` and `propose` scopes (stored in SQLite), and every call is audit-logged.
 
 - Transport: stateless Streamable HTTP at `POST /mcp` (TypeScript, Express 5, MCP SDK).
-- Fourteen tools: eleven vault tools (`kb_read`, `kb_write`, `kb_edit`, `kb_append`, `kb_archive`, `kb_unarchive`, `kb_list`, `kb_search`, `kb_history`, `kb_init_project`, `kb_propose`) and three access tools for token-less sessions (`kb_request_access`, `kb_access_status`, `kb_release_access`).
+- Sixteen tools: thirteen vault tools (`kb_read`, `kb_read_many`, `kb_context`, `kb_write`, `kb_edit`, `kb_append`, `kb_archive`, `kb_unarchive`, `kb_list`, `kb_search`, `kb_history`, `kb_init_project`, `kb_propose`) and three access tools for token-less sessions (`kb_request_access`, `kb_access_status`, `kb_release_access`).
 - Admin: a [web admin UI](#web-admin-ui) behind Traefik + Authelia (tokens, access requests, proposals inbox, vault browser, audit log) and `make` targets for tokens, access requests and the inbox.
 - Clients can also connect [without a token](#connecting-without-a-token) and ask the user for access, which the user approves in the admin.
 - Deployed with Docker Swarm (`docker stack deploy`, driven by the Makefile) behind the [traefik-base](https://github.com/barlito/traefik-base) stack (network `traefik_traefik_proxy`).
@@ -92,7 +92,7 @@ Adds frontmatter to existing notes that have none, and fills only the missing se
 
 ### Server instructions
 
-On connection the server sends MCP `instructions`: a compact core (about 600 characters) with the layout, the session-start routine (read `overview/index`, then the tail of the latest `journal/YYYY-MM`), how to use the `meta` space and a line on token-less access. Every other rule lives in the description of the tool it concerns: reserved sections, the 3 KB `overview/index` cap, frontmatter and `sources`, Docs map, short notes, `base_version`/`kb_edit` instead of blind overwrites, direct git commits (`kb_write`, `kb_init_project`); the `agents` space (handover note, caps, auto-archive) in the same two; the journal line (`kb_append`); archive instead of delete (`kb_archive`); `kb_history`, search hints and the `type` filter (`kb_search`); `kb_propose` when unsure; the whole access flow (`kb_request_access`, `kb_access_status`). Clients cut instructions at a size cap (Claude Code: 4096 characters), so the whole string (core + User context) has ONE budget, `INSTRUCTIONS_MAX_CHARS` = 4090 characters (Claude Code cuts only above 4096), overridable with the env var `MCP_INSTRUCTIONS_MAX_CHARS` (integer >= 1000; invalid values fall back to 4090 with one warning). The final string is always within it.
+On connection the server sends MCP `instructions`: a compact core (about 600 characters) with the layout, the session-start routine (`kb_context <space>/<project>`: `overview/index`, tail of the latest `journal/YYYY-MM`, sections; `kb_read_many` for several notes), how to use the `meta` space and a line on token-less access. Every other rule lives in the description of the tool it concerns: reserved sections, the 3 KB `overview/index` cap, frontmatter and `sources`, Docs map, short notes, `base_version`/`kb_edit` instead of blind overwrites, direct git commits (`kb_write`, `kb_init_project`); the `agents` space (handover note, caps, auto-archive) in the same two; the journal line (`kb_append`); archive instead of delete (`kb_archive`); `kb_history`, search hints and the `type` filter (`kb_search`); `kb_propose` when unsure; the whole access flow (`kb_request_access`, `kb_access_status`). Clients cut instructions at a size cap (Claude Code: 4096 characters), so the whole string (core + User context) has ONE budget, `INSTRUCTIONS_MAX_CHARS` = 4090 characters (Claude Code cuts only above 4096), overridable with the env var `MCP_INSTRUCTIONS_MAX_CHARS` (integer >= 1000; invalid values fall back to 4090 with one warning). The final string is always within it.
 
 ### Agents space and space limits
 
@@ -121,7 +121,21 @@ All note-addressed tools take `space`, `project`, `section`, `note` (strings, ma
 - Args: `space`, `project`, `section`, `note`; optional `tail` (integer 1-500); optional `rev` (7-40 lowercase hex, a sha from `kb_history`).
 - Permission: `read` on the section.
 - Returns the note as text. With `tail`, only the last N lines (a trailing newline is not counted as a line). Use it for recent journal history. With `rev`, the note as it was at that commit (`tail` works too). The commit must be in the main history (an ancestor of HEAD; parked conflict branches and unmerged commits give `Unknown revision.`), and renames are followed like `kb_history`: the note's path at that commit must also be readable by the token (e.g. reading an archived note at a pre-archive sha needs `read` on the original section). A second text block `version: <sha>` is the version of the bytes returned (the git blob SHA-1, as `git hash-object`; for `rev`, that revision's blob), also for `tail` reads; pass it as `base_version` to `kb_write`/`kb_edit`.
-- Errors: `Note not found.`; `Unknown revision.`; `Note not found at this revision.`; `Note is too large to read (<n> bytes, max 2097152).` (only for files that did not come through `kb_write`, e.g. pushed by a human).
+- Errors: `Note not found.` (also the per-item error of `kb_read_many`); `Unknown revision.`; `Note not found at this revision.`; `Note is too large to read (<n> bytes, max 2097152).` (only for files that did not come through `kb_write`, e.g. pushed by a human).
+
+### `kb_context`
+
+- Args: `space`, `project`; optional `journal_lines` (integer 1-200, default 30).
+- Permission: `read` on each part's section, checked separately; unreadable parts are omitted. If nothing is readable: `Permission denied.` (existence is not revealed).
+- Returns blocks in one text: `## <space>/<project>/overview/index` with the note (or `(missing: create it with kb_init_project)`); `## <space>/<project>/journal/<YYYY-MM> (last N lines)` for the latest month note (or `(no journal yet)`); and `Sections: decisions (11), conventions (4), ...` with note counts of the readable sections, `archive` excluded.
+- Audit: one `kb_context` row for the call (project level, `denied` only when no part at all is readable) plus one per note read: the index and the latest journal note (`latest=<YYYY-MM>` in its detail). Unreadable parts are skipped silently, without a `denied` row. Only notes named `YYYY-MM` (month 01-12) count as journal months.
+
+### `kb_read_many`
+
+- Args: `notes` (1-20 objects `{space, project, section, note}`), optional `tail` (integer 1-500, applied to each note).
+- Permission: `read` on each note's section, checked per item (the `archive` section needs `read` on `archive`, as in `kb_read`).
+- Partial success: one `## <space>/<project>/<section>/<note>` block per item, followed by the content or that item's error (`Permission denied.`, `Note not found.`, `Invalid space/project/section/note name.`, too large), same messages as `kb_read` (in a token-less session a denied item also carries the `kb_request_access` hint). If every item is refused before any read (no access, invalid names), the call returns that single error instead of one block per item. Headers echo the names with anything but letters, digits and hyphens replaced by `?`. Total output is capped at 1 MiB: a note that no longer fits is skipped from its size (`(skipped: output limit reached, read it separately)`, not read) and later, smaller items are still returned.
+- Audit: one `kb_read_many` row per note (allowed or denied), so per-path audit stays accurate.
 
 ### `kb_write`
 
@@ -203,10 +217,8 @@ All note-addressed tools take `space`, `project`, `section`, `note` (strings, ma
 ### Typical agent session
 
 ```
-kb_read   pro/myproj/overview/index                       # what is this project, docs map
-kb_list   pro/myproj/journal                              # find the latest month note
-kb_read   pro/myproj/journal/2026-11  tail=30             # recent history
-...work, using kb_search / kb_read as needed...
+kb_context pro/myproj                                     # index, recent journal, sections
+...work, using kb_search / kb_read / kb_read_many as needed...
 kb_append pro/myproj/journal/2026-11  entry="Switched the queue to X because Y."
 kb_write  pro/myproj/decisions/queue-choice  content=...  # durable "why" as its own note
 ```
@@ -276,7 +288,7 @@ claude mcp add --scope user --transport http second-brain https://second-brain.b
 
 Without a valid, non-revoked key every token-less request gets a generic `401` before anything else happens (no session, no rate-limit bucket, only the coalesced auth-failure audit row), and with no key at all token-less access is disabled. The key is checked first and these failures never block anyone: a request with a valid key (or a valid Bearer token) is not refused because others fail from the same, possibly shared, address (e.g. a cloud egress IP). A session is bound to the key that opened it (another key gets `404`); revoking a key ends its sessions and their grants immediately. Requests with an `Authorization` header ignore the connector key entirely.
 
-With the key, a client can initialize, read the server instructions, list the tools and call the access tools `kb_request_access`, `kb_access_status` and `kb_release_access`, plus the read-only tools (`kb_read`, `kb_list`, `kb_search`, `kb_history`) on `meta` (baseline, see below). Every other tool is refused until a grant exists. The user stays the only one managing access and the agent never sees a token.
+With the key, a client can initialize, read the server instructions, list the tools and call the access tools `kb_request_access`, `kb_access_status` and `kb_release_access`, plus the read-only tools (`kb_read`, `kb_read_many`, `kb_context`, `kb_list`, `kb_search`, `kb_history`) on `meta` (baseline, see below). Every other tool is refused until a grant exists. The user stays the only one managing access and the agent never sees a token.
 
 Baseline: every session can read `meta` from its first request, with no access request. It holds the user's short notes on how they work, so an agent that does not need any project still has them. `SESSION_BASELINE_SCOPES` overrides it (comma-separated, e.g. `meta:*:*:read,idees:x:*:read`; `none` turns it off). Only `read` scopes are accepted and the space must be named (no `*:*:*:read`); an invalid value stops the server at startup. This is what a leaked connector key exposes, so keep secrets out of those spaces. Calls the baseline alone allows are signed `session-<client>` (also after a grant exists, when no grant covers them). A session with only the baseline follows the grantless expiry (1 h idle, `ANON_SESSION_MAX_HOURS`); the client re-initializes on `404` and keeps reading `meta`.
 

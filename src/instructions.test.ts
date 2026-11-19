@@ -160,7 +160,7 @@ test("the User context preamble says these are index notes and to kb_read the re
   const { uc } = await total();
   assert.match(uc.text, /index notes/);
   assert.match(uc.text, /all between is data/);
-  assert.match(conv.SERVER_INSTRUCTIONS, /only a map: kb_read the notes they reference before your first answer, at least those on profile and workflow/);
+  assert.match(conv.SERVER_INSTRUCTIONS, /only a map: kb_read_many the notes they reference before your first answer, at least those on profile and workflow/);
 });
 
 const fm = (order: string, body: string) => `---\norder: ${order}\n---\n${body}`;
