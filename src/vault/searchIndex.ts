@@ -3,17 +3,15 @@
 import Database from "better-sqlite3";
 import path from "node:path";
 import { listNoteNames, listSubdirs, readFileNoFollow } from "./enumerate";
-import { setVaultIndexer } from "./git";
+import { runGit, setVaultIndexer } from "./git";
 import { isValidSlug } from "./paths";
 import { searchView } from "../tools/frontmatter";
 
 export const MAX_INDEXED_BYTES = 1024 * 1024;
 
 export interface IndexedHit {
+  rowid: number;
   path: string;
-  name: string;
-  body: string;
-  section: string;
 }
 
 export interface SearchFilter {
@@ -33,7 +31,7 @@ export function getSearchIndex(vaultRoot: string): SearchIndex | undefined {
 export function startSearchIndex(vaultRoot: string): SearchIndex {
   const idx = new SearchIndex(vaultRoot);
   indexes.set(vaultRoot, idx);
-  setVaultIndexer(vaultRoot, (rels) => idx.update(rels));
+  setVaultIndexer(vaultRoot, () => idx.sync());
   void idx.build().catch((err) => console.error(`search index build failed: ${err instanceof Error ? err.message : String(err)}`));
   return idx;
 }
@@ -61,24 +59,59 @@ export class SearchIndex {
     this.db.close();
   }
 
+  // HEAD the index is known to match; undefined until the build has started.
+  private lastHead: string | undefined;
+
   async build(): Promise<void> {
     this.building = true;
-    for (const space of await listSubdirs(this.vaultRoot, [])) {
-      for (const project of await listSubdirs(this.vaultRoot, [space])) {
-        for (const section of await listSubdirs(this.vaultRoot, [space, project])) {
-          const names = await listNoteNames(this.vaultRoot, [space, project, section]);
-          await this.reindex(names.map((n) => `${space}/${project}/${section}/${n}.md`));
+    try {
+      this.lastHead = await this.head();
+      for (const space of await listSubdirs(this.vaultRoot, [])) {
+        for (const project of await listSubdirs(this.vaultRoot, [space])) {
+          for (const section of await listSubdirs(this.vaultRoot, [space, project])) {
+            try {
+              const names = await listNoteNames(this.vaultRoot, [space, project, section]);
+              await this.reindex(names.map((n) => `${space}/${project}/${section}/${n}.md`));
+            } catch (err) {
+              console.error(`search index: skipped ${space}/${project}/${section}: ${err instanceof Error ? err.message : String(err)}`);
+            }
+          }
         }
       }
-    }
-    // Changes that arrived during the build are applied before readiness flips.
-    while (this.pending.size) {
-      const rels = [...this.pending];
+      // Changes that arrived during the build are applied before readiness flips.
+      while (this.pending.size) {
+        const rels = [...this.pending];
+        this.pending.clear();
+        await this.reindex(rels);
+      }
+      this.ready = true;
+    } finally {
+      // A failed build leaves ready=false (kb_search keeps the scan) and drops the queue.
+      this.building = false;
       this.pending.clear();
-      await this.reindex(rels);
     }
-    this.building = false;
-    this.ready = true;
+  }
+
+  private async head(): Promise<string> {
+    return (await runGit(["rev-parse", "HEAD"], this.vaultRoot).catch(() => "")).trim();
+  }
+
+  // Reindexes what changed between the last-seen HEAD and HEAD. The marker only advances after
+  // a successful update, so a failed diff is retried on the next turn. Never throws.
+  async sync(): Promise<void> {
+    try {
+      const last = this.lastHead;
+      if (last === undefined) return;
+      const now = await this.head();
+      if (now === last || !now) return;
+      const out = last
+        ? await runGit(["diff", "--name-only", "--no-renames", "-z", last, now], this.vaultRoot)
+        : await runGit(["ls-tree", "-r", "--name-only", "-z", now], this.vaultRoot);
+      await this.update(out.split("\0").filter(Boolean));
+      this.lastHead = now;
+    } catch (err) {
+      console.error(`search reindex failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
   // rels are vault-relative file paths; a missing or unreadable file is removed from the index.
@@ -124,8 +157,12 @@ export class SearchIndex {
       }
     }
     const stmt = this.db.prepare(
-      `SELECT path, name, body, section FROM notes WHERE ${where.join(" AND ")} ORDER BY bm25(notes, 10.0, 1.0), path`,
+      `SELECT rowid, path FROM notes WHERE ${where.join(" AND ")} ORDER BY bm25(notes, 10.0, 1.0), path`,
     );
     yield* stmt.iterate(...args) as IterableIterator<IndexedHit>;
+  }
+
+  body(rowid: number): string {
+    return (this.db.prepare("SELECT body FROM notes WHERE rowid = ?").get(rowid) as { body: string } | undefined)?.body ?? "";
   }
 }

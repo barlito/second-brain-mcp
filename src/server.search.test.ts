@@ -1,6 +1,6 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { cleanup, git, makeTempDb, makeTempVault, sleep } from "./test-support/fixtures";
 import { newVaultWithRemote, otherClone } from "./test-support/git-helpers";
@@ -182,4 +182,70 @@ test("index follows a pull that brings remote changes (add, edit, delete)", asyn
   assert.deepEqual(hits("remoteword"), []);
   assert.deepEqual(hits("goneword"), []);
   idxMod.dropSearchIndex(v2);
+});
+
+test("a commit made outside the server is indexed by the next write turn", async () => {
+  put(vault, "pro/a/notes/human.md", "humancommitword\n");
+  git(["add", "."], vault);
+  git(["commit", "-m", "human"], vault);
+  assert.equal((await search("master", { query: "humancommitword" })).text, "No matches.");
+  const w = await callTool(app.baseUrl, tokens.writer, "kb_write", {
+    space: "pro", project: "a", section: "notes", note: "after-human", content: "# T\nsomething\n",
+  });
+  assert.equal(w.isError, false, w.text);
+  assert.deepEqual(files((await search("master", { query: "humancommitword" })).text), ["pro/a/notes/human"]);
+});
+
+test("a write racing the initial build is not lost", async () => {
+  const { vault: v3 } = makeTempVault();
+  put(v3, "pro/a/notes/old.md", "oldword\n");
+  git(["add", "."], v3);
+  git(["commit", "-m", "old"], v3);
+  const idx3 = idxMod.startSearchIndex(v3);
+  await gitMod.syncWrite(v3, join(v3, "pro/a/notes/racing.md"), "racingword\n", "racing");
+  while (!idx3.ready) await sleep(5);
+  const hits = (q: string) => [...idx3.search(`"${q}"`, {})].map((h) => h.path);
+  assert.deepEqual(hits("racingword"), ["pro/a/notes/racing"]);
+  assert.deepEqual(hits("oldword"), ["pro/a/notes/old"]);
+  idxMod.dropSearchIndex(v3);
+});
+
+test("lines and the name label compare words, not raw substrings", async () => {
+  put(vault, "pro/a/notes/lequipe.md", "alors L’équipe arrive\nla partie commence\nfoo bar baz\n");
+  put(vault, "pro/a/notes/foo-bar.md", "unrelated text\n");
+  await idx.update(["pro/a/notes/lequipe.md", "pro/a/notes/foo-bar.md"]);
+  const eq = await search("master", { query: "l'équipe" });
+  assert.equal(eq.text, "pro/a/notes/lequipe: alors L’équipe arrive");
+  const fb = (await search("master", { query: "foo-bar" })).text;
+  assert.match(fb, /pro\/a\/notes\/lequipe: foo bar baz/);
+  assert.match(fb, /pro\/a\/notes\/foo-bar: \(name match\)/);
+  const art = await search("master", { query: "art", section: "notes", project: "a", space: "pro" });
+  assert.equal(art.text, "No matches.");
+  const arts = await search("master", { query: "part*", section: "notes", project: "a", space: "pro" });
+  assert.equal(arts.text, "pro/a/notes/lequipe: la partie commence");
+});
+
+test("control characters and typographic quotes in the query", async () => {
+  const nul = await search("master", { query: "quick\u0000brown\u0001" });
+  assert.equal(nul.isError, false, nul.text);
+  assert.deepEqual(files(nul.text).sort(), ["pro/a/notes/phrase", "pro/a/notes/phrase2"]);
+  assert.deepEqual(files((await search("master", { query: "«quick brown»" })).text), ["pro/a/notes/phrase"]);
+  assert.deepEqual(files((await search("master", { query: "“quick brown”" })).text), ["pro/a/notes/phrase"]);
+  assert.equal((await search("master", { query: "\u0000\u0000" })).isError, true);
+});
+
+test("a failing section does not break the build", async () => {
+  const { vault: v4 } = makeTempVault();
+  put(v4, "pro/a/notes/ok.md", "okword\n");
+  put(v4, "pro/a/locked/no.md", "lockedword\n");
+  chmodSync(join(v4, "pro/a/locked"), 0o000);
+  try {
+    const idx4 = idxMod.startSearchIndex(v4);
+    while (!idx4.ready) await sleep(5);
+    assert.deepEqual([...idx4.search('"okword"', {})].map((h) => h.path), ["pro/a/notes/ok"]);
+    assert.deepEqual([...idx4.search('"lockedword"', {})], []);
+  } finally {
+    chmodSync(join(v4, "pro/a/locked"), 0o755);
+    idxMod.dropSearchIndex(v4);
+  }
 });

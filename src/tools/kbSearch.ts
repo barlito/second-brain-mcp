@@ -4,7 +4,7 @@ import { listNoteNames, readFileNoFollow } from "../vault/enumerate";
 import { resolveNotePath } from "../vault/paths";
 import { RegisterTool, registerKbTool, toolError, toolText, ToolRunResult } from "./common";
 import { fold, snippet } from "./snippet";
-import { parseQuery, SearchTerm, toMatch } from "./searchQuery";
+import { parseQuery, SearchTerm, termIn, toMatch, words } from "./searchQuery";
 import { getSearchIndex, MAX_INDEXED_BYTES, SearchIndex } from "../vault/searchIndex";
 import { NOTE_TYPES, searchView } from "./frontmatter";
 import { discoveryCall, optSlug, readableSections, ScopeArgs } from "./discovery";
@@ -55,8 +55,10 @@ export const register: RegisterTool = (server, { vaultRoot }) => {
           };
         }
 
+        const terms = parseQuery(trimmed);
+        if (!terms.length) return { toolResult: toolError(NO_TERM), audit: { detail: `qlen=${trimmed.length} no term` } };
         const idx = getSearchIndex(vaultRoot);
-        if (idx?.ready) return indexedSearch(idx, vaultRoot, ctx.scopes, trimmed, { space, project, section, type }, include_archived === true);
+        if (idx?.ready) return indexedSearch(idx, vaultRoot, ctx.scopes, trimmed, terms, { space, project, section, type }, include_archived === true);
 
         const out: string[] = [];
         const stats = { skipped: 0 };
@@ -147,12 +149,10 @@ async function indexedSearch(
   vaultRoot: string,
   scopes: TokenContext["scopes"],
   trimmed: string,
+  terms: SearchTerm[],
   f: ScopeArgs & { type?: string },
   includeArchived: boolean,
 ): Promise<ToolRunResult> {
-  const terms = parseQuery(trimmed);
-  if (!terms.length) return { toolResult: toolError(NO_TERM), audit: { detail: `qlen=${trimmed.length} no term` } };
-
   const stats = { skipped: 0 };
   const readable = new Set<string>();
   for await (const s of readableSections(vaultRoot, scopes, f, includeArchived, stats)) {
@@ -162,16 +162,20 @@ async function indexedSearch(
   const out: string[] = [];
   let files = 0;
   let truncated: string | undefined;
-  for (const hit of idx.search(toMatch(terms), f)) {
-    if (!readable.has(hit.path.slice(0, hit.path.lastIndexOf("/")))) continue;
-    if (files >= MAX_HIT_FILES) {
-      truncated = "more notes match";
-      break;
+  try {
+    for (const hit of idx.search(toMatch(terms), f)) {
+      if (!readable.has(hit.path.slice(0, hit.path.lastIndexOf("/")))) continue;
+      if (files >= MAX_HIT_FILES) {
+        truncated = "more notes match";
+        break;
+      }
+      files++;
+      const lines = matchingLines(idx.body(hit.rowid), terms);
+      if (!lines.length) lines.push(nameMatches(hit.path, terms) ? "(name match)" : "(match spans lines)");
+      for (const l of lines) out.push(`${hit.path}: ${l}`);
     }
-    files++;
-    const lines = matchingLines(hit.body, terms);
-    if (!lines.length) lines.push("(name match)");
-    for (const l of lines) out.push(`${hit.path}: ${l}`);
+  } catch {
+    return { toolResult: toolError("Invalid query."), audit: { detail: `qlen=${trimmed.length} invalid` } };
   }
 
   let text = out.length ? out.join("\n") : "No matches.";
@@ -181,13 +185,18 @@ async function indexedSearch(
   return { toolResult: toolText(text), audit: { detail } };
 }
 
+function nameMatches(notePath: string, terms: SearchTerm[]): boolean {
+  const name = words(notePath.slice(notePath.lastIndexOf("/") + 1));
+  return terms.some((t) => termIn(name, t));
+}
+
 function matchingLines(body: string, terms: SearchTerm[]): string[] {
   const lines: string[] = [];
   for (const line of body.split("\n")) {
-    const folded = fold(line);
-    const hit = terms.find((t) => folded.includes(t.text));
+    const w = words(line);
+    const hit = terms.find((t) => termIn(w, t));
     if (!hit) continue;
-    lines.push(snippet(line, hit.text));
+    lines.push(snippet(line, hit.text.split(" ")[0]));
     if (lines.length >= MAX_LINES_PER_FILE) break;
   }
   return lines;

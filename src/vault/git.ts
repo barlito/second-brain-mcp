@@ -864,13 +864,12 @@ function withLock<T>(vaultRoot: string, fn: () => Promise<LockedResult<T>>, boun
   }
   const scheduled = queue.then(async () => {
     setOpMarker(vaultRoot);
-    const headBefore = indexers.has(vaultRoot) ? await headOrEmpty(vaultRoot) : undefined;
     try {
       const r = await fn();
       if (r.push) schedulePush(vaultRoot);
       return r.value;
     } finally {
-      if (headBefore !== undefined) await reindexSince(vaultRoot, headBefore);
+      await indexers.get(vaultRoot)?.();
       clearOpMarker(vaultRoot);
       if (bounded) queuedWrites--;
     }
@@ -879,27 +878,15 @@ function withLock<T>(vaultRoot: string, fn: () => Promise<LockedResult<T>>, boun
   return scheduled;
 }
 
-// Per-vault callback fed the changed paths after each HEAD move (the search index).
-const indexers = new Map<string, (rels: string[]) => Promise<void>>();
+// Per-vault callback run at the end of every lock turn (the search index syncs itself to HEAD).
+// Writes, pulls and recovery all move HEAD inside a turn, and the index diffs from its own
+// last-seen HEAD, so commits made outside the server are caught by the next turn too.
+// Cost: one rev-parse per turn. It must never throw: a stale index cannot fail a write.
+const indexers = new Map<string, () => Promise<void>>();
 
-export function setVaultIndexer(vaultRoot: string, fn: ((rels: string[]) => Promise<void>) | null): void {
+export function setVaultIndexer(vaultRoot: string, fn: (() => Promise<void>) | null): void {
   if (fn) indexers.set(vaultRoot, fn);
   else indexers.delete(vaultRoot);
-}
-
-// Every HEAD move (local commit, pull, recovery) happens inside a lock turn, so this one
-// hook keeps the search index current. Never throws: a stale index must not fail a write.
-async function reindexSince(vaultRoot: string, before: string): Promise<void> {
-  try {
-    const now = await headOrEmpty(vaultRoot);
-    if (now === before || !now) return;
-    const out = before
-      ? await runGit(["diff", "--name-only", "--no-renames", "-z", before, now], vaultRoot)
-      : await runGit(["ls-tree", "-r", "--name-only", "-z", now], vaultRoot);
-    await indexers.get(vaultRoot)?.(out.split("\0").filter(Boolean));
-  } catch (err) {
-    console.error(`search reindex failed: ${errText(err)}`);
-  }
 }
 
 // Resolves once the lock queue and every background push are idle. With
