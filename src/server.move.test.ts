@@ -1,6 +1,6 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { cleanup, git, makeTempDb, makeTempVault } from "./test-support/fixtures";
 import { callTool, lastAudit, listen } from "./test-support/server";
@@ -12,6 +12,7 @@ process.env.VAULT_PATH = vault;
 type Perm = "read" | "write";
 let app: Awaited<ReturnType<typeof listen>>;
 let db: typeof import("./db").db;
+let scanLimits: typeof import("./tools/linkScan").scanLimits;
 const tokens: Record<string, string> = {};
 const today = new Date().toISOString().slice(0, 10);
 const fm = (type: string, body: string) => `---\ntype: ${type}\nauthor: human\ncreated: 2020-01-01\nupdated: 2020-01-01\n---\n${body}\n`;
@@ -27,6 +28,7 @@ function put(rel: string, content: string): void {
 before(async () => {
   const { createToken } = await import("./auth/tokens");
   ({ db } = await import("./db"));
+  ({ scanLimits } = await import("./tools/linkScan"));
   const { createApp } = await import("./server");
 
   put(
@@ -52,6 +54,12 @@ before(async () => {
   put("pro/a/notes/dirty-target.md", fm("note", "x"));
   put("pro/a/notes/dirty-src.md", fm("note", "x"));
   put("pro/a/notes/big.md", fm("note", "y".repeat(400)));
+  put("pro/a/notes/utf-target.md", fm("note", "x"));
+  writeFileSync(join(vault, "pro/a/notes/latin1.md"), Buffer.concat([Buffer.from("[[utf-target]] caf"), Buffer.from([0xe9]), Buffer.from("\n")]));
+  put("pro/a/notes/limtarget.md", fm("note", "x"));
+  put("lim/p/notes/lk.md", "[[pro/a/notes/limtarget]]".padEnd(199, ".") + "\n");
+  put("pro/a/notes/rb-target.md", fm("note", "x"));
+  put("pro/a/notes/rb-l.md", fm("note", "[[rb-target]]"));
   git(["add", "."], vault);
   git(["commit", "-qm", "seed"], vault);
 
@@ -131,8 +139,8 @@ test("move across projects: incoming links get 3 parts, the moved note's own lin
   const r = await mv("mover", { note: "cross", to_project: "b", to_section: "notes", to_note: "cross-twin" });
   assert.equal(r.isError, false, r.text);
   assert.match(read("pro/a/notes/l2.md"), /\[\[b\/notes\/cross-twin\]\]/);
-  // d0 moved to notes earlier ([[notes/d0]]); from pro/b a 2-part link fails, the shortest unique form is 1-part.
-  assert.match(read("pro/b/notes/cross-twin.md"), /out \[\[d0\]\]/);
+  // d0 moved to notes earlier ([[notes/d0]]); from pro/b that needs the project, never fewer parts.
+  assert.match(read("pro/b/notes/cross-twin.md"), /out \[\[a\/notes\/d0\]\]/);
   assert.match(r.text, /Links rewritten: 2 in 2 note\(s\)/);
 });
 
@@ -163,7 +171,9 @@ test("refusals: permissions, archive, entry note, existing, missing, same path, 
     ["mover", { note: "l3", to_section: "archive", to_note: "x" }, /archive/],
     ["mover", { section: "archive", note: "x", to_section: "notes", to_note: "x" }, /archive/],
     ["mover", { section: "overview", note: "index", to_section: "notes", to_note: "x" }, /entry note/],
-    ["mover", { note: "l3", to_section: "overview", to_note: "index" }, /entry note/],
+    ["mover", { note: "l3", to_section: "overview", to_note: "index" }, /cannot be moved into `overview`/],
+    ["mover", { note: "l3", to_section: "overview", to_note: "x" }, /cannot be moved into `overview`/],
+    ["mover", { note: "l3", to_section: "journal", to_note: "2026-01" }, /cannot be moved into `journal`/],
     ["mover", { note: "l3", to_section: "notes", to_note: "l1" }, /^Destination note already exists\.$/],
     ["mover", { note: "nope", to_section: "notes", to_note: "x" }, /^Note not found\.$/],
     ["mover", { note: "l3", to_section: "notes", to_note: "l3" }, /same note/],
@@ -179,6 +189,12 @@ test("refusals: permissions, archive, entry note, existing, missing, same path, 
   const dirty = await mv("mover", { note: "dirty-src", to_section: "notes", to_note: "x" });
   assert.match(dirty.text, /uncommitted changes/);
   git(["checkout", "--", "pro/a/notes/dirty-src.md"], vault);
+  put("pro/a/notes/untracked.md", fm("note", "x"));
+  assert.match((await mv("mover", { note: "untracked", to_section: "notes", to_note: "x" })).text, /uncommitted changes/);
+  git(["add", "pro/a/notes/untracked.md"], vault);
+  assert.match((await mv("mover", { note: "untracked", to_section: "notes", to_note: "x" })).text, /uncommitted changes/);
+  git(["rm", "-q", "--cached", "pro/a/notes/untracked.md"], vault);
+  rmSync(join(vault, "pro/a/notes/untracked.md"));
   assert.equal(commits(), n);
   assert.equal(git(["status", "--porcelain"], vault).trim(), "");
 });
@@ -201,16 +217,79 @@ test("space limits apply to the destination; nothing is moved when refused", asy
   }
 });
 
-test("the overview 3 KB cap applies to a rewritten index", async () => {
+test("a rewritten index past the 3 KB cap is skipped and reported, the move goes through", async () => {
   const idx = read("pro/a/overview/index.md").replace("- `decisions`", "  - `longname`\n- `decisions`");
   put("pro/a/overview/index.md", idx + "x".repeat(3072 - Buffer.byteLength(idx)));
   put("pro/a/notes/longname.md", fm("note", "x"));
   git(["add", "."], vault);
   git(["commit", "-qm", "full index"], vault);
-  const n = commits();
+  const before = read("pro/a/overview/index.md");
   const r = await mv("mover", { note: "longname", to_section: "notes", to_note: "a-much-longer-name" });
-  assert.equal(r.isError, true);
-  assert.match(r.text, /overview\/index is too large/);
-  assert.ok(existsSync(join(vault, "pro/a/notes/longname.md")));
-  assert.equal(commits(), n);
+  assert.equal(r.isError, false, r.text);
+  assert.match(r.text, /Docs map of pro\/a\/overview\/index: not updated \(limit\): renamed/);
+  assert.equal(read("pro/a/overview/index.md"), before);
+  assert.ok(existsSync(join(vault, "pro/a/notes/a-much-longer-name.md")));
+});
+
+test("a linking note that would break a space limit is reported as not updated", async () => {
+  const old = process.env.SPACE_LIMITS;
+  process.env.SPACE_LIMITS = "lim:maxNoteBytes=200";
+  try {
+    const r = await mv("mover", { note: "limtarget", to_section: "notes", to_note: "limtarget-longer" });
+    assert.equal(r.isError, false, r.text);
+    assert.match(r.text, /Linking notes not updated \(limit\): lim\/p\/notes\/lk/);
+    assert.match(read("lim/p/notes/lk.md"), /\[\[pro\/a\/notes\/limtarget\]\]/);
+  } finally {
+    if (old === undefined) delete process.env.SPACE_LIMITS;
+    else process.env.SPACE_LIMITS = old;
+  }
+});
+
+test("a linking note that is not valid UTF-8 is reported, not rewritten", async () => {
+  const raw = readFileSync(join(vault, "pro/a/notes/latin1.md"));
+  const r = await mv("mover", { note: "utf-target", to_section: "notes", to_note: "utf-moved" });
+  assert.equal(r.isError, false, r.text);
+  assert.match(r.text, /Linking notes not updated \(not UTF-8\): pro\/a\/notes\/latin1/);
+  assert.deepEqual(readFileSync(join(vault, "pro/a/notes/latin1.md")), raw);
+});
+
+test("a truncated scan refuses the move unless rewrite_links is false", async () => {
+  const old = scanLimits.maxScannedFiles;
+  scanLimits.maxScannedFiles = 2;
+  try {
+    const n = commits();
+    const r = await mv("mover", { note: "l3", to_section: "notes", to_note: "l3-moved" });
+    assert.equal(r.isError, true);
+    assert.match(r.text, /Too many notes to rewrite links safely; retry or use rewrite_links=false\./);
+    assert.equal(commits(), n);
+    const ok = await mv("mover", { note: "l3", to_section: "notes", to_note: "l3-moved", rewrite_links: false });
+    assert.equal(ok.isError, false, ok.text);
+    assert.doesNotMatch(ok.text, /Links rewritten/);
+  } finally {
+    scanLimits.maxScannedFiles = old;
+  }
+});
+
+test("a failed commit rolls back every file and created directory, and keeps a human's staged change", async () => {
+  const hook = join(vault, ".git/hooks/pre-commit");
+  mkdirSync(join(vault, ".git/hooks"), { recursive: true });
+  writeFileSync(hook, "#!/bin/sh\nexit 1\n");
+  chmodSync(hook, 0o755);
+  put("pro/a/notes/human.md", "draft\n");
+  git(["add", "pro/a/notes/human.md"], vault);
+  const files = ["pro/a/notes/rb-target.md", "pro/a/notes/rb-l.md", "pro/a/overview/index.md"];
+  const before = files.map((f) => readFileSync(join(vault, f)));
+  try {
+    const n = commits();
+    const r = await mv("mover", { note: "rb-target", to_project: "b", to_section: "fresh", to_note: "rb" });
+    assert.equal(r.isError, true, r.text);
+    assert.equal(commits(), n);
+    assert.equal(git(["status", "--porcelain"], vault), "A  pro/a/notes/human.md\n");
+    files.forEach((f, i) => assert.deepEqual(readFileSync(join(vault, f)), before[i], f));
+    assert.equal(existsSync(join(vault, "pro/b/fresh")), false);
+  } finally {
+    rmSync(hook);
+    git(["rm", "-q", "--cached", "pro/a/notes/human.md"], vault);
+    rmSync(join(vault, "pro/a/notes/human.md"));
+  }
 });

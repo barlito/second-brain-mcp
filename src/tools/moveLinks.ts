@@ -8,12 +8,10 @@ const resolvesTo = (resolve: LinkResolver, from: Loc, target: string, note: Note
   return r.status === "resolved" && noteKey(r.note) === noteKey(note);
 };
 
-// Target text for `note` from `from`: `parts` path parts if that resolves uniquely, else the shortest form that does.
+// Target text for `note` from `from`: `parts` path parts if that resolves uniquely, else the next longer form that does.
 export function linkTarget(resolve: LinkResolver, from: Loc, note: NoteRef, parts: number): string {
   const forms = [note.name, `${note.section}/${note.name}`, `${note.project}/${note.section}/${note.name}`, noteKey(note)];
-  const wanted = forms[Math.min(Math.max(parts, 1), 4) - 1];
-  if (resolvesTo(resolve, from, wanted, note)) return wanted;
-  return forms.find((f) => resolvesTo(resolve, from, f, note)) ?? noteKey(note);
+  return forms.slice(Math.min(Math.max(parts, 1), 4) - 1).find((f) => resolvesTo(resolve, from, f, note)) ?? noteKey(note);
 }
 
 export interface Rewrite {

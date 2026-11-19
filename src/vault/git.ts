@@ -7,6 +7,7 @@ import {
   fsyncSync,
   lstatSync,
   mkdirSync,
+  rmdirSync,
   openSync,
   readdirSync,
   readFileSync,
@@ -1216,9 +1217,9 @@ export function syncMoveWithWrites<T>(
     if (lstatOrNull(toAbs)) throw new MoveTargetExistsError(`target exists: ${toAbs}`);
     const fromRel = path.relative(vaultRoot, fromAbs);
     const toRel = path.relative(vaultRoot, toAbs);
-    const inHead = (await runGit(["ls-tree", "--name-only", "HEAD", "--", fromRel], vaultRoot).catch(() => "")).trim() !== "";
     const dirty = async (rel: string) => (await runGit(["status", "--porcelain", "--", rel], vaultRoot)).trim() !== "";
-    if (inHead && (await dirty(fromRel))) throw new MoveSourceDirtyError(`source has uncommitted changes: ${fromRel}`);
+    // Untracked, staged-only or edited: the source must be exactly what HEAD has.
+    if (await dirty(fromRel)) throw new MoveSourceDirtyError(`source has uncommitted changes: ${fromRel}`);
 
     const { moved, writes, info } = await plan((abs) => dirty(path.relative(vaultRoot, abs)));
     for (const w of writes) {
@@ -1228,28 +1229,41 @@ export function syncMoveWithWrites<T>(
     const rels = writes.map((w) => path.relative(vaultRoot, w.absolutePath));
     const source = readFileSync(fromAbs);
     const previous = writes.map((w) => (existsSync(w.absolutePath) ? readFileSync(w.absolutePath) : null));
+    const createdDirs = missingDirs(path.dirname(toAbs));
     const headBefore = await headOrEmpty(vaultRoot);
     try {
       mkdirSync(path.dirname(toAbs), { recursive: true });
       assertSafePath(vaultRoot, path.dirname(toAbs));
-      const tracked = (await runGit(["ls-files", "--", fromRel], vaultRoot)).trim() !== "";
-      if (tracked) await runGit(["mv", "--", fromRel, toRel], vaultRoot);
-      else renameSync(fromAbs, toAbs);
+      await runGit(["mv", "--", fromRel, toRel], vaultRoot);
       writeNoteAtomic(vaultRoot, toAbs, moved);
       for (const w of writes) writeNoteAtomic(vaultRoot, w.absolutePath, w.content);
       await runGit(["add", "--", toRel, ...rels], vaultRoot);
-      await runGit(["commit", "-m", commitMessage, "--", ...(inHead ? [fromRel] : []), toRel, ...rels], vaultRoot);
+      await runGit(["commit", "-m", commitMessage, "--", fromRel, toRel, ...rels], vaultRoot);
     } catch (err) {
       if ((await headOrEmpty(vaultRoot)) === headBefore) {
         await restoreNote(vaultRoot, fromAbs, fromRel, source);
         await restoreNote(vaultRoot, toAbs, toRel, null);
         for (let i = 0; i < writes.length; i++) await restoreNote(vaultRoot, writes[i].absolutePath, rels[i], previous[i]);
+        for (const dir of createdDirs) {
+          try {
+            rmdirSync(dir);
+          } catch {
+            /* not empty: something else landed there */
+          }
+        }
         throw err;
       }
       console.error(`git move+write: error after commit landed, keeping it: ${errText(err)}`);
     }
     return finishLocked(vaultRoot, remote, { commitSha: await headOrEmpty(vaultRoot), info });
   });
+}
+
+// Ancestors of `dir` that do not exist yet, deepest first.
+function missingDirs(dir: string): string[] {
+  const out: string[] = [];
+  for (let d = dir; !existsSync(d) && path.dirname(d) !== d; d = path.dirname(d)) out.push(d);
+  return out;
 }
 
 // System job (auto-archive): `select` runs inside the lock after the pull and returns the moves;
