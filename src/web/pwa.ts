@@ -1,7 +1,12 @@
 // PWA surface of the admin: web app manifest and the push service worker (both served behind the
 // same auth as every page). The worker has no fetch handler and caches nothing.
+import { BADGE_96_B64, ICON_192_B64 } from "./icons";
+
 export const THEME_COLOR = "#161a22";
 const BACKGROUND_COLOR = "#f6f7f9";
+// Inlined: Chrome fetches notification images without the Authelia cookie.
+const ICON_URL = `data:image/png;base64,${ICON_192_B64}`;
+const BADGE_URL = `data:image/png;base64,${BADGE_96_B64}`;
 
 export const MANIFEST = {
   name: "second-brain admin",
@@ -26,7 +31,8 @@ self.addEventListener("push", function (e) {
   e.waitUntil(self.registration.showNotification(d.title || "Access request", {
     body: d.body || "",
     tag: d.tag || "access",
-    icon: "/static/icon-192.png",
+    icon: "${ICON_URL}",
+    badge: "${BADGE_URL}",
     data: { url: typeof d.url === "string" && d.url.charAt(0) === "/" ? d.url : "/access" },
     renotify: true
   }));

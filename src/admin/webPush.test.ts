@@ -111,6 +111,8 @@ test("manifest content, service worker headers, icons are PNG, head links, CSP",
   assert.match(String(sw.headers["content-type"]), /^application\/javascript/);
   assert.equal(sw.headers["cache-control"], "no-cache");
   assert.match(sw.text, /showNotification/);
+  assert.match(sw.text, /icon: "data:image\/png;base64,iVBOR/);
+  assert.match(sw.text, /badge: "data:image\/png;base64,iVBOR/);
   assert.doesNotMatch(sw.text, /addEventListener\("fetch"/);
   for (const [p, size] of [["/static/icon-192.png", 192], ["/static/icon-512.png", 512]] as const) {
     const i = await get(p);
