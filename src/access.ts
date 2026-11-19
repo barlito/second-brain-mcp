@@ -1,7 +1,7 @@
 // Access requests raised by token-less sessions (kb_request_access) and their review by the
 // admin (web UI / CLI). Approval turns a request into a session grant (see auth/sessions.ts);
 // nothing here ever touches the vault.
-import { randomInt, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { db } from "./db";
 import { Scope } from "./auth/types";
 import { clientSlug, insertGrant, listGrants } from "./auth/sessions";
@@ -15,9 +15,6 @@ export const MAX_REASON_CHARS = 500;
 export const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 export const ACCESS_KINDS = ["read", "write"] as const;
 export type AccessKind = (typeof ACCESS_KINDS)[number];
-// No 0/O/1/I/L: the code is read aloud / compared by eye.
-const CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
-const CODE_LEN = 6;
 
 // Live change feed for the admin UI (SSE). In-process only: the server runs as a single replica.
 type AccessListener = (rev: number) => void;
@@ -82,7 +79,6 @@ export function defaultAccessScopes(space: string, project: string, access: Acce
 
 export interface RequestRow {
   id: string;
-  code: string;
   session_id: string;
   // Stated request (null when the agent only sent explicit scopes).
   space: string | null;
@@ -124,16 +120,6 @@ export function grantLabel(scopes: Scope[]): string {
 }
 
 const isLive = (r: RequestRow, now = Date.now()): boolean => r.status === "pending" && Date.parse(r.expires_at) > now;
-
-function newCode(): string {
-  for (let i = 0; i < 20; i++) {
-    let c = "";
-    for (let j = 0; j < CODE_LEN; j++) c += CODE_ALPHABET[randomInt(CODE_ALPHABET.length)];
-    const clash = db.prepare("SELECT 1 FROM access_requests WHERE code = ? AND status = 'pending' AND expires_at > ?").get(c, new Date().toISOString());
-    if (!clash) return c;
-  }
-  throw new Error("cannot generate a unique access code");
-}
 
 // "space:project:section:permission" strings -> validated, de-duplicated scopes (TokenValidationError on bad input).
 export function parseScopeStrings(list: string[]): Scope[] {
@@ -213,7 +199,6 @@ export function createAccessRequest(sessionId: string, input: NewRequest, allow:
     if (!allow()) throw new AccessError(429, "Too many access requests from this address, retry later.");
     const row: RequestRow = {
       id: randomUUID(),
-      code: newCode(),
       session_id: sessionId,
       space: input.space ?? null,
       project: input.project ?? null,
@@ -229,8 +214,8 @@ export function createAccessRequest(sessionId: string, input: NewRequest, allow:
       elevation: listGrants(sessionId).length > 0 ? 1 : 0,
     };
     db.prepare(
-      "INSERT INTO access_requests (id, code, session_id, space, project, access, reason, status, created_at, expires_at, scopes, elevation) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)",
-    ).run(row.id, row.code, row.session_id, row.space, row.project, row.access, row.reason, row.created_at, row.expires_at, row.scopes, row.elevation);
+      "INSERT INTO access_requests (id, session_id, space, project, access, reason, status, created_at, expires_at, scopes, elevation) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)",
+    ).run(row.id, row.session_id, row.space, row.project, row.access, row.reason, row.created_at, row.expires_at, row.scopes, row.elevation);
     if (row.elevation) audit(`session:${sessionId}`, "access_elevation_request", row, "ok", `${row.access ?? "scopes"}`);
     return { request: row, created: true };
   })();
@@ -361,13 +346,10 @@ export function countPendingRequests(): number {
   return (db.prepare("SELECT COUNT(*) AS n FROM access_requests WHERE status = 'pending' AND expires_at > ?").get(new Date().toISOString()) as { n: number }).n;
 }
 
-// `ref` is the request id or its short code (pending requests only for the code).
 function findRequest(ref: string): (RequestRow & { client_name: string; session_alive: number }) | undefined {
   const base = `SELECT r.*, s.client_name, (s.id IS NOT NULL AND s.revoked_at IS NULL) AS session_alive
                 FROM access_requests r LEFT JOIN sessions s ON s.id = r.session_id`;
-  const byId = db.prepare(`${base} WHERE r.id = ?`).get(ref);
-  if (byId) return byId as never;
-  return db.prepare(`${base} WHERE r.code = ? AND r.status = 'pending' AND r.expires_at > ?`).get(ref.toUpperCase(), new Date().toISOString()) as never;
+  return db.prepare(`${base} WHERE r.id = ?`).get(ref) as never;
 }
 
 function requireDecidable(ref: string): RequestRow & { client_name: string; session_alive: number } {
@@ -394,13 +376,10 @@ function audit(actor: string, action: string, r: RequestRow, result: "ok" | "err
 
 // Approves with `scopes` (default: defaultAccessScopes). Wildcards need no confirmation (the admin sees the risk badge); warnings are returned in notes.
 // `allowWildcard` is accepted and ignored (legacy callers).
-export function approveRequest(ref: string, opts: { scopes?: Scope[]; allowWildcard?: boolean; actor: string; code?: string }): Decision {
+export function approveRequest(ref: string, opts: { scopes?: Scope[]; allowWildcard?: boolean; actor: string }): Decision {
   const r = requireDecidable(ref);
   const explicit = requestedScopes(r);
   const defaults = requestedOf(r);
-  // Typing the code proves the admin compared it with what the agent displayed (a code ref is that proof).
-  const byCode = ref.toUpperCase() === r.code && ref !== r.id;
-  if (!byCode && (opts.code ?? "").trim().toUpperCase() !== r.code) throw new AccessError(422, "Type the request code your agent showed you to approve it. Nothing was granted.");
   let validated: { name: string; scopes: Scope[] };
   try {
     // Name from the scopes actually granted (after the admin's edits).

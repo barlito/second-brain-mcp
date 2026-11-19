@@ -27,7 +27,7 @@ const OLD_SCHEMA = `
   );
 `;
 
-test("old-schema DB with rows migrates to v7 with data intact, re-run is a no-op", async () => {
+test("old-schema DB with rows migrates to v8 with data intact, re-run is a no-op", async () => {
   const { runMigrations } = await import("./db");
   const d = new Database(join(tmpDir, "old.db"));
   d.pragma("foreign_keys = ON");
@@ -40,7 +40,7 @@ test("old-schema DB with rows migrates to v7 with data intact, re-run is a no-op
   assert.equal(d.pragma("user_version", { simple: true }), 0);
 
   runMigrations(d);
-  assert.equal(d.pragma("user_version", { simple: true }), 7);
+  assert.equal(d.pragma("user_version", { simple: true }), 8);
   assert.equal(d.pragma("foreign_keys", { simple: true }), 1);
   assert.equal((d.prepare("SELECT COUNT(*) c FROM tokens").get() as { c: number }).c, 1);
   assert.equal((d.prepare("SELECT COUNT(*) c FROM scopes").get() as { c: number }).c, 1);
@@ -56,18 +56,18 @@ test("old-schema DB with rows migrates to v7 with data intact, re-run is a no-op
   d.prepare("INSERT INTO audit_log (ts, action, result) VALUES ('t','auth','denied')").run();
 
   runMigrations(d);
-  assert.equal(d.pragma("user_version", { simple: true }), 7);
+  assert.equal(d.pragma("user_version", { simple: true }), 8);
   assert.equal((d.prepare("SELECT COUNT(*) c FROM audit_log").get() as { c: number }).c, 2);
   d.close();
 });
 
-test("fresh DB lands at v7", async () => {
+test("fresh DB lands at v8", async () => {
   const { runMigrations } = await import("./db");
   const d = new Database(":memory:");
   runMigrations(d);
-  assert.equal(d.pragma("user_version", { simple: true }), 7);
+  assert.equal(d.pragma("user_version", { simple: true }), 8);
   runMigrations(d);
-  assert.equal(d.pragma("user_version", { simple: true }), 7);
+  assert.equal(d.pragma("user_version", { simple: true }), 8);
   d.close();
 });
 
@@ -76,7 +76,7 @@ test("DB file is created with mode 0600", async () => {
   assert.equal(statSync(process.env.DB_PATH!).mode & 0o777, 0o600);
 });
 
-test("legacy DB with an orphan scopes row still migrates to v7 (orphan dropped)", async () => {
+test("legacy DB with an orphan scopes row still migrates to v8 (orphan dropped)", async () => {
   const { runMigrations } = await import("./db");
   const d = new Database(join(tmpDir, "orphan.db"));
   d.exec(OLD_SCHEMA);
@@ -84,7 +84,7 @@ test("legacy DB with an orphan scopes row still migrates to v7 (orphan dropped)"
   d.prepare("INSERT INTO scopes (token_id, project, section, permission) VALUES ('ghost','p','s','read')").run();
   d.pragma("foreign_keys = ON");
   runMigrations(d);
-  assert.equal(d.pragma("user_version", { simple: true }), 7);
+  assert.equal(d.pragma("user_version", { simple: true }), 8);
   assert.equal((d.prepare("SELECT COUNT(*) c FROM scopes").get() as { c: number }).c, 0); // orphan dropped, not carried over
   d.close();
 });
@@ -126,6 +126,21 @@ test("a migration that throws halfway rolls back, leaving the previous version a
   d.close();
 });
 
+test("the last migration drops access_requests.code and keeps existing requests", async () => {
+  const { migrateStep, MIGRATIONS } = await import("./db");
+  const d = new Database(join(tmpDir, "nocode.db"));
+  d.pragma("foreign_keys = ON");
+  for (let v = 0; v < MIGRATIONS.length - 1; v++) migrateStep(d, v);
+  const cols = () => (d.prepare("PRAGMA table_info(access_requests)").all() as Array<{ name: string }>).map((c) => c.name);
+  assert.ok(cols().includes("code"));
+  d.prepare("INSERT INTO sessions (id, sid_hash, client_name, client_version, created_at, last_seen_at) VALUES ('s1','h','c','1','t','t')").run();
+  d.prepare("INSERT INTO access_requests (id, code, session_id, reason, created_at, expires_at) VALUES ('r1','ABC234','s1','why','t','t')").run();
+  migrateStep(d, MIGRATIONS.length - 1);
+  assert.ok(!cols().includes("code"));
+  assert.deepEqual(d.prepare("SELECT id, reason FROM access_requests").all(), [{ id: "r1", reason: "why" }]);
+  d.close();
+});
+
 test("a second handle skips a migration another handle already applied", async () => {
   const { migrateStep, MIGRATIONS } = await import("./db");
   const file = join(tmpDir, "race.db");
@@ -149,6 +164,7 @@ test("a second handle skips a migration another handle already applied", async (
   migrateStep(a, 4, counted);
   migrateStep(a, 5, counted);
   migrateStep(a, 6, counted);
+  migrateStep(a, 7, counted);
   migrateStep(b, 0, counted);
   migrateStep(b, 1, counted);
   migrateStep(b, 2, counted);
@@ -156,8 +172,9 @@ test("a second handle skips a migration another handle already applied", async (
   migrateStep(b, 4, counted);
   migrateStep(b, 5, counted);
   migrateStep(b, 6, counted);
-  assert.equal(runs, 7);
-  assert.equal(b.pragma("user_version", { simple: true }), 7);
+  migrateStep(b, 7, counted);
+  assert.equal(runs, 8);
+  assert.equal(b.pragma("user_version", { simple: true }), 8);
   a.close();
   b.close();
 });
@@ -191,7 +208,7 @@ test("migration 3: legacy scopes get space='!legacy', fail closed, and the new u
   } finally {
     console.warn = orig;
   }
-  assert.equal(d.pragma("user_version", { simple: true }), 7);
+  assert.equal(d.pragma("user_version", { simple: true }), 8);
   assert.ok(warns.some((w) => /moved 1 scope\(s\) to space '!legacy'/.test(w)));
   assert.ok(!warns.some((w) => /orphan/.test(w)));
   const scopes = d.prepare("SELECT space, project, section, permission FROM scopes WHERE token_id = 't1'").all() as never[];
@@ -238,7 +255,7 @@ test("migration 4 renames space='legacy' rows from the first migration 3 to '!le
   d.prepare("INSERT INTO scopes (token_id, space, project, section, permission) VALUES ('t1','legacy','p','s','read')").run();
   d.prepare("INSERT INTO scopes (token_id, space, project, section, permission) VALUES ('t1','pro','p','s','read')").run();
   runMigrations(d, MIGRATIONS);
-  assert.equal(d.pragma("user_version", { simple: true }), 7);
+  assert.equal(d.pragma("user_version", { simple: true }), 8);
   assert.deepEqual(d.prepare("SELECT space FROM scopes ORDER BY id").all(), [{ space: "!legacy" }, { space: "pro" }]);
   d.close();
 });
@@ -256,7 +273,7 @@ test("migration 5: v4 DB keeps its scopes, accepts 'propose', still rejects othe
   );
 
   runMigrations(d, MIGRATIONS);
-  assert.equal(d.pragma("user_version", { simple: true }), 7);
+  assert.equal(d.pragma("user_version", { simple: true }), 8);
   assert.deepEqual(d.prepare("SELECT space, project, section, permission FROM scopes").all(), [
     { space: "sp", project: "p", section: "s", permission: "write" },
   ]);
@@ -280,7 +297,7 @@ test("migration 6: v5 DB keeps its tokens, gains a nullable expires_at", async (
   d.prepare("INSERT INTO scopes (token_id, space, project, section, permission) VALUES ('t1','sp','p','s','read')").run();
 
   runMigrations(d, MIGRATIONS);
-  assert.equal(d.pragma("user_version", { simple: true }), 7);
+  assert.equal(d.pragma("user_version", { simple: true }), 8);
   assert.deepEqual(d.prepare("SELECT id, name, token_hash, expires_at FROM tokens").all(), [
     { id: "t1", name: "n", token_hash: "h", expires_at: null },
   ]);

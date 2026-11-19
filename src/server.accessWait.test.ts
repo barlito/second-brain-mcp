@@ -48,7 +48,7 @@ const requestAccess = async (sid: string, project: string) => {
   return { text: r.text, id: /Request id: ([0-9a-f-]{36})/.exec(r.text)![1] };
 };
 const sessionRowId = (sid: string): string => (db.prepare("SELECT id FROM sessions WHERE sid_hash = ?").get(sessions.hashSid(sid)) as { id: string }).id;
-const approve = (id: string) => access.approveRequest(id, { code: (db.prepare("SELECT code FROM access_requests WHERE id = ?").get(id) as { code: string }).code, actor: "admin:test" });
+const approve = (id: string) => access.approveRequest(id, { actor: "admin:test" });
 const expireIn = (id: string, ms: number) => db.prepare("UPDATE access_requests SET expires_at = ? WHERE id = ?").run(new Date(Date.now() + ms).toISOString(), id);
 const stillWaiting = async (p: Promise<unknown>): Promise<boolean> => Promise.race([p.then(() => false), sleep(60).then(() => true)]);
 const owner = (session: string, ip = "ip-a") => ({ session, ip });
@@ -315,10 +315,9 @@ test("events: the payload is the status word and nothing else", async () => {
   await st.read(/data: pending/);
   approve(id);
   const body = await st.read(/never/);
-  const code = (db.prepare("SELECT code FROM access_requests WHERE id = ?").get(id) as { code: string }).code;
   const lines = body.split("\n").filter((l) => l && !l.startsWith(": ") && !l.startsWith("retry:"));
   assert.deepEqual(lines, ["event: status", "data: pending", "event: status", "data: approved"]);
-  for (const secret of [code, s, "sse-leak", "meta", "read", "sp:"]) assert.equal(body.includes(secret), false, secret);
+  for (const secret of [s, "sse-leak", "meta", "read", "sp:"]) assert.equal(body.includes(secret), false, secret);
 });
 
 test("events: unknown and malformed ids get the same 404", async () => {

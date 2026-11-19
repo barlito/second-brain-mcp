@@ -190,6 +190,10 @@ export const MIGRATIONS: ReadonlyArray<Migration> = [
       CREATE INDEX idx_access_requests_session ON access_requests(session_id);
     `);
   } },
+  // Token-less access requests are approved by id: the verification code is gone.
+  { tables: ["access_requests"], up: (d) => {
+    d.exec("ALTER TABLE access_requests DROP COLUMN code");
+  } },
 ];
 
 // Applies migration index `v` under BEGIN IMMEDIATE. user_version is re-read inside the

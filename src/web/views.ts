@@ -327,7 +327,7 @@ export function accessView(ctx: Ctx, pending: PendingRequest[], sessions: Active
     ctx,
     "/access",
     "Access requests",
-    html`${pageHead("Access", "Clients connected without a token ask for access to a project. Match the code the agent shows you, adjust the scopes if needed, then approve. Nothing is granted until you do.")}
+    html`${pageHead("Access", "Clients connected without a token ask for access to a project. Check the client and the reason, adjust the scopes if needed, then approve. Nothing is granted until you do.")}
 ${bannerView(banner)}
 <h2>Pending requests</h2>
 ${
@@ -353,8 +353,6 @@ ${r.exceeds ? html`<div class="banner err" role="alert"><strong>scopes exceed th
 ${csrfField(ctx)}
 <div class="stack"><label class="lbl" for="scopes-${r.id}">Scopes <span class="hint">(one per line; leave as is to grant the default; write includes read)</span></label>
 <textarea class="field" id="scopes-${r.id}" name="scopes" spellcheck="false" rows="4">${r.requested_scopes.map(formatScope).join("\n")}</textarea></div>
-<div class="stack"><label class="lbl" for="code-${r.id}">Request code <span class="hint">(the 6 characters your agent showed you in the chat; deliberately not displayed here)</span></label>
-<input class="field w420" type="text" id="code-${r.id}" name="code" maxlength="6" required autocomplete="off" spellcheck="false"></div>
 <div class="actions"><button class="btn btn-primary" type="submit">Approve</button></div>
 </form>
 <form method="post" action="/access/${r.id}/deny" class="actions" data-confirm="Deny this request?">

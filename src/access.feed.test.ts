@@ -69,7 +69,7 @@ test("approve, deny and a successful session revoke notify; a failed revoke does
   let n = 0;
   const off = access.onAccessChange(() => n++);
   try {
-    access.approveRequest(a.id, { actor: "t", code: a.code });
+    access.approveRequest(a.id, { actor: "t" });
     assert.equal(n, 1);
     access.denyRequest(d.id, "t");
     assert.equal(n, 2);

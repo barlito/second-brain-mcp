@@ -22,11 +22,7 @@ let mkApp: (anon?: Partial<import("./rateLimit").AnonLimits>) => Promise<Awaited
 let masterToken: string;
 let KEY: string;
 let keys: typeof import("./auth/connectorKeys");
-// Approving by id needs the typed code (what the admin does on the card).
-const approve = (ref: string, opts: Omit<Parameters<typeof access.approveRequest>[1], "code"> & { code?: string }) => {
-  const row = db.prepare("SELECT code FROM access_requests WHERE id = ?").get(ref) as { code: string } | undefined;
-  return access.approveRequest(ref, { code: row?.code, ...opts });
-};
+const approve = (...a: Parameters<typeof access.approveRequest>) => access.approveRequest(...a);
 
 const INIT = {
   jsonrpc: "2.0",
@@ -81,7 +77,6 @@ function request(sid: string, space: string, project: string, access = "write"):
   return call(sid, "kb_request_access", { space, project, access, reason: "work on it" });
 }
 const reqId = (text: string): string => /Request id: ([0-9a-f-]{36})/.exec(text)![1];
-const reqCode = (text: string): string => /Code: ([A-Z0-9]{6})/.exec(text)![1];
 const sidRow = (sid: string) => db.prepare("SELECT * FROM sessions WHERE sid_hash = ?").get(sessions.hashSid(sid)) as { id: string; last_seen_at: string } | undefined;
 const headSha = (): string => git(["rev-parse", "HEAD"], vault).trim();
 
@@ -226,12 +221,11 @@ test("request -> pending -> approve -> read; read grant cannot write; default sc
   assert.match(r.text, /Do not wait for the user to come back by message.*wait_seconds=50.*until approved, denied or expired/);
   assert.match(r.text, /kb_access_status/);
   const id = reqId(r.text);
-  const code = reqCode(r.text);
   assert.match((await call(sid, "kb_access_status", { request_id: id })).text, /^pending/);
   // Still no access.
   assert.equal((await call(sid, "kb_read", { space: "sp", project: "proj-a", section: "notes", note: "n1" })).isError, true);
 
-  const d = approve(code, { actor: "admin:test" });
+  const d = approve(id, { actor: "admin:test" });
   assert.deepEqual(d.scopes.map((s) => `${s.space}:${s.project}:${s.section}:${s.permission}`), ["meta:*:*:read", "sp:proj-a:*:read"]);
   assert.equal(d.tokenName, "session-claude-code-sp-proj-a");
   const st = await call(sid, "kb_access_status", { request_id: id });
@@ -827,17 +821,12 @@ test("explicit scopes only: space/project/access optional, card and grant name c
   assert.equal(access.grantLabel([{ space: "meta", project: "*", section: "*", permission: "read" }, { space: "sp", project: "*", section: "*", permission: "read" }]), "sp-all");
 });
 
-test("approval needs the typed code when approving by id; a code reference is its own proof", async () => {
+test("approval needs the request id only; the response carries no code", async () => {
   const sid = await connect();
-  const id = reqId((await request(sid, "sp", "proj-a", "read")).text);
-  const code = (db.prepare("SELECT code FROM access_requests WHERE id = ?").get(id) as { code: string }).code;
-  assert.throws(() => access.approveRequest(id, { actor: "t" }), /Type the request code/);
-  assert.throws(() => access.approveRequest(id, { actor: "t", code: "AAAAAA" }), /Type the request code/);
-  assert.equal(sessions.listGrants(sidRow(sid)!.id).length, 0);
-  assert.equal(access.approveRequest(id, { actor: "t", code: ` ${code.toLowerCase()} ` }).scopes.length, 2);
-  const id2 = reqId((await request(sid, "sp", "proj-b", "read")).text);
-  const code2 = (db.prepare("SELECT code FROM access_requests WHERE id = ?").get(id2) as { code: string }).code;
-  assert.ok(access.approveRequest(code2, { actor: "t" }));
+  const r = await request(sid, "sp", "proj-a", "read");
+  assert.doesNotMatch(r.text, /code/i);
+  assert.equal(access.approveRequest(reqId(r.text), { actor: "t" }).scopes.length, 2);
+  assert.throws(() => access.approveRequest("ABCDEF", { actor: "t" }), /not found/);
 });
 
 test("token-less calls are rate limited per session and per client (429), without affecting Bearer", async () => {
@@ -1016,27 +1005,14 @@ test("anonymous body cap: 32 KB with a connector key", async () => {
   assert.match(((await r.json()) as any).error.message, /32 KB/);
 });
 
-test("no audit row ever contains a request code (request, repeat, elevation, approve, deny)", async () => {
+test("elevation request and deny are audited; auth-failure summary is flushed once", async () => {
   const sid = await connect();
-  const codes: string[] = [];
   const r1 = await request(sid, "sp", "code-a", "read");
-  codes.push(reqCode(r1.text));
-  const again = await request(sid, "sp", "code-a", "read");
-  codes.push(reqCode(again.text));
   approve(reqId(r1.text), { actor: "admin:x" });
   const el = await request(sid, "sp", "code-a", "write");
-  codes.push(reqCode(el.text));
   approve(reqId(el.text), { actor: "admin:x" });
   const el2 = await request(sid, "sp", "code-b", "read");
-  codes.push(reqCode(el2.text));
   access.denyRequest(reqId(el2.text), "admin:x");
-  assert.match(r1.text, /Show them this code/);
-  const dump = JSON.stringify(db.prepare("SELECT * FROM audit_log").all());
-  for (const c of codes) assert.equal(dump.includes(c), false, `code ${c} leaked into the audit log`);
-  for (const action of ["access_approve", "access_elevation_request", "access_elevation_approve", "access_elevation_deny", "access_deny", "kb_request_access"]) {
-    // Every action above was produced at least once in this file (elevation deny/approve in this test).
-    void action;
-  }
   assert.ok(db.prepare("SELECT 1 FROM audit_log WHERE action = 'access_elevation_request'").get());
   assert.ok(db.prepare("SELECT 1 FROM audit_log WHERE action = 'access_elevation_deny'").get());
   const { authAuditBudget, flushAuthAudit } = await import("./authFailure");

@@ -77,12 +77,10 @@ export function createAdminApp(vaultRoot: string, lifecycle?: Lifecycle): Expres
   };
 
   // Token-less session access requests (CLI: access-list / access-approve / access-deny).
-  const REF_RE = /^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[A-Za-z0-9]{6})$/;
+  const REF_RE = /^(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/;
   app.get("/admin/access", (req, res, next) => {
     try {
-      // Codes are what proves the admin read the agent's chat: hidden unless asked for.
-      const withCodes = req.query.codes === "1";
-      res.json({ requests: listPendingRequests().map((r) => (withCodes ? r : { ...r, code: undefined })), sessions: listActiveSessions() });
+      res.json({ requests: listPendingRequests(), sessions: listActiveSessions() });
     } catch (err) {
       next(err);
     }
@@ -90,9 +88,8 @@ export function createAdminApp(vaultRoot: string, lifecycle?: Lifecycle): Expres
   app.post("/admin/access/:ref/approve", (req, res, next) => {
     try {
       const ref = req.params.ref as string;
-      if (!REF_RE.test(ref)) return void res.status(400).json({ error: "invalid request id or code" });
-      const b = (req.body ?? {}) as { scope?: unknown; allowWildcard?: unknown; code?: unknown };
-      if (b.code !== undefined && typeof b.code !== "string") return void res.status(400).json({ error: "code must be a string" });
+      if (!REF_RE.test(ref)) return void res.status(400).json({ error: "invalid request id" });
+      const b = (req.body ?? {}) as { scope?: unknown; allowWildcard?: unknown };
       if (b.scope !== undefined && typeof b.scope !== "string") return void res.status(400).json({ error: "scope must be a string" });
       if (b.allowWildcard !== undefined && typeof b.allowWildcard !== "boolean") return void res.status(400).json({ error: "allowWildcard must be a boolean" });
       let scopes;
@@ -101,7 +98,7 @@ export function createAdminApp(vaultRoot: string, lifecycle?: Lifecycle): Expres
       } catch (err) {
         return void res.status(400).json({ error: errorMessage(err) });
       }
-      const d = approveRequest(ref, { scopes, allowWildcard: b.allowWildcard === true, code: b.code as string | undefined, actor: CLI_ACTOR });
+      const d = approveRequest(ref, { scopes, allowWildcard: b.allowWildcard === true, actor: CLI_ACTOR });
       res.json({ ok: true, ...d });
     } catch (err) {
       fail(res, next, err);
@@ -110,7 +107,7 @@ export function createAdminApp(vaultRoot: string, lifecycle?: Lifecycle): Expres
   app.post("/admin/access/:ref/deny", (req, res, next) => {
     try {
       const ref = req.params.ref as string;
-      if (!REF_RE.test(ref)) return void res.status(400).json({ error: "invalid request id or code" });
+      if (!REF_RE.test(ref)) return void res.status(400).json({ error: "invalid request id" });
       res.json({ ok: true, ...denyRequest(ref, CLI_ACTOR) });
     } catch (err) {
       fail(res, next, err);

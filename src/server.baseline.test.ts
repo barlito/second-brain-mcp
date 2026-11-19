@@ -210,8 +210,7 @@ test("baseline + grant: scopes add up, and a meta read the grant does not cover 
   const { sid } = await connect(base);
   const h = anon(base, sid);
   const req = await call(base, h, "kb_request_access", { space: "sp", project: "proj-a", access: "read", reason: "work" });
-  const code = /Code: ([A-Z0-9]{6})/.exec(req.text)![1];
-  access.approveRequest(code, { actor: "admin:test", scopes: [{ space: "sp", project: "proj-a", section: "*", permission: "read" }] });
+  access.approveRequest(/Request id: ([0-9a-f-]{36})/.exec(req.text)![1], { actor: "admin:test", scopes: [{ space: "sp", project: "proj-a", section: "*", permission: "read" }] });
   const a = await call(base, h, "kb_read", { space: "sp", project: "proj-a", section: "notes", note: "n1" });
   assert.equal(a.isError, false, a.text);
   const m = await call(base, h, "kb_read", { space: "meta", project: "profil", section: "notes", note: "outils" });

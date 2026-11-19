@@ -34,7 +34,7 @@ export const register: RegisterTool = (server) => {
         "Give the space and project you work on, read or write, and a clear reason. Nothing is granted until the user approves the request in the admin web: ask them to. " +
         WAIT_RULE + " " +
         "You can request again later in the same session to get more (another project, read to write, or an explicit scopes list); each approval adds to what you already have, a denial changes nothing. Only the user grants and can revoke access. " +
-        "Returns a request id and a short code to show to the user. " +
+        "Returns a request id. " +
         RELEASE_HINT,
       inputSchema: {
         space: spaceArg.optional().describe("Space slug (with project and access; optional when scopes is given)"),
@@ -61,8 +61,8 @@ export const register: RegisterTool = (server) => {
           return {
             toolResult: toolText(
               `Access requested${created ? "" : " (already pending)"}: ${requestedOf(request).map(formatScope).join(", ")}.\n` +
-                `Request id: ${request.id}\nCode: ${request.code}\n` +
-                `Ask the user to approve it in the admin web (Access requests page). Show them this code: they type it in the admin to approve.\nEvents URL: ${eventsUrl(request.id)}\n${WAIT_RULE} ` +
+                `Request id: ${request.id}\n` +
+                `Ask the user to approve it in the admin web (Access page).\nEvents URL: ${eventsUrl(request.id)}\n${WAIT_RULE} ` +
                 `The request expires in ${mins} minutes.`,
             ),
             audit: { detail: `${created ? "request" : "repeat"} ${access ?? "scopes"} ${request.id}` },
