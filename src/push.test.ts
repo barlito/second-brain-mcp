@@ -246,3 +246,56 @@ test("a throwing sender and a throwing listener never break createAccessRequest"
     db.prepare("DELETE FROM push_subscriptions").run();
   }
 });
+
+test("proposal notifications: payload format, clipping, one send per proposal", async () => {
+  db.prepare("DELETE FROM push_subscriptions").run();
+  const inbox = await import("./inbox");
+  const r = recorder();
+  const svc = push.createPushService({ secret: "secret-b", send: r.send });
+  svc.add(sub(1), "alice");
+  const off = push.attachInboxPush(svc);
+  try {
+    const id = "20260101T120000Z-abc123";
+    inbox.emitInboxEvent({ type: "created", proposal: { id, target: "sp/pj/notes/idea", proposedBy: "tok-a", reason: "worth keeping", created: "2026-01-01T12:00:00Z" } });
+    await tick();
+    assert.equal(r.sent.length, 1);
+    assert.deepEqual(r.sent[0].payload, { tag: id, title: "New proposal", body: "tok-a: sp/pj/notes/idea · worth keeping", url: `/inbox/${id}` });
+    assert.equal(r.sent[0].topic, id);
+
+    inbox.emitInboxEvent({ type: "created", proposal: { id, target: "sp/pj/notes/idea", proposedBy: "tok-a", reason: "x".repeat(500), created: "" } });
+    await tick();
+    const body = r.sent[1].payload.body as string;
+    assert.equal(body.length, 140);
+    assert.ok(body.endsWith("…"));
+  } finally {
+    off();
+    db.prepare("DELETE FROM push_subscriptions").run();
+  }
+});
+
+test("a failing push never breaks emitInboxEvent", async (t) => {
+  t.mock.method(console, "warn", () => {});
+  db.prepare("DELETE FROM push_subscriptions").run();
+  const inbox = await import("./inbox");
+  const svc = push.createPushService({
+    secret: "secret-b",
+    send: () => {
+      throw new Error("sync boom");
+    },
+  });
+  svc.add(sub(1), "alice");
+  const off = push.attachInboxPush(svc);
+  const broken = push.attachInboxPush({
+    sendToAll: () => {
+      throw new Error("sync boom");
+    },
+  } as unknown as import("./push").PushService);
+  try {
+    inbox.emitInboxEvent({ type: "created", proposal: { id: "20260101T120000Z-abc123", target: "a/b/c/d", proposedBy: "t", reason: "r", created: "" } });
+    await tick();
+  } finally {
+    off();
+    broken();
+    db.prepare("DELETE FROM push_subscriptions").run();
+  }
+});

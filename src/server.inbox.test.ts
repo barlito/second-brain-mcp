@@ -481,3 +481,27 @@ test("list reads only a bounded head, handles oversized files, and caps the list
   assert.equal(after.truncated, false);
   await drain();
 });
+
+test("kb_propose emits one inbox event on success, none on quota error, and a failing listener does not break it", async () => {
+  const { onInboxEvent } = await import("./inbox");
+  const { createToken } = await import("./auth/tokens");
+  const seen: Array<{ id: string; target: string; proposedBy: string; reason: string; created: string }> = [];
+  const off = onInboxEvent((e) => void seen.push(e.proposal));
+  const offBad = onInboxEvent(() => {
+    throw new Error("listener boom");
+  });
+  process.env.INBOX_MAX_PER_TOKEN = "1";
+  try {
+    const t = createToken("tok-evt", [{ space: "sp", project: "pj", section: "*", permission: "propose" }]).token;
+    const ok = await propose(t, { note: "evt1" });
+    assert.equal(ok.isError, false, ok.text);
+    assert.deepEqual(seen, [{ id: ok.text, target: "sp/pj/notes/evt1", proposedBy: "tok-evt", reason: "worth keeping", created: seen[0]?.created }]);
+    assert.equal((await propose(t, { note: "evt2" })).isError, true);
+    assert.equal(seen.length, 1);
+    await drain();
+  } finally {
+    delete process.env.INBOX_MAX_PER_TOKEN;
+    off();
+    offBad();
+  }
+});
