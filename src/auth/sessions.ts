@@ -41,6 +41,7 @@ export interface SessionRow {
   id: string;
   client_name: string;
   client_version: string;
+  agent: string | null;
   remote_ip: string | null;
   ip_key: string | null;
   connector_key_id: string | null;
@@ -208,6 +209,7 @@ export interface ActiveSession {
   id: string;
   client_name: string;
   client_version: string;
+  agent: string | null; // latest self-declared label of its access requests
   remote_ip: string | null;
   created_at: string;
   last_seen_at: string;
@@ -226,6 +228,7 @@ export function listActiveSessions(): ActiveSession[] {
       id: r.id,
       client_name: r.client_name,
       client_version: r.client_version,
+      agent: r.agent ?? null,
       remote_ip: r.remote_ip,
       created_at: r.created_at,
       last_seen_at: r.last_seen_at,

@@ -2,7 +2,7 @@
 // granted anything. They touch the DB only (never the vault).
 import { z } from "zod";
 import { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import { accessLimits, AccessError, accessStatus, createAccessRequest, MAX_REASON_CHARS, parseScopeStrings, requestedOf, UUID_RE } from "../access";
+import { accessLimits, AGENT_RE, AccessError, accessStatus, createAccessRequest, MAX_AGENT_CHARS, MAX_REASON_CHARS, parseScopeStrings, requestedOf, UUID_RE } from "../access";
 import { MAX_WAIT_SECONDS, waitForDecision } from "../accessWait";
 import { mcpUrl } from "../mcpCommand";
 import { ipKey } from "../rateLimit";
@@ -31,7 +31,7 @@ export const register: RegisterTool = (server) => {
       description:
         "Ask the user for access when you are connected without a token (kb_* then answer \"No access for this session\"; some read access, usually the meta space, may be open to every session without a request), or for more access when you already have some. " +
         "Do NOT request up front: work without the knowledge base when you do not need it, and call this only when you actually need it. " +
-        "Give the space and project you work on, read or write, and a clear reason. Nothing is granted until the user approves the request in the admin web: ask them to. " +
+        "Give the space and project you work on, read or write, and a clear reason, plus `agent`: a short label naming you (harness, project, task) so the user can tell your session apart when reviewing or revoking. Nothing is granted until the user approves the request in the admin web: ask them to. " +
         WAIT_RULE + " " +
         "You can request again later in the same session to get more (another project, read to write, or an explicit scopes list); each approval adds to what you already have, a denial changes nothing. Only the user grants and can revoke access. " +
         "Returns a request id. " +
@@ -51,12 +51,18 @@ export const register: RegisterTool = (server) => {
           .min(1, "must not be empty")
           .max(MAX_REASON_CHARS, `too long (max ${MAX_REASON_CHARS} characters)`)
           .describe("Why you need this access, shown to the user"),
+        agent: z
+          .string()
+          .max(MAX_AGENT_CHARS, `too long (max ${MAX_AGENT_CHARS} characters)`)
+          .regex(AGENT_RE, "lowercase a-z, 0-9, single hyphens")
+          .optional()
+          .describe(`Label identifying you to the user, lowercase slug (a-z, 0-9, hyphens, max ${MAX_AGENT_CHARS}): harness, project, task, e.g. claude-code-carapp-php-patch. Names your grants; keep it the same for the whole session`),
       },
     },
-    async ({ space, project, access, reason, scopes }): Promise<CallToolResult> =>
+    async ({ space, project, access, reason, scopes, agent }): Promise<CallToolResult> =>
       auditedCall("kb_request_access", { space, project }, sessionGate, async (ctx) => {
         try {
-          const { request, created } = createAccessRequest(ctx.session!.id, { space, project, access, reason, scopes }, ctx.session!.allowRequest);
+          const { request, created } = createAccessRequest(ctx.session!.id, { space, project, access, reason, scopes, agent }, ctx.session!.allowRequest);
           const mins = Math.round(accessLimits().ttlMs / 60_000);
           return {
             toolResult: toolText(

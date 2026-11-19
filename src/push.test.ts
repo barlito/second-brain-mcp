@@ -191,6 +191,12 @@ test("access events: a created request sends the payload with its TTL and topic;
     access.auditSessionRevoke("admin:alice", s.id, true);
     await tick();
     assert.equal(r.sent.length, 3);
+
+    // A label is quoted after the client name (self-declared, client stays first).
+    const s2 = sessions.createSession({ clientName: "Claude Code", clientVersion: "1", ip: "203.0.113.9" });
+    access.createAccessRequest(s2.id, { space: "pro", project: "zeta", access: "read", reason: "why", agent: "claude-code-zeta" });
+    await tick();
+    assert.equal(r.sent[3].payload.body, 'Claude Code "claude-code-zeta" · read pro/zeta');
   } finally {
     off();
     db.prepare("DELETE FROM push_subscriptions").run();

@@ -344,6 +344,68 @@ test("access request validation", async () => {
   assert.equal((db.prepare("SELECT COUNT(*) c FROM access_requests r JOIN sessions s ON s.id = r.session_id WHERE s.sid_hash = ?").get(sessions.hashSid(sid)) as { c: number }).c, 0);
 });
 
+test("agent label: validated, stored on the request, listed, and names the grant", async () => {
+  const sid = await connect();
+  const bad = async (agent: unknown): Promise<void> => {
+    const r = await call(sid, "kb_request_access", { space: "sp", project: "proj-a", access: "read", reason: "r", agent });
+    assert.equal(r.isError, true, JSON.stringify(agent));
+    assert.match(r.text, /agent/, JSON.stringify(agent));
+  };
+  await bad("");
+  await bad("Claude Code");
+  await bad("a--b");
+  await bad("-a");
+  await bad("x".repeat(49));
+
+  const r = await call(sid, "kb_request_access", { space: "sp", project: "proj-a", access: "read", reason: "r", agent: "claude-code-carapp-php-patch" });
+  assert.equal(r.isError, false, r.text);
+  const id = reqId(r.text);
+  const pending = access.listPendingRequests().find((p) => p.id === id);
+  assert.equal(pending?.agent, "claude-code-carapp-php-patch");
+
+  const d = approve(id, { actor: "admin:test" });
+  assert.equal(d.tokenName, "session-claude-code-carapp-php-patch-sp-proj-a");
+  const live = sessions.listActiveSessions().find((s) => s.id === sidRow(sid)!.id);
+  assert.equal(live?.agent, "claude-code-carapp-php-patch");
+  assert.equal(live?.client_name, "Claude Code");
+
+  // Without a label the grant keeps the client-derived name.
+  const other = await connect();
+  const d2 = approve(reqId((await request(other, "sp", "proj-b", "read")).text), { actor: "admin:test" });
+  assert.equal(d2.tokenName, "session-claude-code-sp-proj-b");
+  assert.equal(sessions.listActiveSessions().find((s) => s.id === sidRow(other)!.id)?.agent, null);
+});
+
+test("agent label: set on approval only, a denied or pending label never rewrites the session's", async () => {
+  const sid = await connect();
+  const sess = sidRow(sid)!.id;
+  const label = () => (db.prepare("SELECT agent FROM sessions WHERE id = ?").get(sess) as { agent: string | null }).agent;
+  const ask = async (project: string, agent: string) => reqId((await call(sid, "kb_request_access", { space: "sp", project, access: "read", reason: "r", agent })).text);
+  const a = await ask("proj-a", "label-a");
+  assert.equal(label(), null, "creating a request does not label the session");
+  approve(a, { actor: "admin:test" });
+  assert.equal(label(), "label-a");
+  const denied = await ask("proj-b", "label-b");
+  const pending = await ask("proj-c", "label-b");
+  access.denyRequest(denied, "admin:test");
+  assert.equal(label(), "label-a");
+  assert.ok(pending);
+  approve(pending, { actor: "admin:test" });
+  assert.equal(label(), "label-b");
+});
+
+test("agent label: a 48-char label keeps the project in the grant name; an omitted label dedupes against any pending label", async () => {
+  const sid = await connect();
+  const long = `${"a".repeat(31)}-${"b".repeat(16)}`;
+  const id = reqId((await call(sid, "kb_request_access", { space: "sp", project: "proj-a", access: "read", reason: "r", agent: long })).text);
+  const again = await request(sid, "sp", "proj-a", "read");
+  assert.equal(reqId(again.text), id, "retry without the label returns the labelled pending request");
+  assert.equal(access.listPendingRequests().filter((p) => p.session_id === sidRow(sid)!.id).length, 1);
+  const d = approve(id, { actor: "admin:test" });
+  assert.equal(d.tokenName, `session-${"a".repeat(31)}-sp-proj-a`);
+  assert.ok(d.tokenName.length <= 64);
+});
+
 test("a token holder gets a clear refusal from the access tools", async () => {
   const r = await bearerCall("kb_request_access", { space: "sp", project: "p", access: "read", reason: "r" });
   assert.equal(r.isError, true);

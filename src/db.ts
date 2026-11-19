@@ -215,6 +215,13 @@ export const MIGRATIONS: ReadonlyArray<Migration> = [
       );
     `);
   } },
+  // Self-declared agent label (kb_request_access `agent`): on the request, and the latest one on its session.
+  { tables: [], up: (d) => {
+    d.exec(`
+      ALTER TABLE access_requests ADD COLUMN agent TEXT;
+      ALTER TABLE sessions ADD COLUMN agent TEXT;
+    `);
+  } },
 ];
 
 // Applies migration index `v` under BEGIN IMMEDIATE. user_version is re-read inside the
