@@ -5,6 +5,7 @@ import { randomUUID } from "node:crypto";
 import * as webpush from "web-push";
 import { db } from "./db";
 import { onAccessRequestEvent, requestedOf, type RequestRow } from "./access";
+import { onInboxEvent, type ProposalHead } from "./inbox";
 import { seal, unseal } from "./auth/sealed";
 
 export const DEFAULT_PUSH_SUBJECT = "https://github.com/barlito/second-brain-mcp";
@@ -206,6 +207,25 @@ export function attachAccessPush(push: PushService): () => void {
       const who = request.agent ? `${me?.client_name ?? "unknown client"} "${request.agent}"` : (me?.client_name ?? "unknown client");
       const ttl = (Date.parse(request.expires_at) - Date.now()) / 1000;
       void push.sendToAll(requestPayload(request, who), ttl, request.id.replace(/-/g, ""));
+    } catch (err) {
+      console.warn(`push: notification failed (${err instanceof Error ? err.name : "error"})`);
+    }
+  });
+}
+
+// ---- proposal notifications ------------------------------------------------------------------
+
+const PROPOSAL_TTL_SECONDS = 24 * 3600;
+
+export function proposalPayload(p: ProposalHead): { tag: string; title: string; body: string; url: string } {
+  return { tag: p.id, title: "New proposal", body: clip(`${p.proposedBy}: ${p.target} · ${p.reason}`, 140), url: `/inbox/${p.id}` };
+}
+
+// Same guarantees as attachAccessPush: kb_propose never sees an error from here.
+export function attachInboxPush(push: PushService): () => void {
+  return onInboxEvent(({ proposal }) => {
+    try {
+      void push.sendToAll(proposalPayload(proposal), PROPOSAL_TTL_SECONDS, proposal.id);
     } catch (err) {
       console.warn(`push: notification failed (${err instanceof Error ? err.name : "error"})`);
     }

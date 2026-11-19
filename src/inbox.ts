@@ -43,6 +43,24 @@ export interface Proposal {
 
 export type ProposalHead = Omit<Proposal, "content">;
 
+export type InboxEvent = { type: "created"; proposal: ProposalHead };
+const eventListeners = new Set<(e: InboxEvent) => void>();
+
+export function onInboxEvent(fn: (e: InboxEvent) => void): () => void {
+  eventListeners.add(fn);
+  return () => void eventListeners.delete(fn);
+}
+
+export function emitInboxEvent(e: InboxEvent): void {
+  for (const fn of [...eventListeners]) {
+    try {
+      fn(e);
+    } catch {
+      /* a broken listener must not break the caller */
+    }
+  }
+}
+
 export function isValidInboxId(id: unknown): id is string {
   return typeof id === "string" && ID_RE.test(id);
 }

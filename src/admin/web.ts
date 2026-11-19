@@ -22,7 +22,7 @@ import type { SafeHtml } from "../web/html";
 import { CSS, JS, THEME_JS } from "../web/assets";
 import { ICON_192_B64, ICON_512_B64 } from "../web/icons";
 import { MANIFEST, SW_JS } from "../web/pwa";
-import { attachAccessPush, createPushService, parseSubscription, PushError, type PushService } from "../push";
+import { attachAccessPush, attachInboxPush, createPushService, parseSubscription, PushError, type PushService } from "../push";
 import {
   Banner,
   Ctx,
@@ -732,6 +732,7 @@ export async function startWebAdmin(
     });
     const s = await listen(app, port);
     attachAccessPush(push);
+    attachInboxPush(push);
     console.log(`web admin listening on port ${port} (behind Traefik + Authelia only)`);
     return s;
   } catch (err) {

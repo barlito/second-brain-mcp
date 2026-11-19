@@ -2,6 +2,7 @@ import { z } from "zod";
 import { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import {
   assertInboxQuota,
+  emitInboxEvent,
   InboxFullError,
   inboxPath,
   MAX_PROPOSAL_FILE_BYTES,
@@ -64,6 +65,7 @@ export const register: RegisterTool = (server, { vaultRoot }) => {
             mustNotExist: true,
             precheck: () => assertInboxQuota(vaultRoot, ctx.name),
           });
+          emitInboxEvent({ type: "created", proposal: { id, target, proposedBy: ctx.name, reason, created: now.toISOString() } });
           // A fresh proposal file always commits; null (nothing committed) must not borrow HEAD's sha.
           return { toolResult: toolText(id), audit: { gitCommit: commitSha || undefined, detail: `proposal ${id}` } };
         } catch (err) {
