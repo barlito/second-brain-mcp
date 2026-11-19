@@ -231,3 +231,54 @@ export async function noteAt(vaultRoot: string, t: NoteRef, hash: string, atPath
   }
   return out.length > MAX_SHOW_CHARS ? { content: out.slice(0, MAX_SHOW_CHARS), truncated: true } : { content: out, truncated: false };
 }
+
+// Unified diff from the version at commit `hash` to the current one (hunks only, git's own output).
+export async function noteDiff(vaultRoot: string, t: NoteRef, hash: string): Promise<{ diff: string; truncated: boolean }> {
+  if (!HASH_RE.test(hash)) throw new AdminError(404, "not found");
+  const abs = resolve(vaultRoot, t);
+  const { entries } = await noteHistory(vaultRoot, abs, MAX_HISTORY_SCAN);
+  const e = entries.find((x) => x.hash === hash);
+  if (!e) throw new AdminError(404, "note not found at this commit");
+  let out: string;
+  try {
+    // Both operands start with a sha or HEAD, so neither can be read as an option.
+    out = await runGit(["diff", "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames", `${hash}:./${e.path}`, `HEAD:./${t.space}/${t.project}/${t.section}/${t.note}.md`, "--"], vaultRoot);
+  } catch {
+    throw new AdminError(404, "note not found at this commit");
+  }
+  const at = out.indexOf("\n@@");
+  const hunks = at < 0 ? "" : out.slice(at + 1);
+  return hunks.length > MAX_SHOW_CHARS ? { diff: hunks.slice(0, MAX_SHOW_CHARS), truncated: true } : { diff: hunks, truncated: false };
+}
+
+// Writes the version at commit `hash` as the new current content, through the same rules as a
+// web edit. Returns null when it is identical to the current note (nothing committed).
+export async function restoreNote(vaultRoot: string, t: NoteRef, hash: string, user: string): Promise<string | null> {
+  const old = await noteAt(vaultRoot, t, hash);
+  if (old.truncated) throw new AdminError(422, "that version is too large to restore");
+  const content = old.content.replace(/\r\n?/g, "\n");
+  checkContent(t, content);
+  const abs = resolve(vaultRoot, t);
+  let previous: Buffer | null = null;
+  try {
+    const { commitSha } = await syncWriteBuilt(vaultRoot, abs, (prev) => ((previous = prev), withFrontmatter(t, user, content, prev)), `web restore: ${t.space}/${t.project}/${t.section}/${t.note} to ${hash.slice(0, 7)} by ${user}`, {
+      precheck: async () => {
+        let cur;
+        try {
+          cur = await readFileNoFollow(abs, MAX_READ_BYTES);
+        } catch {
+          throw new AdminError(404, "note not found");
+        }
+        if (!cur || !Buffer.from(cur.content, "utf8").equals(cur.raw)) throw new AdminError(422, NOT_UTF8_MESSAGE);
+      },
+      check: (next) => {
+        if (previous?.equals(Buffer.from(next, "utf8"))) return;
+        assertSpaceLimits(vaultRoot, t, Buffer.byteLength(next, "utf8"));
+      },
+    });
+    return commitSha;
+  } catch (err) {
+    if (err instanceof NoteRuleError) throw new AdminError(422, err.message);
+    throw err;
+  }
+}

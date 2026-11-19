@@ -3,7 +3,7 @@
 An MCP server that exposes a git-backed, Obsidian-compatible knowledge-base vault to Claude and other agents. Access is gated by Bearer tokens with hierarchical space/project/section `read`, `write` and `propose` scopes (stored in SQLite), and every call is audit-logged.
 
 - Transport: stateless Streamable HTTP at `POST /mcp` (TypeScript, Express 5, MCP SDK).
-- Thirteen tools: ten vault tools (`kb_read`, `kb_write`, `kb_edit`, `kb_append`, `kb_archive`, `kb_list`, `kb_search`, `kb_history`, `kb_init_project`, `kb_propose`) and three access tools for token-less sessions (`kb_request_access`, `kb_access_status`, `kb_release_access`).
+- Fourteen tools: eleven vault tools (`kb_read`, `kb_write`, `kb_edit`, `kb_append`, `kb_archive`, `kb_unarchive`, `kb_list`, `kb_search`, `kb_history`, `kb_init_project`, `kb_propose`) and three access tools for token-less sessions (`kb_request_access`, `kb_access_status`, `kb_release_access`).
 - Admin: a [web admin UI](#web-admin-ui) behind Traefik + Authelia (tokens, access requests, proposals inbox, vault browser, audit log) and `make` targets for tokens, access requests and the inbox.
 - Clients can also connect [without a token](#connecting-without-a-token) and ask the user for access, which the user approves in the admin.
 - Deployed with Docker Swarm (`docker stack deploy`, driven by the Makefile) behind the [traefik-base](https://github.com/barlito/traefik-base) stack (network `traefik_traefik_proxy`).
@@ -118,10 +118,10 @@ All note-addressed tools take `space`, `project`, `section`, `note` (strings, ma
 
 ### `kb_read`
 
-- Args: `space`, `project`, `section`, `note`; optional `tail` (integer 1-500).
+- Args: `space`, `project`, `section`, `note`; optional `tail` (integer 1-500); optional `rev` (7-40 lowercase hex, a sha from `kb_history`).
 - Permission: `read` on the section.
-- Returns the note as text. With `tail`, only the last N lines (a trailing newline is not counted as a line). Use it for recent journal history. A second text block `version: <sha>` is the note's version, the git blob SHA-1 of the file bytes (as `git hash-object`), also for `tail` reads; pass it as `base_version` to `kb_write`/`kb_edit`.
-- Errors: `Note not found.`; `Note is too large to read (<n> bytes, max 2097152).` (only for files that did not come through `kb_write`, e.g. pushed by a human).
+- Returns the note as text. With `tail`, only the last N lines (a trailing newline is not counted as a line). Use it for recent journal history. With `rev`, the note as it was at that commit, at the same path (permission is still `read` on the current section; `tail` works too). A second text block `version: <sha>` is the version of the bytes returned (the git blob SHA-1, as `git hash-object`; for `rev`, that revision's blob), also for `tail` reads; pass it as `base_version` to `kb_write`/`kb_edit`.
+- Errors: `Note not found.`; `Unknown revision.`; `Note not found at this revision.`; `Note is too large to read (<n> bytes, max 2097152).` (only for files that did not come through `kb_write`, e.g. pushed by a human).
 
 ### `kb_write`
 
@@ -155,6 +155,13 @@ All note-addressed tools take `space`, `project`, `section`, `note` (strings, ma
 - Moves `<space>/<project>/<section>/<note>` to `<space>/<project>/archive/<section>-<note>` (a `-2`, `-3`, ... suffix is appended if the name is taken, up to 50 tries; long names are truncated to stay a valid slug) and returns the new location, e.g. `pro/myproj/archive/notes-old-idea`. The move is a git commit, so history is kept.
 - There is no delete tool: archive instead.
 - Errors: `Note is already archived.` (section is `archive`); `The project entry note (overview/index) cannot be archived.`; `Note not found.`; `Note has uncommitted changes in the vault; commit or discard them first.`; `Too many archived notes with this name.`
+
+### `kb_unarchive`
+
+- Args: `space`, `project`, `archived` (slug of the note inside `archive`, e.g. `notes-old-idea`), `section`, `note` (destination).
+- Permission: `write` on `<space>:<project>:archive` AND `write` on the destination section (`Permission denied.` otherwise).
+- Moves `<space>/<project>/archive/<archived>` to `<space>/<project>/<section>/<note>` in one git commit (`kb_unarchive: ... via <token>`) and returns the new location, e.g. `pro/myproj/decisions/old-idea`. The note keeps its content; the destination rules apply (3 KB cap for `overview/index`, space limits).
+- Errors: `Note not found.`; `A note already exists at the destination.`; ``Section `archive` is managed by kb_archive and cannot be written directly.`` (destination `archive`); `Note has uncommitted changes in the vault; commit or discard them first.`; the `overview/index` and space-limit errors of `kb_write`.
 
 ### `kb_list`
 
@@ -213,7 +220,7 @@ Returned with `isError: true`:
 | Message | Cause |
 |---------|-------|
 | `Permission denied.` | Token has no scope covering that space/project/section/permission. Deliberately does not reveal whether the project exists. |
-| `Note not found.` | `kb_read`, `kb_edit`, `kb_archive` or `kb_history` on a missing note. |
+| `Note not found.` | `kb_read`, `kb_edit`, `kb_archive`, `kb_unarchive` or `kb_history` on a missing note. |
 | `Conflict: the note changed since you read it (current version <v>). Re-read it, merge your changes and retry.` | `kb_write`/`kb_edit` with a `base_version` that no longer matches (`Conflict: the note no longer exists.` if the note is gone). |
 | `Invalid space/project/section/note name.` | A name does not match the slug rules. |
 | `Path not allowed.` | Path-safety check failed (escape from the vault root, symlink, not a regular file). |
@@ -333,7 +340,7 @@ make inbox-reject id=<id>                # remove the proposal
 - Tokens: list (expiry, active/expired/revoked); create with a preset or scopes (one per line) and an optional expiry (no wildcard checkbox: the summary flags broad access and the wildcard warnings are listed after creation); the plaintext is shown once on a one-time page; revoke. Audit actions `admin_token_create`/`admin_token_revoke`, actor `admin:<user>`.
 - Inbox: list, view a proposal rendered or raw, accept (optionally overwriting) or reject.
 - Access requests: pending requests from token-less sessions (client, IP, requested project/scopes, reason, age, the session's current grants, an "elevation" label), approve with editable scopes (no wildcard checkbox: a risk badge, "Whole vault" or "Broad", names the wildcard scopes on the card, and the warnings are listed after approval) or deny; active sessions with revoke. Audit actions `access_approve`/`access_deny`/`access_revoke` and `access_elevation_request`/`_approve`/`_deny`. The dashboard shows the pending count.
-- Vault browser: browse spaces/projects/sections/notes, view, edit (optimistic concurrency: the form carries a hash of the version it loaded; if the note changed meanwhile the save is refused with a conflict instead of overwriting), create, archive, history, and view a note at a past commit. Archived notes are read-only. Writes go through the same write lock as the tools; commits `web: edit|create|archive <space>/<project>/<section>/<note> by <user>`; audit actions `web_note_create`/`web_note_edit`/`web_note_archive`, actor `web:<user>`.
+- Vault browser: browse spaces/projects/sections/notes, view, edit (optimistic concurrency: the form carries a hash of the version it loaded; if the note changed meanwhile the save is refused with a conflict instead of overwriting), create, archive, history, view a note at a past commit, diff it against the current version (unified diff, escaped) and restore it ("Restore this version": a POST with the usual CSRF/nonce checks, same rules as an edit; restoring identical content commits nothing). Archived notes are read-only and cannot be restored into. Writes go through the same write lock as the tools; commits `web: edit|create|archive <space>/<project>/<section>/<note> by <user>` and `web restore: <space>/<project>/<section>/<note> to <short sha> by <user>`; audit actions `web_note_create`/`web_note_edit`/`web_note_archive`/`web_note_restore`, actor `web:<user>`.
 - Audit viewer: read-only, newest first, 50 rows per page, exact-match filters on token name and action.
 
 Trust model:
@@ -463,7 +470,7 @@ Release, deploy, rollback and DB restore operator targets (`deploy.prod`, `db.ba
 
 ## Git sync
 
-- Every write (`kb_write`, `kb_append`, `kb_archive`, `kb_init_project`, `kb_propose`, inbox accept/reject, web edit/create/archive) goes through the same locked path: it pulls (rebase) first, writes atomically and commits locally, and returns; a single background pusher then pushes (with retries), so a slow or dead remote never holds up later writes. If the remote is unreachable, writes still commit locally; after a network error the pre-write pull is skipped for 60 s and the push is retried later. At most `VAULT_WRITE_QUEUE_MAX` writes (default 50) may wait for the lock; beyond that a write fails at once with `Vault is busy, retry in a moment.`
+- Every write (`kb_write`, `kb_append`, `kb_archive`, `kb_unarchive`, `kb_init_project`, `kb_propose`, inbox accept/reject, web edit/create/archive/restore) goes through the same locked path: it pulls (rebase) first, writes atomically and commits locally, and returns; a single background pusher then pushes (with retries), so a slow or dead remote never holds up later writes. If the remote is unreachable, writes still commit locally; after a network error the pre-write pull is skipped for 60 s and the push is retried later. At most `VAULT_WRITE_QUEUE_MAX` writes (default 50) may wait for the lock; beyond that a write fails at once with `Vault is busy, retry in a moment.`
 - A periodic sync (every `VAULT_SYNC_INTERVAL_MS`, default 60 s; `0` disables it) pulls remote changes and pushes leftover local commits.
 - With no `VAULT_REMOTE_URL` the vault is a local-only repo (the local-dev case).
 - Conflict (before the write): if the remote changed the same note(s) as unsynced local work and this is detected during the pull that precedes a write, the full local state is saved on a backup branch `conflict/<timestamp>` (pushed best-effort), the working branch is reset to the remote, and each unsynced local commit is re-applied in order: only the commits that actually conflict stay parked on the backup branch (if none do, the branch is deleted). The triggering write fails with a `Conflict: ...` message naming the conflicting note(s) (paths the token cannot read are only counted) and saying it was not applied. Re-read the note and retry. Every such conflict gets a `sync_conflict` audit row listing the parked commits.

@@ -8,6 +8,7 @@ import { register as registerKbAccess } from "./tools/kbAccess";
 import { register as registerKbAppend } from "./tools/kbAppend";
 import { register as registerKbArchive } from "./tools/kbArchive";
 import { register as registerKbEdit } from "./tools/kbEdit";
+import { register as registerKbUnarchive } from "./tools/kbUnarchive";
 import { register as registerKbHistory } from "./tools/kbHistory";
 import { register as registerKbInitProject } from "./tools/kbInitProject";
 import { register as registerKbPropose } from "./tools/kbPropose";
@@ -27,6 +28,7 @@ const TOOLS: RegisterTool[] = [
   registerKbEdit,
   registerKbAppend,
   registerKbArchive,
+  registerKbUnarchive,
   registerKbList,
   registerKbSearch,
   registerKbHistory,

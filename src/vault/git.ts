@@ -1131,6 +1131,8 @@ export function syncMove(
   fromAbs: string,
   toAbs: string,
   commitMessage: string,
+  // Runs inside the lock once source and target are checked; throwing refuses the move.
+  precheck?: () => void | Promise<void>,
 ): Promise<{ commitSha: string; to: string }> {
   return withLock(vaultRoot, async () => {
     assertSafePath(vaultRoot, fromAbs);
@@ -1139,6 +1141,7 @@ export function syncMove(
 
     if (!existsSync(fromAbs)) throw new MoveSourceMissingError(`source not found: ${fromAbs}`);
     if (lstatOrNull(toAbs)) throw new MoveTargetExistsError(`target exists: ${toAbs}`);
+    await precheck?.();
 
     const fromRel = path.relative(vaultRoot, fromAbs);
     const toRel = path.relative(vaultRoot, toAbs);
@@ -1594,4 +1597,36 @@ export async function noteHistory(
     if (created || entries.length >= limit) break;
   }
   return { path: rel, entries, restricted };
+}
+
+export type RevisionRead = { ok: true; content: string; version: string } | { ok: false; reason: "unknown-rev" | "missing" | "too-large"; size?: number };
+
+// Read-only (no vault lock): the note's bytes at commit `rev` (7-40 lowercase hex, checked by the
+// caller), at the same vault-relative path. Size is checked before the content is fetched.
+export async function readNoteAtRevision(vaultRoot: string, absolutePath: string, rev: string, maxBytes: number): Promise<RevisionRead> {
+  assertSafePath(vaultRoot, absolutePath);
+  if (!/^[0-9a-f]{7,40}$/.test(rev)) return { ok: false, reason: "unknown-rev" };
+  const rel = path.relative(path.resolve(vaultRoot), path.resolve(absolutePath)).split(path.sep).join("/");
+  let commit: string;
+  try {
+    commit = (await runGit(["rev-parse", "--verify", "--end-of-options", `${rev}^{commit}`], vaultRoot)).trim();
+  } catch {
+    return { ok: false, reason: "unknown-rev" };
+  }
+  const obj = `${commit}:./${rel}`; // starts with a hex sha: never an option
+  let size: number;
+  try {
+    size = Number((await runGit(["cat-file", "-s", obj], vaultRoot)).trim());
+  } catch {
+    return { ok: false, reason: "missing" };
+  }
+  if (!Number.isFinite(size)) return { ok: false, reason: "missing" };
+  if (size > maxBytes) return { ok: false, reason: "too-large", size };
+  try {
+    // The blob id is the note version (same as noteVersion of these bytes); read by id so both match.
+    const version = (await runGit(["rev-parse", "--verify", obj], vaultRoot)).trim();
+    return { ok: true, content: await runGit(["cat-file", "blob", version], vaultRoot), version };
+  } catch {
+    return { ok: false, reason: "missing" };
+  }
 }
