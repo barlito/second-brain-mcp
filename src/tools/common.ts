@@ -292,7 +292,7 @@ const noAccessAudit = new Coalescer();
 export const SESSION_ONLY_ACTIONS: ReadonlySet<string> = new Set(["kb_request_access", "kb_access_status", "kb_release_access"]);
 // Read-only tools a session without any grant may also call when it holds baseline scopes (each still
 // applies its own ACL gate). A new tool is refused to such sessions until it is listed here.
-export const BASELINE_READ_ACTIONS: ReadonlySet<string> = new Set(["kb_read", "kb_read_many", "kb_context", "kb_list", "kb_search", "kb_history"]);
+export const BASELINE_READ_ACTIONS: ReadonlySet<string> = new Set(["kb_read", "kb_read_many", "kb_context", "kb_list", "kb_search", "kb_history", "kb_backlinks", "kb_lint"]);
 
 export const INVALID_NAME = "Invalid space/project/section/note name.";
 export const PERMISSION_DENIED = "Permission denied.";
