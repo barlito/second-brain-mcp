@@ -49,7 +49,7 @@ export function vaultRouter(d: VaultDeps): express.Router {
     const actor = `web:${res.locals.user as string}`;
     safeAudit({ tokenId: actor, tokenName: actor, action, ...t, result, detail, gitCommit }, actor);
   };
-  const reasonOf = (err: unknown): string => (err instanceof AdminError ? err.message : clientMessage(err));
+  const reasonOf = (err: unknown): string => (err instanceof AdminError ? err.detail : clientMessage(err));
   const userOf = (res: Response): string => res.locals.user as string;
 
   // Maps a failure to an error page; anything unexpected goes to the generic 500 handler.

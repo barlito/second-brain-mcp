@@ -2,7 +2,7 @@ import { resolveNotePath } from "../vault/paths";
 import { NoteExistsError, syncWriteBuilt } from "../vault/git";
 import { noteVersion } from "../vault/noteVersion";
 import { MAX_CONTENT_CHARS, NO_CHANGES_MESSAGE, NOTE_NOT_UTF8_MESSAGE, toolError, toolText, ToolRunResult } from "./common";
-import { NoteRuleError, validateNoteContent } from "./conventions";
+import { assertNoSecret, NoteRuleError, validateNoteContent } from "./conventions";
 import { assertSpaceLimits, SpaceLimitError } from "../limits";
 import { normalizeNote, searchView, utcToday } from "./frontmatter";
 
@@ -62,6 +62,8 @@ export async function writeNote(
           throw new NoteRuleError(NOTE_NOT_UTF8_MESSAGE, "note not utf-8");
         }
         const raw = typeof content === "function" ? content(existing) : content;
+        // Before frontmatter is added, so the reported line matches what the client sent or read.
+        assertNoSecret(raw);
         final =
           author === undefined ? raw : normalizeNote(raw, { section: target.section, author, today: utcToday(), existing });
         if (guardShrink && existing !== null) assertNoShrink(target.section, existing, final);

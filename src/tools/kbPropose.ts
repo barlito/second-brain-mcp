@@ -12,7 +12,7 @@ import {
 } from "../inbox";
 import { syncWrite } from "../vault/git";
 import { kbArgsShape, MAX_CONTENT_CHARS, RegisterTool, registerKbTool, toolError, toolText, withAclAndAudit } from "./common";
-import { NoteRuleError, validateNoteContent } from "./conventions";
+import { assertNoSecret, NoteRuleError, validateNoteContent } from "./conventions";
 import { rejectReservedSection } from "./reserved";
 
 export const register: RegisterTool = (server, { vaultRoot }) => {
@@ -44,6 +44,8 @@ export const register: RegisterTool = (server, { vaultRoot }) => {
         const reserved = rejectReservedSection(section);
         if (reserved) return reserved;
         try {
+          assertNoSecret(content);
+          assertNoSecret(reason);
           validateNoteContent({ section, note }, content);
         } catch (err) {
           if (err instanceof NoteRuleError) return { toolResult: toolError(err.message), audit: { detail: err.detail } };

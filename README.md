@@ -267,6 +267,10 @@ kb_write  pro/myproj/decisions/queue-choice  content=...  # durable "why" as its
 
 (Written as `space/project/section/note` for brevity; the tools take them as separate arguments.)
 
+### Secret guard
+
+`kb_write`, `kb_edit`, `kb_append`, `kb_propose` (content and reason), `kb_init_project`, inbox accept and the web admin (create, edit, restore) refuse content that contains an obvious secret, because the vault is a git repository pushed to a remote and a secret would stay in its history. Only distinctive shapes are detected: GitHub tokens (`ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_`, `github_pat_`), Anthropic (`sk-ant-`) and OpenAI project (`sk-proj-`) keys, AWS access key ids (`AKIA`/`ASIA`), PEM private key headers (`-----BEGIN ... PRIVATE KEY-----`), Slack tokens (`xox?-`), Google API keys (`AIza`), Stripe live keys (`sk_live_`, `rk_live_`) and this server's own tokens (`sb_`) and connector keys (`sbk_`). There is no override: write placeholders instead (e.g. `ghp_…`, `sk-ant-...`).
+
 ### Client-facing errors
 
 Returned with `isError: true`:
@@ -281,6 +285,7 @@ Returned with `isError: true`:
 | `Vault is busy, retry in a moment.` | A human (or other git process) is using the vault repo: a rebase in progress or a recent `index.lock`. Retry. |
 | `Conflict: this note was changed remotely. Your version was saved on branch <conflict/...>. Re-read the note and retry.` | See [Git sync](#git-sync). |
 | `Conflict: ... Your version was saved on branch (none). ...` | Uncommitted human changes in the vault conflicted with the remote and were put in `git stash`. See [Git sync](#git-sync). |
+| `Refused: the content looks like it contains a secret (<kind>, line <n>). Remove it: the vault is a git repository pushed to a remote, secrets would stay in its history.` | A write tool or `kb_propose` received content matching a [secret](#secret-guard) pattern. The secret is never echoed; the audit detail is `secret detected: <kind> line <n>`. |
 | `Proposal too large (max 576 KiB as UTF-8 including metadata).` | `kb_propose`: the proposal file (frontmatter + content) would exceed 576 KiB. |
 | `Too many pending proposals. Ask the user to review the inbox.` | `kb_propose`: per-token or total inbox quota reached. |
 | `Internal error.` | Anything else. Details are in the server log and the audit row only. |

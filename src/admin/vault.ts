@@ -8,7 +8,7 @@ import { isValidSlug, resolveNotePath, UnsafePathError } from "../vault/paths";
 import { NoteExistsError, noteHistory, NoteHistoryEntry, runGit, syncWriteBuilt } from "../vault/git";
 import { normalizeNote, utcToday } from "../tools/frontmatter";
 import { MAX_CONTENT_CHARS } from "../tools/common";
-import { NoteRuleError, validateNoteContent } from "../tools/conventions";
+import { assertNoSecret, NoteRuleError, validateNoteContent } from "../tools/conventions";
 import { assertSpaceLimits } from "../limits";
 import { archiveNote } from "../tools/archiveNote";
 import { ARCHIVE_SECTION } from "../tools/reserved";
@@ -107,9 +107,10 @@ function checkContent(t: NoteRef, content: string): void {
   if (t.section === ARCHIVE_SECTION) throw new AdminError(422, "Section `archive` is managed by archiving and cannot be written directly.");
   if (content.length > MAX_CONTENT_CHARS) throw new AdminError(422, "content too large (max 512 KB)");
   try {
+    assertNoSecret(content);
     validateNoteContent(t, content);
   } catch (err) {
-    if (err instanceof NoteRuleError) throw new AdminError(422, err.message);
+    if (err instanceof NoteRuleError) throw new AdminError(422, err.message, err.detail);
     throw err;
   }
 }

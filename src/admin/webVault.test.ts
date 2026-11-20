@@ -198,6 +198,21 @@ test("edit: entry note cap -> 422 with the text kept; archive section is read-on
   assert.equal((await get("/vault/pro/x/archive/whatever/edit")).status, 404);
 });
 
+test("edit: a secret -> 422 with the text kept, no commit, audit without the secret", async () => {
+  const secret = "ghp_" + "a".repeat(36);
+  const content = `# Foo\nkey ${secret}\n`;
+  const before = lastSubject();
+  const f = await form(`${NOTE}/edit`, `${NOTE}/edit`);
+  const r = await post(`${NOTE}/edit`, { content, base: f.base! }, { nonce: f.nonce });
+  assert.equal(r.status, 422);
+  assert.match(r.body, /Refused: the content looks like it contains a secret \(GitHub token, line 2\)\. Remove it/);
+  assert.match(r.body, /key ghp_a+/, "text kept in the form");
+  assert.equal(lastSubject(), before);
+  const row = db.prepare("SELECT * FROM audit_log WHERE action = 'web_note_edit' ORDER BY id DESC LIMIT 1").get() as Record<string, string>;
+  assert.equal(row.result, "error");
+  assert.equal(row.detail, "secret detected: GitHub token line 2");
+});
+
 test("create: valid slug commits; invalid slug and duplicates are refused", async () => {
   const dir = "/vault/pro/x/notes";
   const ok = await post(`${dir}/_new`, { note: "fresh-note", content: "hi\r\nthere" }, { page: `${dir}/_new` });
