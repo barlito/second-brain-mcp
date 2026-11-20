@@ -1,10 +1,30 @@
+import { TokenContext } from "../auth/context";
 import { z } from "zod";
 import { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import { baseVersionArg, kbArgsShape, MAX_CONTENT_CHARS, RegisterTool, registerKbTool, withAclAndAudit } from "./common";
-import { AGENTS_SPACE_RULE, DOCS_MAP_RULE, ENTRY_NOTE_MAX_BYTES, RESERVED_SECTIONS_SUMMARY } from "./conventions";
-import { rejectReservedSection } from "./reserved";
+import { readFileNoFollow } from "../vault/enumerate";
+import { resolveNotePath } from "../vault/paths";
+import { baseVersionArg, canReadNotePath, kbArgsShape, MAX_CONTENT_CHARS, RegisterTool, registerKbTool, withAclAndAudit } from "./common";
+import { AGENTS_SPACE_RULE, DOCS_MAP_RULE, ENTRY_NOTE, ENTRY_NOTE_MAX_BYTES, OVERVIEW_SECTION, RESERVED_SECTIONS_SUMMARY } from "./conventions";
+import { MAX_READ_BYTES } from "./kbRead";
+import { ARCHIVE_SECTION, rejectReservedSection } from "./reserved";
 import { NOTE_TYPES } from "./frontmatter";
 import { writeNote } from "./writeNote";
+
+const NO_HINT_SECTIONS = new Set([OVERVIEW_SECTION, "journal", ARCHIVE_SECTION]);
+
+// Reminder to list a freshly created note in the Docs map; "" when not needed or on any error.
+async function docsMapHint(vaultRoot: string, ctx: TokenContext, t: { space: string; project: string; section: string; note: string }): Promise<string> {
+  if (NO_HINT_SECTIONS.has(t.section) || !canReadNotePath(ctx.scopes, `${t.space}/${t.project}/${OVERVIEW_SECTION}/${ENTRY_NOTE}.md`)) return "";
+  try {
+    const r = await readFileNoFollow(resolveNotePath(vaultRoot, t.space, t.project, OVERVIEW_SECTION, ENTRY_NOTE), MAX_READ_BYTES);
+    if (!r) return "";
+    // Backticked `name` or `section/name`, or a wikilink [[name]] / [[section/name|alias]].
+    const listed = new RegExp(`(\`|\\[\\[)([a-z0-9-]+/)?${t.note}(\`|[|#\\]])`).test(r.content);
+    return listed ? "" : `\nHint: add \`${t.section}/${t.note}\` to the Docs map of overview/index.`;
+  } catch {
+    return "";
+  }
+}
 
 export const register: RegisterTool = (server, { vaultRoot }) => {
   registerKbTool(
@@ -39,13 +59,16 @@ export const register: RegisterTool = (server, { vaultRoot }) => {
       withAclAndAudit("kb_write", { space, project, section, note }, "write", async (ctx) => {
         const reserved = rejectReservedSection(section);
         if (reserved) return reserved;
-        return writeNote(
+        const r = await writeNote(
           vaultRoot,
           { space, project, section, note },
           content,
           `kb_write: ${space}/${project}/${section}/${note} via ${ctx.name}`,
           { author: ctx.name, baseVersion: base_version, guardShrink: !allow_shrink },
         );
+        if (!r.created || r.toolResult.isError || !r.audit?.gitCommit) return r;
+        const hint = await docsMapHint(vaultRoot, ctx, { space, project, section, note });
+        return hint ? { ...r, toolResult: { content: [...r.toolResult.content, { type: "text", text: hint }] } } : r;
       }),
   );
 };

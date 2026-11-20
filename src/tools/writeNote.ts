@@ -1,7 +1,7 @@
 import { resolveNotePath } from "../vault/paths";
 import { NoteExistsError, syncWriteBuilt } from "../vault/git";
 import { noteVersion } from "../vault/noteVersion";
-import { MAX_CONTENT_CHARS, NO_CHANGES_MESSAGE, NOTE_NOT_UTF8_MESSAGE, toolError, toolText, ToolRunResult } from "./common";
+import { MAX_CONTENT_CHARS, NO_CHANGES_MESSAGE, NOTE_NOT_UTF8_MESSAGE, toolError, toolText, ToolRunResult, versionBlock } from "./common";
 import { assertNoSecret, NoteRuleError, validateNoteContent } from "./conventions";
 import { assertSpaceLimits, SpaceLimitError } from "../limits";
 import { normalizeNote, searchView, utcToday } from "./frontmatter";
@@ -47,17 +47,19 @@ export async function writeNote(
   // omitted = store verbatim (kb_init_project).
   // `baseVersion`: refuse if the note on disk differs. `guardShrink`: refuse a drastic body shrink.
   opts: { mustNotExist?: boolean; author?: string; baseVersion?: string; guardShrink?: boolean } = {},
-): Promise<ToolRunResult> {
+): Promise<ToolRunResult & { created?: boolean }> {
   try {
     const absolutePath = resolveNotePath(vaultRoot, target.space, target.project, target.section, target.note);
     const { author, baseVersion, guardShrink, ...writeOpts } = opts;
     let final = "";
+    let created = false;
     const { commitSha } = await syncWriteBuilt(
       vaultRoot,
       absolutePath,
       (prev) => {
         if (baseVersion !== undefined) assertBaseVersion(baseVersion, prev);
         const existing = prev ? prev.toString("utf8") : null;
+        created = prev === null;
         if (typeof content === "function" && prev && !Buffer.from(existing as string, "utf8").equals(prev)) {
           throw new NoteRuleError(NOTE_NOT_UTF8_MESSAGE, "note not utf-8");
         }
@@ -82,12 +84,12 @@ export async function writeNote(
         },
       },
     );
-    const version = author === undefined ? [] : [{ type: "text" as const, text: `version: ${noteVersion(Buffer.from(final, "utf8"))}` }];
+    const version = author === undefined ? [] : [versionBlock(noteVersion(Buffer.from(final, "utf8")))];
     // Identical content: nothing was committed; never report HEAD (someone else's commit) as ours.
     if (commitSha === null) {
       return { toolResult: { content: [toolText(NO_CHANGES_MESSAGE).content[0], ...version] }, audit: { detail: "no changes (content identical)" } };
     }
-    return { toolResult: { content: [toolText(commitSha).content[0], ...version] }, audit: { gitCommit: commitSha || undefined } };
+    return { toolResult: { content: [toolText(commitSha).content[0], ...version] }, audit: { gitCommit: commitSha || undefined }, created };
   } catch (err) {
     if (err instanceof SpaceLimitError && err.noteBytes && opts.mustNotExist) {
       // Creating from the template: the user cannot shorten it, the admin config is at fault.

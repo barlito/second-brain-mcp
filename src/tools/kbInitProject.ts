@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import { projectArg, RegisterTool, registerKbTool, spaceArg, withAclAndAudit } from "./common";
+import { projectArg, RegisterTool, registerKbTool, spaceArg, toolText, withAclAndAudit } from "./common";
 import {
   AGENTS_SPACE_RULE,
   DOCS_MAP_RULE,
@@ -38,13 +38,16 @@ export const register: RegisterTool = (server, { vaultRoot }) => {
         { space, project, section: OVERVIEW_SECTION, note: ENTRY_NOTE },
         "write",
         async (ctx) => {
-          return writeNote(
+          const r = await writeNote(
             vaultRoot,
             { space, project, section: OVERVIEW_SECTION, note: ENTRY_NOTE },
             entryNoteTemplate(project, summary, space),
             `kb_init_project: ${space}/${project} via ${ctx.name}`,
             { mustNotExist: true },
           );
+          const sha = r.toolResult.content[0];
+          if (r.toolResult.isError || sha.type !== "text") return r;
+          return { ...r, toolResult: toolText(`Created ${space}/${project}/${OVERVIEW_SECTION}/${ENTRY_NOTE} (commit ${sha.text}).`) };
         },
       ),
   );

@@ -13,6 +13,7 @@ import {
   registerKbTool,
   Target,
   ToolRunResult,
+  versionBlock,
   toolError,
   toolText,
   withAclAndAudit,
@@ -58,7 +59,7 @@ export async function readNote(vaultRoot: string, t: Target, tail?: number, with
   }
   const text = tail === undefined ? r.content : lastLines(r.content, tail);
   if (!withVersion) return { toolResult: toolText(text) };
-  return { toolResult: { content: [{ type: "text", text }, { type: "text", text: `version: ${noteVersion(r.raw)}` }] } };
+  return { toolResult: { content: [{ type: "text", text }, versionBlock(noteVersion(r.raw))] } };
 }
 
 export const register: RegisterTool = (server, { vaultRoot }) => {
@@ -68,7 +69,7 @@ export const register: RegisterTool = (server, { vaultRoot }) => {
     {
       description:
         "Read a note from the shared knowledge base vault. Pass `tail` (1-500) to get only the last N lines, e.g. recent journal history. " +
-        "A second block `version: <sha>` identifies the note as read: pass it as `base_version` to kb_write/kb_edit (it proves you saw the latest version, not the whole note: tail reads return it too). " +
+        "A second block `version: <sha>` (not part of the note) identifies the note as read: pass it as `base_version` to kb_write/kb_edit (it proves you saw the latest version, not the whole note: tail reads return it too). " +
         "Pass `rev` (a sha from kb_history) to read the note as it was at that commit (the version block is then that revision's).",
       inputSchema: {
         ...kbArgsShape,
@@ -92,7 +93,7 @@ export const register: RegisterTool = (server, { vaultRoot }) => {
           };
         }
         const text = tail === undefined ? r.content : lastLines(r.content, tail);
-        return { toolResult: { content: [{ type: "text", text }, { type: "text", text: `version: ${r.version}` }] } };
+        return { toolResult: { content: [{ type: "text", text }, versionBlock(r.version)] } };
       }),
   );
 };

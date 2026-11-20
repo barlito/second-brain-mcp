@@ -38,7 +38,7 @@ const edit = (note: string, edits: unknown[], extra: Record<string, unknown> = {
   call(token, "kb_edit", { ...at(note, section), edits, ...extra });
 const readNote = (note: string, extra: Record<string, unknown> = {}, section = "notes") =>
   call(tok, "kb_read", { ...at(note, section), ...extra });
-const versionOf = (r: { blocks: string[] }): string => r.blocks[1].replace("version: ", "");
+const versionOf = (r: { blocks: string[] }): string => r.blocks[1].replace("\nversion: ", "");
 const body = (n: number): string => "x".repeat(n);
 
 before(async () => {
@@ -138,17 +138,17 @@ test("kb_edit applies an edit to the body, keeps the frontmatter, bumps updated"
 test("kb_edit: frontmatter text is not editable, only the body", async () => {
   await write("fmt", "---\nsources: [https://x.test/1]\n---\nbody\n");
   const r = await edit("fmt", [{ old_str: "x.test", new_str: "y.test" }]);
-  assert.equal(r.blocks[0], "Edit 1: old_str not found.");
+  assert.equal(r.blocks[0], "Edit 1: old_str not found. Nothing was written.");
 });
 
 test("kb_edit errors: not found, several matches, empty old_str, nothing written", async () => {
   await write("m", "aa bb aa\ncc\n");
   const n = commits();
   assert.equal((await edit("missing-note", [{ old_str: "a", new_str: "b" }])).blocks[0], "Note not found.");
-  assert.equal((await edit("m", [{ old_str: "zz", new_str: "b" }])).blocks[0], "Edit 1: old_str not found.");
+  assert.equal((await edit("m", [{ old_str: "zz", new_str: "b" }])).blocks[0], "Edit 1: old_str not found. Nothing was written.");
   assert.equal(
     (await edit("m", [{ old_str: "aa", new_str: "b" }])).blocks[0],
-    "Edit 1: old_str matches 2 times; add surrounding text to make it unique.",
+    "Edit 1: old_str matches 2 times; add surrounding text to make it unique. Nothing was written.",
   );
   assert.match((await edit("m", [{ old_str: "", new_str: "b" }])).blocks[0], /Invalid argument `edits`/);
   assert.equal(commits(), n);
@@ -168,7 +168,7 @@ test("kb_edit applies edits in order and is all or nothing", async () => {
     { old_str: "beta", new_str: "BETA" },
     { old_str: "missing", new_str: "x" },
   ]);
-  assert.equal(bad.blocks[0], "Edit 2: old_str not found.");
+  assert.equal(bad.blocks[0], "Edit 2: old_str not found. Nothing was written.");
   assert.equal(read("sp/pj/notes/o.md"), before);
   assert.equal(commits(), n);
 });
@@ -186,7 +186,7 @@ test("kb_edit: identical result commits nothing", async () => {
   const r = await edit("same", [{ old_str: "keep", new_str: "keep" }]);
   assert.equal(r.isError, false);
   assert.equal(r.blocks[0], "No changes (content identical).");
-  assert.equal(r.blocks[1], `version: ${noteVersion(readFileSync(abs("sp/pj/notes/same.md")))}`);
+  assert.equal(r.blocks[1], `\nversion: ${noteVersion(readFileSync(abs("sp/pj/notes/same.md")))}`);
   assert.equal(commits(), n);
 });
 
@@ -225,7 +225,7 @@ test("kb_write and kb_edit descriptions stay well below the 4096 cut", async () 
 test("kb_edit counts overlapping matches as ambiguous", async () => {
   await write("ov", "aaa\n");
   const r = await edit("ov", [{ old_str: "aa", new_str: "b" }]);
-  assert.equal(r.blocks[0], "Edit 1: old_str matches 2 times; add surrounding text to make it unique.");
+  assert.equal(r.blocks[0], "Edit 1: old_str matches 2 times; add surrounding text to make it unique. Nothing was written.");
 });
 
 test("kb_edit refuses a result over the note size limit and oversized strings", async () => {
@@ -272,4 +272,40 @@ test("kb_edit and the shrink guard handle CRLF and BOM notes", async () => {
     const refused = await write(name, "tiny\r\n");
     assert.match(refused.blocks[0], /^This write would shrink the note body from \d{4} to 6 bytes/, name);
   }
+});
+
+test("kb_edit errors say nothing was written", async () => {
+  await write("nw", "aa bb aa\n");
+  const missing = await edit("nw", [{ old_str: "zz", new_str: "y" }]);
+  assert.equal(missing.blocks[0], "Edit 1: old_str not found. Nothing was written.");
+  const twice = await edit("nw", [{ old_str: "aa", new_str: "y" }]);
+  assert.match(twice.blocks[0], /^Edit 1: old_str matches 2 times; .* Nothing was written\.$/);
+});
+
+test("kb_write hints at the Docs map when it creates an unlisted note", async () => {
+  mkdirSync(abs("sp/pj/overview"), { recursive: true });
+  writeFileSync(abs("sp/pj/overview/index.md"), "# pj\n\n## Docs map\n\n- `notes/listed-a`: x\n- [[notes/listed-b]]\n");
+  git(["add", "-A"], vault);
+  git(["commit", "-qm", "seed overview"], vault);
+
+  const created = await write("hinted", "x\n");
+  assert.equal(created.blocks.length, 3);
+  assert.equal(created.blocks[2], "\nHint: add `notes/hinted` to the Docs map of overview/index.");
+  const again = await write("hinted", "y\n");
+  assert.equal(again.blocks.length, 2);
+
+  assert.equal((await write("listed-a", "x\n")).blocks.length, 2);
+  assert.equal((await write("listed-b", "x\n")).blocks.length, 2);
+  assert.equal((await write("jr", "x\n", {}, "journal")).blocks.length, 2);
+});
+
+test("kb_write gives no Docs map hint when the token cannot read overview", async () => {
+  const { createToken } = await import("./auth/tokens");
+  const blind = createToken("tok-blind", [
+    { space: "sp", project: "pj", section: "notes", permission: "read" },
+    { space: "sp", project: "pj", section: "notes", permission: "write" },
+  ]).token;
+  const r = await call(blind, "kb_write", { ...at("blind-note"), content: "x\n" });
+  assert.equal(r.isError, false);
+  assert.equal(r.blocks.length, 2);
 });
