@@ -10,6 +10,7 @@ import { db } from "./db";
 import { logAudit, logAuthFailure, MAX_FIELD_LEN } from "./audit";
 import { startAdmin, withAdmin } from "./admin";
 import { startWebAdmin } from "./admin/web";
+import { startSearchIndex } from "./vault/searchIndex";
 import { dbOk, getBootInfo, setBootInfo, vaultOk } from "./health";
 import { listen } from "./listen";
 import { parseAutoArchiveInterval, startAutoArchive } from "./autoArchive";
@@ -666,6 +667,7 @@ export async function start(): Promise<{ server: Server; shutdown: (signal?: str
   const intervalMs = intervalRaw === undefined || intervalRaw === "" ? 60_000 : Number(intervalRaw);
   const stopSync = intervalMs > 0 ? startPeriodicSync(vaultRoot, intervalMs) : undefined;
 
+  startSearchIndex(vaultRoot);
   const stopArchive = startAutoArchive(vaultRoot);
   const stopSessions = startSessionPruning();
 

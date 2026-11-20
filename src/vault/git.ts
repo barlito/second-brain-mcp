@@ -869,12 +869,24 @@ function withLock<T>(vaultRoot: string, fn: () => Promise<LockedResult<T>>, boun
       if (r.push) schedulePush(vaultRoot);
       return r.value;
     } finally {
+      await indexers.get(vaultRoot)?.();
       clearOpMarker(vaultRoot);
       if (bounded) queuedWrites--;
     }
   });
   queue = scheduled.catch(() => undefined);
   return scheduled;
+}
+
+// Per-vault callback run at the end of every lock turn (the search index syncs itself to HEAD).
+// Writes, pulls and recovery all move HEAD inside a turn, and the index diffs from its own
+// last-seen HEAD, so commits made outside the server are caught by the next turn too.
+// Cost: one rev-parse per turn. It must never throw: a stale index cannot fail a write.
+const indexers = new Map<string, () => Promise<void>>();
+
+export function setVaultIndexer(vaultRoot: string, fn: (() => Promise<void>) | null): void {
+  if (fn) indexers.set(vaultRoot, fn);
+  else indexers.delete(vaultRoot);
 }
 
 // Resolves once the lock queue and every background push are idle. With
