@@ -7,6 +7,7 @@ import {
   fsyncSync,
   lstatSync,
   mkdirSync,
+  rmdirSync,
   openSync,
   readdirSync,
   readFileSync,
@@ -198,7 +199,7 @@ function emitSyncEvent(e: SyncConflictEvent): void {
 
 // Only the exact subjects this server emits: "<tool>: <target> via <token name>".
 const TOKEN_SUBJECT_RE =
-  /^(?:kb_write|kb_edit|kb_append|kb_archive|kb_unarchive|kb_init_project|kb_propose|inbox accept): \S+ via ([A-Za-z0-9._-]{1,64})$/;
+  /^(?:(?:kb_write|kb_edit|kb_append|kb_archive|kb_unarchive|kb_init_project|kb_propose|inbox accept): \S+|kb_move: \S+ -> \S+) via ([A-Za-z0-9._-]{1,64})$/;
 
 // conflict/* branches that still exist locally; cached so status reads stay
 // cheap. Only the user deletes them.
@@ -1189,6 +1190,80 @@ export function syncMove(
     }
     return finishLocked(vaultRoot, remote, { commitSha, to: toAbs });
   });
+}
+
+export interface MovePlan<T> {
+  // Content of the note at its new path.
+  moved: string;
+  // Other notes to rewrite in the same commit (never the source or the target).
+  writes: Array<{ absolutePath: string; content: string }>;
+  info: T;
+}
+
+// Move + content changes in ONE commit, under the write lock. `plan` runs inside the lock after
+// the pull and the source checks; it gets a dirty test for the notes it wants to rewrite, and throws to refuse.
+export function syncMoveWithWrites<T>(
+  vaultRoot: string,
+  fromAbs: string,
+  toAbs: string,
+  plan: (isDirty: (absolutePath: string) => Promise<boolean>) => Promise<MovePlan<T>>,
+  commitMessage: string,
+): Promise<{ commitSha: string; info: T }> {
+  return withLock(vaultRoot, async () => {
+    assertSafePath(vaultRoot, fromAbs);
+    assertSafePath(vaultRoot, toAbs);
+    const remote = await prepareLocked(vaultRoot);
+    if (!existsSync(fromAbs)) throw new MoveSourceMissingError(`source not found: ${fromAbs}`);
+    if (lstatOrNull(toAbs)) throw new MoveTargetExistsError(`target exists: ${toAbs}`);
+    const fromRel = path.relative(vaultRoot, fromAbs);
+    const toRel = path.relative(vaultRoot, toAbs);
+    const dirty = async (rel: string) => (await runGit(["status", "--porcelain", "--", rel], vaultRoot)).trim() !== "";
+    // Untracked, staged-only or edited: the source must be exactly what HEAD has.
+    if (await dirty(fromRel)) throw new MoveSourceDirtyError(`source has uncommitted changes: ${fromRel}`);
+
+    const { moved, writes, info } = await plan((abs) => dirty(path.relative(vaultRoot, abs)));
+    for (const w of writes) {
+      assertSafePath(vaultRoot, w.absolutePath);
+      if (w.absolutePath === fromAbs || w.absolutePath === toAbs) throw new Error("move plan rewrites the moved note");
+    }
+    const rels = writes.map((w) => path.relative(vaultRoot, w.absolutePath));
+    const source = readFileSync(fromAbs);
+    const previous = writes.map((w) => (existsSync(w.absolutePath) ? readFileSync(w.absolutePath) : null));
+    const createdDirs = missingDirs(path.dirname(toAbs));
+    const headBefore = await headOrEmpty(vaultRoot);
+    try {
+      mkdirSync(path.dirname(toAbs), { recursive: true });
+      assertSafePath(vaultRoot, path.dirname(toAbs));
+      await runGit(["mv", "--", fromRel, toRel], vaultRoot);
+      writeNoteAtomic(vaultRoot, toAbs, moved);
+      for (const w of writes) writeNoteAtomic(vaultRoot, w.absolutePath, w.content);
+      await runGit(["add", "--", toRel, ...rels], vaultRoot);
+      await runGit(["commit", "-m", commitMessage, "--", fromRel, toRel, ...rels], vaultRoot);
+    } catch (err) {
+      if ((await headOrEmpty(vaultRoot)) === headBefore) {
+        await restoreNote(vaultRoot, fromAbs, fromRel, source);
+        await restoreNote(vaultRoot, toAbs, toRel, null);
+        for (let i = 0; i < writes.length; i++) await restoreNote(vaultRoot, writes[i].absolutePath, rels[i], previous[i]);
+        for (const dir of createdDirs) {
+          try {
+            rmdirSync(dir);
+          } catch {
+            /* not empty: something else landed there */
+          }
+        }
+        throw err;
+      }
+      console.error(`git move+write: error after commit landed, keeping it: ${errText(err)}`);
+    }
+    return finishLocked(vaultRoot, remote, { commitSha: await headOrEmpty(vaultRoot), info });
+  });
+}
+
+// Ancestors of `dir` that do not exist yet, deepest first.
+function missingDirs(dir: string): string[] {
+  const out: string[] = [];
+  for (let d = dir; !existsSync(d) && path.dirname(d) !== d; d = path.dirname(d)) out.push(d);
+  return out;
 }
 
 // System job (auto-archive): `select` runs inside the lock after the pull and returns the moves;
