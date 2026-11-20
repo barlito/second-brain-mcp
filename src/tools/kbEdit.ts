@@ -13,7 +13,8 @@ interface Edit {
   new_str: string;
 }
 
-const editError = (message: string): NoteRuleError => new NoteRuleError(message, message.replace(/^Edit \d+: /, "edit: "));
+const editError = (message: string): NoteRuleError =>
+  new NoteRuleError(`${message} Nothing was written.`, message.replace(/^Edit \d+: /, "edit: "));
 
 // Applies the edits in order, each on the result of the previous; all or nothing (throws NoteRuleError).
 export function applyEdits(text: string, edits: Edit[]): string {

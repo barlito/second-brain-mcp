@@ -62,6 +62,9 @@ export interface AuditExtra {
   gitCommit?: string;
 }
 
+// Leading newline: clients concatenate text blocks with no separator.
+export const versionBlock = (version: string) => ({ type: "text" as const, text: `\nversion: ${version}` });
+
 export interface ToolRunResult {
   toolResult: CallToolResult;
   audit?: AuditExtra;

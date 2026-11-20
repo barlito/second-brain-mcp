@@ -52,7 +52,7 @@ test("kb_init_project creates the entry note, then refuses a second call", async
   const args = { space: "sp", project: "pj", summary: "A test project." };
   const r = await callTool(baseUrl, tokenW, "kb_init_project", args);
   assert.equal(r.isError, false);
-  assert.match(r.text, /^[0-9a-f]{40}$/);
+  assert.match(r.text, /^Created sp\/pj\/overview\/index \(commit [0-9a-f]{40}\)\.$/);
   const body = readFileSync(join(vaultRoot, "sp/pj/overview/index.md"), "utf8");
   assert.match(body, /^# pj\n\nA test project\./);
   for (const s of ["decisions", "conventions", "notes", "journal", "archive"]) {
