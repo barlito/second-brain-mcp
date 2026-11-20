@@ -2,7 +2,7 @@ import { z } from "zod";
 import { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { resolveNotePath } from "../vault/paths";
 import { NoteNotUtf8Error, NoteTooLargeError, syncAppend } from "../vault/git";
-import { NoteRuleError, validateNoteContent } from "./conventions";
+import { assertNoSecret, NoteRuleError, validateNoteContent } from "./conventions";
 import { assertSpaceLimits } from "../limits";
 import {
   kbArgsShape,
@@ -63,6 +63,7 @@ export const register: RegisterTool = (server, { vaultRoot }) => {
             `kb_append: ${space}/${project}/${section}/${note} via ${ctx.name}`,
             MAX_CONTENT_CHARS,
             (next) => {
+              assertNoSecret(oneLine);
               validateNoteContent({ section, note }, next);
               assertSpaceLimits(vaultRoot, { space, project, section, note }, Buffer.byteLength(next, "utf8"));
             },

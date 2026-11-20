@@ -17,7 +17,7 @@ import {
 import { isValidSlug, resolveNotePath } from "../vault/paths";
 import { InboxInvalidError, InboxMissingError, NoteExistsError, redact, syncInboxResolve } from "../vault/git";
 import { errorMessage, MAX_CONTENT_CHARS, safeAudit } from "../tools/common";
-import { NoteRuleError, validateNoteContent } from "../tools/conventions";
+import { assertNoSecret, NoteRuleError, validateNoteContent } from "../tools/conventions";
 import { assertSpaceLimits } from "../limits";
 import { normalizeNote, utcToday } from "../tools/frontmatter";
 import { rejectReservedSection } from "../tools/reserved";
@@ -28,6 +28,7 @@ export class AdminError extends Error {
   constructor(
     readonly status: 404 | 409 | 413 | 422,
     message: string,
+    readonly detail: string = message,
   ) {
     super(message);
     this.name = "AdminError";
@@ -97,6 +98,8 @@ function validateAccept(raw: Buffer, id: string): { p: Proposal; t: NonNullable<
   const reserved = rejectReservedSection(t.section);
   if (reserved) throw new InboxInvalidError((reserved.toolResult.content[0] as { text: string }).text);
   if (p.content.length > MAX_CONTENT_CHARS) throw new InboxInvalidError("content too large (max 512 KB)");
+  assertNoSecret(p.content);
+  assertNoSecret(p.reason);
   validateNoteContent(t, p.content);
   return { p, t };
 }
@@ -141,7 +144,7 @@ export async function acceptProposal(vaultRoot: string, id: string, overwrite: b
     }
     if (err instanceof InboxMissingError) throw new AdminError(404, "proposal not found");
     if (err instanceof InboxInvalidError || err instanceof NoteRuleError) {
-      audit(actor, "inbox_accept", id, seen, "error", err.message);
+      audit(actor, "inbox_accept", id, seen, "error", err instanceof NoteRuleError ? err.detail : err.message);
       throw new AdminError(422, err.message);
     }
     audit(actor, "inbox_accept", id, seen, "error", redact(errorMessage(err)));

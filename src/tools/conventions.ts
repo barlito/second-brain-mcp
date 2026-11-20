@@ -1,4 +1,5 @@
 // KB organisation conventions: shared constants and the text shown to agents.
+import { findSecret } from "../vault/secrets";
 import { ARCHIVE_PURPOSE, ARCHIVE_SECTION } from "./reserved";
 
 export const OVERVIEW_SECTION = "overview";
@@ -27,6 +28,17 @@ export class NoteRuleError extends Error {
     super(message);
     this.name = "NoteRuleError";
   }
+}
+
+// Refuses content with an obvious secret; never echoes it (the vault is pushed to a remote).
+export function assertNoSecret(text: string): void {
+  const hit = findSecret(text);
+  if (!hit) return;
+  throw new NoteRuleError(
+    `Refused: the content looks like it contains a secret (${hit.kind}, line ${hit.line}). ` +
+      "Remove it: the vault is a git repository pushed to a remote, secrets would stay in its history.",
+    `secret detected: ${hit.kind} line ${hit.line}`,
+  );
 }
 
 // One rule set for every writer (kb_write, kb_init_project, kb_append); throws NoteRuleError.
