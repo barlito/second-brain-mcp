@@ -13,7 +13,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.2",
-    "better-sqlite3": "^13.1.1",
+    "better-sqlite3": "^13.2.0",
     "express": "^5.1.0",
     "markdown-it": "^15.0.3",
     "web-push": "^4.0.0",
