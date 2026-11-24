@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := help
-.PHONY: help deploy deploy.prod db.backup db.restore docker.service.update deploy.assert_image smoke.test deploy.prune prune-local-images undeploy restart logs token-create token-list token-revoke backup-db prune-audit inbox-list inbox-show inbox-accept inbox-reject access-list access-approve access-deny connector-key-create connector-key-show connector-key-list connector-key-revoke migrate-frontmatter
+.PHONY: help deploy deploy.prod deploy.update rollback db.backup db.restore docker.service.update deploy.assert_image smoke.test deploy.prune prune-local-images undeploy restart logs token-create token-list token-revoke backup-db prune-audit inbox-list inbox-show inbox-accept inbox-reject access-list access-approve access-deny connector-key-create connector-key-show connector-key-list connector-key-revoke migrate-frontmatter
 
 stack_name=second-brain-mcp
 service=second-brain-mcp
@@ -71,17 +71,57 @@ done; \
 echo "cannot inspect $(svc_full) to mark it: $$out" >&2; exit 1
 endef
 
-# Rolling stack deploy (never `stack rm`: a recreated service has nothing to roll back to).
-# Needs TAG + ADMIN_PROXY_SECRET + ADMIN_WEB_SECRET in the env; the image must be published.
+# Swarm secrets are immutable: the name carries a hash of the key, so a rotated GitHub secret
+# creates a new Swarm secret and the service rolls onto it (the mount path never changes).
+# Without VAULT_DEPLOY_KEY, an already existing secret can be named by VAULT_DEPLOY_KEY_SECRET.
+define ensure_vault_secret
+if [ -n "$$VAULT_DEPLOY_KEY" ]; then \
+  VAULT_DEPLOY_KEY_SECRET=vault_deploy_key_$$(printf '%s\n' "$$VAULT_DEPLOY_KEY" | sha256sum | cut -c1-16); \
+  if ! docker secret inspect "$$VAULT_DEPLOY_KEY_SECRET" >/dev/null 2>&1; then \
+    printf '%s\n' "$$VAULT_DEPLOY_KEY" | docker secret create "$$VAULT_DEPLOY_KEY_SECRET" - >/dev/null; \
+    echo "Secret $$VAULT_DEPLOY_KEY_SECRET created."; \
+  fi; \
+fi; \
+[ -n "$$VAULT_DEPLOY_KEY_SECRET" ] || { echo "VAULT_DEPLOY_KEY (or VAULT_DEPLOY_KEY_SECRET) is required" >&2; exit 1; }; \
+case "$$VAULT_DEPLOY_KEY_SECRET" in vault_deploy_key*) ;; *) echo "invalid VAULT_DEPLOY_KEY_SECRET" >&2; exit 1;; esac; \
+export VAULT_DEPLOY_KEY_SECRET
+endef
+
+# Rolling stack deploy (never stack removal: a recreated service has nothing to roll back to).
+# Needs TAG + ADMIN_PROXY_SECRET + ADMIN_WEB_SECRET + VAULT_DEPLOY_KEY in the env; the image must be published.
 # --detach=false waits for convergence (or Swarm's own rollback).
 deploy.prod: ## Deploy the whole prod stack (TAG=<release tag>): backup, stack deploy, assert, smoke, prune
 	@test -n "$(TAG)" || { echo "TAG is required (TAG=<tag> make deploy.prod)" >&2; exit 1; }
 	$(MAKE) db.backup
 	@$(call mark_service,$(mark_file))
-	$(call stack_deploy,-f docker-compose-prod.yml,--with-registry-auth --detach=false)
+	@$(ensure_vault_secret); $(call stack_deploy,-f docker-compose-prod.yml,--with-registry-auth --detach=false)
 	$(MAKE) deploy.assert_image
 	$(MAKE) smoke.test
 	$(MAKE) deploy.prune
+
+# Image-only rolling update: does not re-render the compose file (env, labels, secrets: use deploy.prod).
+deploy.update: ## Update the service image only (TAG=<release tag>): backup, update, assert, smoke, prune
+	@test -n "$(TAG)" || { echo "TAG is required (TAG=<tag> make deploy.update)" >&2; exit 1; }
+	$(MAKE) db.backup
+	$(MAKE) docker.service.update args="--image $(image_name):$(TAG) $(svc_full)"
+	$(MAKE) deploy.assert_image
+	$(MAKE) smoke.test
+	$(MAKE) deploy.prune
+
+# The safety backup is best effort. A Swarm rollback after scale-to-0 would restore replicas=0,
+# so any failure scales the service back to 1.
+rollback: ## Roll back to an image (TAG=<tag> [RESTORE=acl-<ts>.db] restores that DB backup first)
+	@test -n "$(TAG)" || { echo "TAG is required (TAG=<tag> make rollback)" >&2; exit 1; }
+	@case "$(RESTORE)" in ""|*.db) ;; *) echo "RESTORE must be a backup filename ending in .db" >&2; exit 1;; esac
+	$(MAKE) db.backup || echo "::warning::DB backup failed, rolling back without a fresh safety copy"
+	@trap 'rc=$$?; [ $$rc -eq 0 ] || docker service scale $(svc_full)=1' EXIT; \
+	if [ -n "$(RESTORE)" ]; then \
+	  docker service scale $(svc_full)=0; \
+	  $(MAKE) db.restore TAG=$(TAG) file=$(RESTORE); \
+	fi; \
+	$(MAKE) docker.service.update args="--replicas 1 --image $(image_name):$(TAG) $(svc_full)"; \
+	$(MAKE) deploy.assert_image; \
+	$(MAKE) smoke.test
 
 # Skipped silently when the service has no running task (first deploy).
 # ids= runs as its own command so a docker error aborts the recipe (no pipe, -e is on).

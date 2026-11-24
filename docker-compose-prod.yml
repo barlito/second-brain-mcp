@@ -8,12 +8,13 @@
 # the prod domain/TLS.
 #
 # Deployable once an image tagged TAG is published to Docker Hub
-# (`barlito/second-brain-mcp`, pushed by release.yaml when a GitHub Release is published)
+# (`barlito/second-brain-mcp`, pushed by the release workflow when a GitHub Release is published)
 # and the `vault_deploy_key` secret exists.
 # Images are referenced by immutable tag: `TAG=<tag> make deploy.prod`.
 #
 # Prerequisite (once): docker secret create vault_deploy_key <private key file>
-# (or a versioned name passed as VAULT_DEPLOY_KEY_SECRET, see docs/DEPLOY.md "Secret rotation")
+# (`make deploy.prod` derives a versioned name from VAULT_DEPLOY_KEY and exports it as
+# VAULT_DEPLOY_KEY_SECRET; see docs/DEPLOY.md "Secret rotation")
 services:
   second-brain-mcp:
     image: barlito/second-brain-mcp:${TAG:?TAG is required}
